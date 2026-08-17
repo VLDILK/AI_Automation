@@ -6,6 +6,7 @@ import sqlite3
 import urllib.error
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 
 import permissions as perm
 import webapp_server
@@ -1876,16 +1877,44 @@ class CoreDialogMixin:
             return None
         return perm.permission_denied_reply(capability)
 
+    # Задача користувача (2026-08-17): "додамо в налаштування ID чату, щоб
+    # через файл приєднувало тхт" - той самий принцип, що вже має "ТГ
+    # ключ" (client_app.py._read_telegram_token): шлях до .txt-файлу
+    # лежить у settings.json ("report_chat_id_file"), сам ID читається
+    # звідти ЩОРАЗУ свіжо (новий короткочасний SettingsStore, не кешується
+    # - той самий підхід, що вже виправив гонку в SettingsStore.set()) -
+    # можна змінити чат для дублю звітів БЕЗ нового релізу. Якщо файл не
+    # обрано/порожній/зіпсований - тихо повертається до старого
+    # захардкодженого paths.REPORT_BROADCAST_CHAT_ID, щоб нічого не
+    # зламалось для тих, хто ще не встиг обрати файл.
+    def _report_broadcast_chat_id(self):
+        try:
+            settings = SettingsStore(self.settings_path)
+        except OSError:
+            return REPORT_BROADCAST_CHAT_ID
+        chat_id_file = settings.get("report_chat_id_file")
+        if not chat_id_file:
+            return REPORT_BROADCAST_CHAT_ID
+        try:
+            text = Path(chat_id_file).read_text(encoding="utf-8-sig").strip()
+        except OSError:
+            return REPORT_BROADCAST_CHAT_ID
+        try:
+            return int(text)
+        except ValueError:
+            return REPORT_BROADCAST_CHAT_ID
+
     # Задача користувача (2026-08-17): "повідомлення з результатом виконаної
     # операції, має прийти ще й у інший чат" - дублює текст успішного
     # звіту приходу/продажу/списання/антисептирования у фіксовану групу
-    # (paths.REPORT_BROADCAST_CHAT_ID, знайдений через /chatid), з іменем
-    # співробітника попереду. try/except - навмисно широкий і мовчазний:
-    # це ДОДАТКОВЕ сповіщення понад основну відповідь користувачу, збій
-    # мережі/тимчасова недоступність групи НЕ повинні ламати чи затримувати
-    # саму операцію, яка вже успішно записана в БД.
+    # (знайдений через /chatid), з іменем співробітника попереду. try/
+    # except - навмисно широкий і мовчазний: це ДОДАТКОВЕ сповіщення понад
+    # основну відповідь користувачу, збій мережі/тимчасова недоступність
+    # групи НЕ повинні ламати чи затримувати саму операцію, яка вже
+    # успішно записана в БД.
     def _notify_report_broadcast(self, context, message_text):
-        if not REPORT_BROADCAST_CHAT_ID:
+        chat_id = self._report_broadcast_chat_id()
+        if not chat_id:
             return
         full_name = context.get("full_name") or "Неизвестный"
         try:
@@ -1900,7 +1929,7 @@ class CoreDialogMixin:
             # звіт у групу заразом прибирає будь-яку клавіатуру, якщо вона
             # там ще є.
             self._send_message(
-                REPORT_BROADCAST_CHAT_ID, f"<b>{html.escape(full_name)}</b>:\n{message_text}",
+                chat_id, f"<b>{html.escape(full_name)}</b>:\n{message_text}",
                 reply_markup={"remove_keyboard": True}, parse_mode="HTML",
             )
         except Exception:

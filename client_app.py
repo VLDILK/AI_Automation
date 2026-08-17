@@ -85,7 +85,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.52"
+__version__ = "0.2.53"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1249,6 +1249,29 @@ class ClientApp(ctk.CTk):
             wraplength=260,
         ).pack(fill="x", padx=(14, 10), pady=(0, 6))
         ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+        # Задача користувача (2026-08-17): "додамо в налаштування ID чату,
+        # щоб через файл приєднувало тхт" - REPORT_BROADCAST_CHAT_ID
+        # (paths.py) досі був захардкоджений у коді - зміна чату для
+        # дублю звітів вимагала правки коду й нового релізу. Той самий
+        # принцип, що й "ТГ ключ" вище - шлях до .txt-файлу зберігається в
+        # налаштуваннях, сам ID читається з нього щоразу свіжо
+        # (_notify_report_broadcast, telegram_dialog_core.py), а не один
+        # раз при старті. Якщо файл не обрано - лишається старий
+        # захардкоджений REPORT_BROADCAST_CHAT_ID як запасний варіант
+        # (paths.py), тож нічого не ламається для тих, хто ще не встиг
+        # обрати файл.
+        self._build_row_button(card, "document", "ID чата", self._choose_report_chat_id_file)
+        chat_id_file = self.settings.get("report_chat_id_file")
+        ctk.CTkLabel(
+            card,
+            text=chat_id_file if chat_id_file else "Файл с ID чата ещё не выбран (используется значение по умолчанию).",
+            font=("", 10),
+            text_color=COLOR_TEXT_MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=260,
+        ).pack(fill="x", padx=(14, 10), pady=(0, 6))
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
         self._build_row_button(card, "power", self._bot_toggle_label(), self._on_bot_toggle_row_clicked)
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
@@ -1361,6 +1384,22 @@ class ClientApp(ctk.CTk):
         self.settings.set("telegram_token_file", selected_file)
         self._open_settings_screen()
         self._on_restart_clicked()
+
+    # Той самий принцип, що й _choose_telegram_token_file вище - лише шлях
+    # до файлу зберігається в налаштуваннях, сам ID чату НЕ перечитується
+    # тут (не показується, не парситься) - фактичне читання/парсинг лише
+    # в _notify_report_broadcast (telegram_dialog_core.py), у момент
+    # реальної відправки звіту. Не вимагає перезапуску бота (на відміну
+    # від токена) - файл читається щоразу свіжо.
+    def _choose_report_chat_id_file(self):
+        selected_file = filedialog.askopenfilename(
+            title="Выберите txt-файл с ID чата для дублей отчётов",
+            filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+        )
+        if not selected_file:
+            return
+        self.settings.set("report_chat_id_file", selected_file)
+        self._open_settings_screen()
 
     # Задача користувача (2026-08-14, одразу після file-scoped-isolation
     # фікса): "давай тепер зробимо коли новий підключаємо файл щоб
