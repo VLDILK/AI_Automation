@@ -1,0 +1,545 @@
+:root {
+  --tg-bg: #ffffff;
+  --tg-text: #1a1a1a;
+  --tg-hint: #707579;
+  --tg-link: #2481cc;
+  --tg-button: #2481cc;
+  --tg-secondary-bg: #f4f4f5;
+  --field-border: #d8d8db;
+  --error: #d1242f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: var(--tg-viewport-stable-height, 100vh);
+  background: var(--custom-page-bg, var(--tg-bg));
+  color: var(--tg-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+}
+
+#app {
+  padding: 12px 12px 24px 12px;
+}
+
+.data-title {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.data-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+/* Задача користувача (2026-08-14): кнопка "Обновить" праворуч від
+   заголовка - оновлює ЛИШЕ дані таблиці, жодні фільтри/вкладки/сортування
+   не скидає (data.js: refreshDataOnly/applyFreshCtxData). */
+.refresh-data-button {
+  flex-shrink: 0;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-link);
+  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.refresh-data-button.is-spinning {
+  animation: refresh-data-spin 0.7s linear infinite;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+@keyframes refresh-data-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Задача користувача (2026-08-13): "Копировать" копіює АДРЕСУ ЦІЄЇ Ж
+   сторінки (window.location.href, data.js) - щоб можна було відкрити
+   "Остатки" в звичайній вкладці браузера на ноутбуці окремо від Telegram
+   (Telegram дозволяє лише ОДНУ відкриту форму за раз, браузер - скільки
+   завгодно). Рядок (кнопки) ЗАВЖДИ видимий, без сховування/розкриття. */
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.link-copy-button {
+  flex-shrink: 0;
+  border: none;
+  background: var(--tg-button);
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.link-copy-button.is-pressed {
+  transform: scale(0.93);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+/* Задача користувача (2026-08-14): туди-сюди в межах одного заходу -
+   спершу приховали (довга технічна адреса з tgWebAppThemeParams не
+   потрібна на очах), потім попросили зробити справжнім клікабельним
+   посиланням (для перегляду в ЗВИЧАЙНОМУ БРАУЗЕРІ), потім - реальний
+   скріншот усередині Telegram показав те саме посилання ЗАМІСТЬ кнопки
+   "Открыть в браузере" (спроба розрізнити контексти через tg.initData на
+   практиці не спрацювала на реальному пристрої користувача - initData
+   лишався порожнім навіть у справжньому Telegram). Без надійного способу
+   розрізнити "звичайний браузер" від "Telegram" наживо - повертаємось до
+   простого display:none, як було ДО цього заходу. Сам елемент лишається
+   <a href> (data.html) - якщо колись знайдеться надійний спосіб показувати
+   його вибірково, стилі для видимого стану вже готові нижче. */
+.link-url-text {
+  display: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 240px;
+  font-size: 11px;
+  color: var(--tg-link);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.link-url-text:hover {
+  text-decoration: underline;
+}
+
+/* min-height бронює місце заздалегідь - "Скопировано" не зсуває нічого під
+   собою, коли з'являється й зникає (лише visibility, не display). */
+.link-copied-hint {
+  font-size: 11px;
+  color: #3ea96e;
+  min-height: 14px;
+  margin-bottom: 8px;
+  visibility: hidden;
+}
+
+.link-copied-hint.is-visible {
+  visibility: visible;
+}
+
+.link-copied-hint.is-error {
+  color: #c0392b;
+}
+
+/* Задача користувача (2026-08-13): рядок вкладок раніше можна було
+   перемістити зверху/збоку (кнопки-перемикачі + ПКМ/long-press) -
+   прибрано назавжди, вкладки тепер ЗАВЖДИ горизонтальним рядком під
+   заголовком (те, що раніше вмикалось як "top"). */
+.data-layout {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.tab-sidebar {
+  flex: 0 0 auto;
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tab-sidebar .tab-item {
+  flex: 1 1 0;
+  text-align: center;
+}
+
+/* Задача користувача (2026-08-16): "зроби ці кнопки трішки більш
+   видимими" - раніше неактивні вкладки не мали жодного фону/межі, тож
+   виглядали як звичайний текст, а не клікабельні кнопки. Тепер усі
+   вкладки мають фон-"чіп" за замовчуванням, активна - виразніший
+   акцентний фон + рамка кольору --tg-link, а не лише легкий відтінок. */
+.tab-item {
+  font-size: 11px;
+  line-height: 1.25;
+  padding: 8px 6px;
+  border-radius: 10px;
+  color: var(--tg-hint);
+  background: var(--tg-secondary-bg);
+  border: 1px solid transparent;
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.tab-item.active {
+  color: var(--tg-link);
+  background: rgba(36, 129, 204, 0.16);
+  border-color: var(--tg-link);
+  font-weight: 600;
+}
+
+.tab-content {
+  flex: 1;
+  min-width: 0;
+  /* Реальний баг (2026-08-14, скріншот користувача): .data-layout має
+     align-items: flex-start (по замовчуванню для flex-direction: column це
+     "звужуй по контенту", не "розтягуй") - .tab-sidebar явно перекриває це
+     власним width:100%, а .tab-content - ні, тож уся таблиця/фільтри
+     кожної вкладки стискались до ширини контенту замість розтягування на
+     всю ширину вікна браузера (особливо помітно на широкому десктопному
+     екрані, не в вузькому Telegram Mobile). Спільний контейнер для ВСІХ 7
+     вкладок - фікс тут закриває проблему одразу скрізь. */
+  width: 100%;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.data-totals {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--tg-hint);
+}
+
+.data-chips {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.data-chip {
+  flex: 0 0 auto;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 16px;
+  border: 1px solid var(--field-border);
+  color: var(--tg-hint);
+  background: var(--tg-bg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.data-chip.active {
+  border-color: var(--tg-link);
+  color: var(--tg-link);
+  background: rgba(36, 129, 204, 0.1);
+}
+
+.size-filter-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--tg-link);
+  background: rgba(36, 129, 204, 0.1);
+  border: 1px solid var(--tg-link);
+  border-radius: 16px;
+  padding: 5px 10px;
+  margin-bottom: 8px;
+  width: fit-content;
+}
+
+.threshold-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.threshold-edit-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.threshold-edit-label {
+  font-size: 13px;
+  color: var(--tg-hint);
+}
+
+.threshold-edit input[type="number"] {
+  width: 80px;
+  background: var(--tg-secondary-bg);
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  color: var(--tg-text);
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
+.threshold-edit-apply {
+  padding: 7px 14px;
+  font-size: 13px;
+  border: none;
+  border-radius: 10px;
+  background: var(--tg-button);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.threshold-edit-error {
+  font-size: 12px;
+  color: var(--error);
+}
+
+.threshold-edit-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--tg-hint);
+  cursor: pointer;
+}
+
+.threshold-edit-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.size-filter-badge .badge-clear {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0 2px;
+}
+
+.data-empty-hint {
+  padding: 4px 0 12px;
+  text-align: center;
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 6px 4px;
+  color: var(--tg-hint);
+  font-weight: 500;
+  border-bottom: 1px solid var(--field-border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.data-table th.size-header {
+  color: var(--tg-link);
+}
+
+.data-table td {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--field-border);
+}
+
+.sort-arrow {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--tg-hint);
+}
+
+.data-empty {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--tg-hint);
+  font-size: 13px;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 10;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 340px;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  background: var(--tg-bg);
+  border-radius: 14px;
+  border: 1px solid var(--field-border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--field-border);
+  font-size: 14px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.modal-close {
+  color: var(--tg-hint);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* Задача користувача: довгий список (напр. клієнти) раніше розтягував
+   .modal-card ПОНАД висоту екрана - заголовок і кнопка "Показать результат"
+   виїжджали за межі видимого, закрити було нічим. Тепер прокручується
+   лише сам .modal-body (flex:1 + overflow-y:auto), header/footer завжди
+   лишаються на місці й видимі. */
+.modal-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.size-fields-row {
+  display: flex;
+  gap: 8px;
+}
+
+.size-field-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.size-field-label {
+  font-size: 12px;
+  color: var(--tg-hint);
+  margin: 0 0 4px;
+}
+
+.size-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.size-field-row input[type="text"] {
+  width: 100%;
+  background: var(--tg-secondary-bg);
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  color: var(--tg-text);
+  padding: 8px 6px;
+  font-size: 14px;
+  text-align: center;
+}
+
+.size-field-row input[type="text"].invalid {
+  border-color: var(--error);
+  background: rgba(209, 36, 47, 0.1);
+  color: var(--error);
+}
+
+.modal-body input[type="date"] {
+  width: 100%;
+  background: var(--tg-secondary-bg);
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  color: var(--tg-text);
+  padding: 8px 6px;
+  font-size: 14px;
+}
+
+.size-field-row select {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 4px;
+  background: var(--tg-secondary-bg);
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  color: var(--tg-link);
+}
+
+.size-field-error {
+  font-size: 10px;
+  color: var(--error);
+  margin: 4px 0 0;
+}
+
+.value-bulk-row {
+  display: flex;
+  gap: 16px;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--field-border);
+}
+
+.value-bulk-link {
+  font-size: 12px;
+  color: var(--tg-link);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.value-option-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.value-option-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.modal-footer {
+  padding: 12px 14px;
+  border-top: 1px solid var(--field-border);
+  flex: 0 0 auto;
+}
+
+.modal-apply-button {
+  width: 100%;
+  padding: 10px;
+  font-size: 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--tg-button);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.modal-apply-button:disabled {
+  background: var(--field-border);
+  color: var(--tg-hint);
+  cursor: default;
+}

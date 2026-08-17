@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Данные склада</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="data.css">
+</head>
+<body>
+<div id="app">
+  <div id="title-row" class="data-title-row">
+    <div id="title" class="data-title">Данные</div>
+    <button type="button" id="refresh-data-button" class="refresh-data-button" title="Обновить данные">&#8635;</button>
+  </div>
+  <div id="link-row" class="link-row">
+    <button type="button" id="copy-link-button" class="link-copy-button">Копировать</button>
+    <a id="link-url-text" class="link-url-text" href="#" target="_blank" rel="noopener"></a>
+    <button type="button" id="open-browser-button" class="link-copy-button">Открыть в браузере</button>
+  </div>
+  <div id="link-copied-hint" class="link-copied-hint">&#10003; Скопировано в буфер обмена</div>
+  <div id="layout" class="data-layout">
+    <div id="tab-sidebar" class="tab-sidebar"></div>
+    <div id="tab-content" class="tab-content">
+
+      <div id="panel-stock" class="tab-panel">
+        <div id="chips" class="data-chips"></div>
+        <div id="size-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="value-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="stock-empty-hint" class="data-empty-hint" style="display:none;"></div>
+        <div class="table-scroll">
+          <table id="stock-table" class="data-table">
+            <thead>
+              <tr>
+                <th data-sort="index">№</th>
+                <th id="product-filter-trigger" class="size-header">Продукт</th>
+                <th id="breed-filter-trigger" class="size-header">Порода</th>
+                <th id="condition-filter-trigger" class="size-header">Тип</th>
+                <th id="size-filter-trigger" class="size-header">Размер</th>
+                <th data-sort="quantity">Штук <span class="sort-arrow"></span></th>
+                <th id="measure-filter-trigger" class="size-header">М3/М2/МП</th>
+              </tr>
+            </thead>
+            <tbody id="stock-rows"></tbody>
+          </table>
+        </div>
+        <div id="stock-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+      </div>
+
+      <div id="panel-sales" class="tab-panel" style="display:none;">
+        <div id="sales-period-chips" class="data-chips"></div>
+        <div id="sales-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="sales-product-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="sales-breed-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="sales-condition-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="sales-size-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="sales-author-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>№</th>
+                <th id="sales-date-filter-trigger" class="size-header">Дата</th>
+                <th id="sales-client-filter-trigger" class="size-header">Клиент</th>
+                <th id="sales-product-filter-trigger" class="size-header">Продукт</th>
+                <th id="sales-breed-filter-trigger" class="size-header">Порода</th>
+                <th id="sales-condition-filter-trigger" class="size-header">Тип</th>
+                <th id="sales-size-filter-trigger" class="size-header">Размер</th>
+                <th id="sales-sort-quantity" class="size-header" data-sales-sort="quantity">Штук <span class="sort-arrow"></span></th>
+                <th id="sales-sort-measure" class="size-header" data-sales-sort="measure">Объём <span class="sort-arrow"></span></th>
+                <th id="sales-sort-amount" class="size-header" data-sales-sort="total_amount">Сумма <span class="sort-arrow"></span></th>
+                <th id="sales-author-filter-trigger" class="size-header">Автор</th>
+              </tr>
+            </thead>
+            <tbody id="sales-rows"></tbody>
+          </table>
+        </div>
+        <div id="sales-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+        <div id="sales-totals" class="data-totals"></div>
+      </div>
+
+      <div id="panel-antiseptic" class="tab-panel" style="display:none;">
+        <div id="antiseptic-period-chips" class="data-chips"></div>
+        <div id="antiseptic-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="antiseptic-author-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>№</th>
+                <th id="antiseptic-date-filter-trigger" class="size-header">Дата</th>
+                <th id="antiseptic-client-filter-trigger" class="size-header">Клиент</th>
+                <th id="antiseptic-sort-volume" class="size-header" data-antiseptic-sort="volume">Объём <span class="sort-arrow"></span></th>
+                <th id="antiseptic-sort-amount" class="size-header" data-antiseptic-sort="total_amount">Сумма <span class="sort-arrow"></span></th>
+                <th id="antiseptic-author-filter-trigger" class="size-header">Автор</th>
+              </tr>
+            </thead>
+            <tbody id="antiseptic-rows"></tbody>
+          </table>
+        </div>
+        <div id="antiseptic-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+        <div id="antiseptic-totals" class="data-totals"></div>
+      </div>
+
+      <div id="panel-writeoff" class="tab-panel" style="display:none;">
+        <div id="writeoff-period-chips" class="data-chips"></div>
+        <div id="writeoff-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="writeoff-breed-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="writeoff-condition-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="writeoff-size-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="writeoff-reason-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="writeoff-author-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>№</th>
+                <th id="writeoff-date-filter-trigger" class="size-header">Дата</th>
+                <th id="writeoff-product-filter-trigger" class="size-header">Продукт</th>
+                <th id="writeoff-breed-filter-trigger" class="size-header">Порода</th>
+                <th id="writeoff-condition-filter-trigger" class="size-header">Тип</th>
+                <th id="writeoff-size-filter-trigger" class="size-header">Размер</th>
+                <th data-writeoff-sort="quantity" class="size-header">Штук <span class="sort-arrow"></span></th>
+                <th id="writeoff-reason-filter-trigger" class="size-header">Причина</th>
+                <th id="writeoff-author-filter-trigger" class="size-header">Автор</th>
+              </tr>
+            </thead>
+            <tbody id="writeoff-rows"></tbody>
+          </table>
+        </div>
+        <div id="writeoff-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+        <div id="writeoff-totals" class="data-totals"></div>
+      </div>
+
+      <div id="panel-income" class="tab-panel" style="display:none;">
+        <div id="income-period-chips" class="data-chips"></div>
+        <div id="income-size-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="income-author-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="income-product-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="income-breed-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="income-condition-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>№</th>
+                <th id="income-date-filter-trigger" class="size-header">Дата</th>
+                <th id="income-product-filter-trigger" class="size-header">Продукт</th>
+                <th id="income-breed-filter-trigger" class="size-header">Порода</th>
+                <th id="income-condition-filter-trigger" class="size-header">Тип</th>
+                <th id="income-size-filter-trigger" class="size-header">Размер</th>
+                <th data-income-sort="quantity" class="size-header">Штук <span class="sort-arrow"></span></th>
+                <th id="income-author-filter-trigger" class="size-header">Автор</th>
+              </tr>
+            </thead>
+            <tbody id="income-rows"></tbody>
+          </table>
+        </div>
+        <div id="income-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+        <div id="income-totals" class="data-totals"></div>
+      </div>
+
+      <div id="panel-clients" class="tab-panel" style="display:none;">
+        <div id="clients-period-chips" class="data-chips"></div>
+        <div id="clients-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>№</th>
+                <th id="clients-client-filter-trigger" class="size-header">Клиент</th>
+                <th id="clients-sort-count" class="size-header" data-clients-sort="count">Продаж <span class="sort-arrow"></span></th>
+                <th id="clients-sort-quantity" class="size-header" data-clients-sort="quantity">Штук <span class="sort-arrow"></span></th>
+                <th id="clients-sort-amount" class="size-header" data-clients-sort="total_amount">Сумма <span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="clients-rows"></tbody>
+          </table>
+        </div>
+        <div id="clients-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+        <div id="clients-totals" class="data-totals"></div>
+      </div>
+
+      <div id="panel-low-stock" class="tab-panel" style="display:none;">
+        <div id="low-stock-hint" class="data-empty-hint"></div>
+        <div id="low-stock-controls" class="threshold-edit">
+          <span id="low-stock-threshold-edit" class="threshold-edit-group" style="display:none;">
+            <span class="threshold-edit-label">Порог, шт:</span>
+            <input type="number" id="low-stock-threshold-input" min="0" step="1">
+            <button type="button" id="low-stock-threshold-apply" class="threshold-edit-apply">Применить</button>
+            <span id="low-stock-threshold-error" class="threshold-edit-error"></span>
+          </span>
+          <label class="threshold-edit-checkbox">
+            <input type="checkbox" id="low-stock-hide-zero">
+            <span>Скрыть нулевые остатки</span>
+          </label>
+        </div>
+        <div id="low-stock-product-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="low-stock-breed-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="low-stock-condition-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div id="low-stock-size-filter-badge" class="size-filter-badge" style="display:none;"></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>№</th>
+                <th id="low-stock-product-filter-trigger" class="size-header">Продукт</th>
+                <th id="low-stock-breed-filter-trigger" class="size-header">Порода</th>
+                <th id="low-stock-condition-filter-trigger" class="size-header">Тип</th>
+                <th id="low-stock-size-filter-trigger" class="size-header">Размер</th>
+                <th data-lowstock-sort="quantity" class="size-header">Остаток <span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="low-stock-rows"></tbody>
+          </table>
+        </div>
+        <div id="low-stock-empty" class="data-empty" style="display:none;">Позиций с низким остатком нет.</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+<div id="size-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span>Фильтр: Размер</span>
+      <span id="size-modal-close" class="modal-close">&times;</span>
+    </div>
+    <div class="modal-body" id="size-modal-body"></div>
+    <div class="modal-footer">
+      <button type="button" id="size-modal-apply" class="modal-apply-button" disabled>Показать результат</button>
+    </div>
+  </div>
+</div>
+<div id="value-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span id="value-modal-title">Фильтр</span>
+      <span id="value-modal-close" class="modal-close">&times;</span>
+    </div>
+    <div class="modal-body" id="value-modal-body"></div>
+    <div class="modal-footer">
+      <button type="button" id="value-modal-apply" class="modal-apply-button">Показать результат</button>
+    </div>
+  </div>
+</div>
+<div id="range-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span>Свой период</span>
+      <span id="range-modal-close" class="modal-close">&times;</span>
+    </div>
+    <div class="modal-body">
+      <div class="size-field-col">
+        <p class="size-field-label">С даты</p>
+        <input type="date" id="range-modal-from">
+      </div>
+      <div class="size-field-col">
+        <p class="size-field-label">По дату</p>
+        <input type="date" id="range-modal-to">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="range-modal-apply" class="modal-apply-button">Показать результат</button>
+    </div>
+  </div>
+</div>
+<script src="data.js"></script>
+</body>
+</html>

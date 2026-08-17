@@ -1,0 +1,94 @@
+334:[T]             text=self._t("Дані / Таблиця"),
+400:[T]             text=self._t("Вихід"),
+556:[T]         title = tk.Label(top_bar, text=self._t("Дані / Таблиця"), font=("Segoe UI", 12, "bold"))
+601:[T]         self.save_button = tk.Button(bottom_frame, text=self._t("Зберегти зміни"), command=self.save_changes)
+603:[T]         self.next_page_button = tk.Button(bottom_frame, text=self._t("Далі"), command=self.next_page)
+655:[T]             text=self._t("Підключити Telegram"),
+782:[T]             text=self._t("Журнал дій"),
+791:[T]             text=self._t("Журнал виконаних робіт"),
+843:[T]         title = tk.Label(top_bar, text=self._t("Журнал виконаних робіт"), font=("Segoe UI", 12, "bold"))
+895:[T]         notebook.add(content, text=self._t("Налаштування гілок"))
+896:[T]         notebook.add(actions_tab, text=self._t("Дії"))
+904:[T]             text=self._t("Кнопки, які ви додасте тут, з'являться в головному меню бота в Telegram."),
+1281:[T]                     messagebox.showerror(self._t("Редагувати повідомлення"), self._t("Текст не може бути порожнім."))
+1295:[T]         tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
+1462:[T]             tk.Label(parent, text=self._t("(немає полів-запитів)"), anchor="w", fg="#57606a").pack(fill="x")
+1609:[T]                 field_box, text=self._t("+ Додати прив'язку до таблиці"),
+1763:[T]             text=header_text if header_text else self._t("(немає заголовка — запит одразу починається з даних)"),
+1767:[T]             parent, text=self._t("Так виглядатиме запит бота (оновлюється автоматично):"),
+1848:[T]         tk.Label(content, text=self._t("Назва в чек-листі бота:"), anchor="w").pack(fill="x")
+1869:[T]                 messagebox.showerror(self._t("Додати поле-запит"), self._t("Оберіть поле й вкажіть назву."))
+1875:[T]         tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
+1944:[T]         tk.Label(content, text=self._t("Що робить ця дія із введеним числом:"), anchor="w").pack(fill="x")
+1964:[T]                 messagebox.showerror(self._t("Прив'язка до таблиці"), self._t("Оберіть колонку зі списку."))
+1985:[T]                 messagebox.showerror(self._t("Прив'язка до таблиці"), str(error))
+1996:[T]                     messagebox.showerror(self._t("Прив'язка до таблиці"), str(error))
+2002:[T]             if not messagebox.askyesno(self._t("Видалити прив'язку"), self._t("Видалити цю прив'язку до таблиці?")):
+2014:[T]         tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
+2093:[T]             tk.Label(content, text=self._t("Наперед заповнює: {value}").format(value=prefill_text), anchor="w").pack(fill="x", pady=(4, 0))
+2102:[T]                 content, text=self._t("Повідомлення бота одразу після натискання:"),
+2168:[T]                 text=self._t("Поля-запити цієї дії — натисни «Редагувати», щоб змінити назву чи прив'язку до таблиці:"),
+2194:[T]                 content, text=self._t("■ — це поле бот лише показує, не змінює."), anchor="w", fg="#57606a",
+2203:[T]             tk.Label(content, text=self._t("Категорії:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
+2348:[T]             messagebox.showerror(self._t("Категорії"), self._t('Категорія "{value}" уже існує.').format(value=label))
+2379:[T]             messagebox.showerror(self._t("Категорії"), self._t('Категорія "{value}" уже існує.').format(value=new_label))
+2390:[T]             messagebox.showerror(self._t("Категорії"), self._t("Має лишитись хоча б одна категорія."))
+2463:[T]             tk.Label(self.custom_buttons_list_frame, text=self._t("Кнопок поки немає.")).pack(anchor="w", pady=4)
+2553:[T]                 text=self._t("Оберіть кнопку зліва."),
+2575:[T]             text=message_text or self._t("(без повідомлення)"),
+2580:[T]         tk.Label(self.custom_button_preview_frame, text=self._t("Далі:"), font=("Segoe UI", 9, "bold")).pack(anchor="w")
+2604:[T]                 text=self._t("Дія: {value}").format(value=action_label),
+2609:[T]             tk.Label(self.custom_button_preview_frame, text=self._t("(немає дії)")).pack(anchor="w")
+2707:[T]         tk.Label(form, text=self._t("Що бот відповідає при натисканні:")).pack(anchor="w")
+2713:[T]             text=self._t("Для стандартних дій (Приход, Реализация, Склад, Продажи,\n"
+2732:[T]             form, text=self._t("Стандартна дія:"), variable=assignment_var, value="action",
+2746:[T]             form, text=self._t("Пряме посилання на дію з «Дії»:"), variable=assignment_var, value="operation",
+2766:[T]         tk.Label(form, text=self._t("Позиція (номер серед сусідніх кнопок):")).pack(anchor="w")
+2777:[T]         tk.Label(form, text=self._t("Розмір кнопки:")).pack(anchor="w")
+2780:[T]             form, text=self._t("Одна суцільна (на весь рядок)"), variable=layout_var, value="full",
+2783:[T]             form, text=self._t("Вдвічі менша (парується із сусідньою за позицією)"), variable=layout_var, value="half",
+2808:[T]         tk.Button(button_row, text=self._t("Відмінити"), width=14, command=cancel).pack(side="right", padx=(8, 0))
+2809:[T]         tk.Button(button_row, text=self._t("Зберегти зміни"), width=16, command=save).pack(side="right")
+2994:[T]                 text=self._t("Способів оплати поки немає."),
+3049:[T]             messagebox.showerror(self._t("Способи оплати"), self._t('Спосіб оплати "{value}" уже існує.').format(value=label))
+3064:[T]             messagebox.showerror(self._t("Способи оплати"), self._t('Спосіб оплати "{value}" уже існує.').format(value=new_label))
+3312:[T]             text=self._t('Один спільний вигляд для всіх кнопок "ред"/"x"/"+" у програмі — фон і колір тексту.'),
+3345:[T]         tk.Button(bg_row, text=self._t("Обрати колір"), command=choose_bg_color).pack(side="left")
+3349:[T]         tk.Label(fg_row, text=self._t("Колір тексту:"), anchor="w", width=16).pack(side="left")
+3354:[T]             result = colorchooser.askcolor(color=selected_fg.get(), title=self._t("Колір тексту кнопки"))
+3360:[T]         tk.Button(fg_row, text=self._t("Обрати колір"), command=choose_fg_color).pack(side="left")
+3386:[T]         tk.Button(bottom, text=self._t("Відмінити"), width=14, command=window.destroy).pack(side="right")
+3460:[T]                 title=self._t("Оберіть Excel-файл"),
+3471:[T]         tk.Button(local_frame, text=self._t("Оберіть файл"), command=choose_local_file).pack(anchor="w")
+3480:[T]                 online_status_var.set(self._t("Не підключено."))
+3497:[T]                 code_window, text=self._t("Відкрити сторінку входу"),
+3500:[T]             tk.Label(code_window, text=self._t("Очікування входу..."), padx=20, pady=(0, 16)).pack()
+3529:[T]         tk.Button(online_frame, text=self._t("Увійти через Microsoft"), command=sign_in).pack(anchor="w", pady=(0, 12))
+3543:[T]                 messagebox.showerror(self._t("Таблиця Excel"), self._t("Спочатку увійдіть через Microsoft."))
+3568:[T]         tk.Button(online_frame, text=self._t("Підключити файл"), command=connect_link).pack(anchor="w")
+3578:[T]         tk.Button(online_frame, text=self._t("Відключити"), command=sign_out).pack(anchor="w", pady=(12, 0))
+3596:[T]         tk.Button(bottom, text=self._t("Відмінити"), width=14, command=window.destroy).pack(side="right")
+3840:[T]                 text=self._t("Журнал виконаних робіт поки порожній."),
+3895:[T]             messagebox.showinfo(self._t("Журнал виконаних робіт"), self._t("Запис не знайдено."))
+4132:[T]                 text=self._t("Команд поки немає."),
+4190:[T]             messagebox.showerror(self._t("Команди"), self._t("Команда з таким кодом уже існує."))
+4253:[T]                 text=self._t("Слова ще не додані."),
+4310:[T]             messagebox.showerror(self._t("Команди"), self._t("Таке слово або фраза вже прив'язані до команди."))
+4326:[T]             messagebox.showerror(self._t("Команди"), self._t("Таке слово або фраза вже прив'язані до команди."))
+4355:[T]                 text=self._t("Користувачів поки немає."),
+4460:[T]         tk.Label(form, text=self._t("Ім'я користувача:")).pack(anchor="w")
+4466:[T]             text=self._t("Залиште порожнім — ім'я призначиться автоматично."),
+4510:[T]                     messagebox.showerror(title, self._t("Telegram ID має бути числом."))
+4515:[T]                 messagebox.showerror(title, self._t("Оберіть роль."))
+4532:[T]         tk.Button(button_row, text=self._t("Відмінити"), width=14, command=cancel).pack(side="right", padx=(8, 0))
+4533:[T]         tk.Button(button_row, text=self._t("Зберегти зміни"), width=16, command=save).pack(side="right")
+4553:[T]             messagebox.showerror(self._t("Персонал"), self._t("Користувач з таким Telegram ID уже існує."))
+4589:[T]             title=self._t("Оберіть txt-файл з Telegram-токеном"),
+4736:[T]         self.telegram_status_text.set(self._t("Telegram запускається..."))
+4921:[T]             text=self._t("У поточній вкладці є незбережені зміни."),
+4927:[T]             text=self._t("Що зробити перед оновленням таблиці?"),
+4986:[T]                 text=self._t("Сторінка {page}/{page_count} · рядки {first_row}-{last_row} з {total_rows}").format(
+5160:[T]             messagebox.showinfo(self._t("Видалення рядка"), self._t("Оберіть рядок для видалення."))
+5187:[T]             messagebox.showinfo(self._t("Лише перегляд"), self._t("Цей лист не синхронізується назад в Excel."))
+5207:[T]             messagebox.showinfo(self._t("Збережено"), self._t("Зміни збережено у файл."))
+5229:[T]         messagebox.showinfo(self._t("Excel оновлено"), self._t("Дані з SQLite записано в Excel."))

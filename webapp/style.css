@@ -1,0 +1,691 @@
+:root {
+  --tg-bg: #ffffff;
+  --tg-text: #1a1a1a;
+  --tg-hint: #707579;
+  --tg-link: #2481cc;
+  --tg-button: #2481cc;
+  --tg-button-text: #ffffff;
+  --tg-secondary-bg: #f4f4f5;
+  --field-border: #d8d8db;
+  --error: #d1242f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* min-height через --tg-viewport-stable-height (сам Telegram ставить цю
+   змінну на <html>, коли сторінка відкрита як Mini App) - інакше наш фон
+   покриває лише висоту РЕАЛЬНОГО вмісту, а решту вже розгорнутого (tg.expand())
+   аркуша Telegram домальовує СВОЇМ кольором - видима світла смужка знизу.
+   Фолбек 100vh - для звичайного браузера (де цієї змінної нема). */
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: var(--tg-viewport-stable-height, 100vh);
+  background: var(--custom-page-bg, var(--tg-bg));
+  color: var(--tg-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 17px;
+}
+
+#app {
+  min-height: inherit;
+  box-sizing: border-box;
+  padding: 16px 16px 96px 16px;
+}
+
+/* Задача користувача: "хочу мати змогу вибрати... колір, розмір тексту...
+   який жирний, який ні" для заголовка форми/"Проверьте данные" - webapp/
+   app.js's applyCustomStyle() встановлює --custom-title-* лише коли в
+   Налаштуваннях реально обрано значення; var(...,fallback) - той самий
+   принцип, що вже є для --tg-*: якщо змінна не встановлена, застосовується
+   ТОЧНО сьогоднішнє значення (20px/600/успадкований колір body), тобто
+   нуль зміни вигляду для тих, хто нічого не налаштовував. */
+.title {
+  font-size: var(--custom-title-size, 20px);
+  font-weight: var(--custom-title-weight, 600);
+  color: var(--custom-title-color, inherit);
+  margin-bottom: 12px;
+}
+
+.known {
+  background: var(--custom-card-bg, var(--tg-secondary-bg));
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  color: var(--tg-hint);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.known:empty {
+  display: none;
+}
+
+/* Задача користувача: "має бути вся ввередена інформація, як у чаті" -
+   #confirm-summary будує текст через "\n"/"\n\n" (позиція/спільні поля) -
+   pre-line зберігає ці розриви як реальні рядки, на відміну від звичайного
+   HTML-згортання пробілів. */
+#confirm-summary {
+  white-space: pre-line;
+}
+
+/* Задача користувача: назва категорії (ДОСКА KD/ДОСКА AD/ОСБ...) - жирним,
+   щоб одразу відрізнялась від решти рядків позиції. */
+.confirm-position-title {
+  font-weight: var(--custom-category-weight, 700);
+  color: var(--custom-category-color, var(--tg-text));
+  font-size: var(--custom-category-size, 15px);
+}
+
+.confirm-position-line {
+  margin-top: 2px;
+  color: var(--custom-body-color, var(--tg-hint));
+  font-size: var(--custom-body-size, 15px);
+  font-weight: var(--custom-body-weight, 400);
+}
+
+/* Кожна наступна позиція (2+ товари в одній продажі) - тонка риска-
+   розділювач зверху, той самий прийом, що вже є в .cart-item. Перша
+   позиція - без риски (сама :first-child всередині container). */
+.confirm-position + .confirm-position {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--field-border);
+}
+
+/* Клієнт/адреса/спосіб оплати - ненав'язливо: трохи менший розмір + верхня
+   риска-розділювач від товарних позицій (не інший колір - лишається
+   узгодженим з темою через успадкований var(--tg-hint) від .known). */
+.confirm-common {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--field-border);
+  font-size: var(--custom-common-size, 14px);
+  color: var(--custom-common-color, var(--tg-hint));
+  font-weight: var(--custom-common-weight, 400);
+}
+
+/* Задача користувача (скріншот 2): "5 рядків із шаблонами" зверху форми -
+   два стовпці (власні шаблони / 5 останніх), кожен рядок клікабельний. */
+.template-panel {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.template-column {
+  flex: 1;
+  min-width: 0;
+  background: var(--tg-secondary-bg);
+  border-radius: 12px;
+  padding: 8px;
+}
+
+.template-column-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--tg-hint);
+  margin-bottom: 6px;
+  padding: 0 4px;
+}
+
+/* Задача користувача: "не по 1 рядку, а по 2... і обгорнути це ніби в таку
+   лагідну кнопочку" - кожен запис тепер власна м'яка пігулка (округлена,
+   легка тінь, трохи світліший фон за панель, ЧІТКА рамка - за ескізом). */
+.template-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+  background: var(--tg-bg);
+  border: 1px solid rgba(140, 140, 140, 0.3);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.template-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.template-row-line-top {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.template-row-line-bottom {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.template-row-delete {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  line-height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--tg-hint);
+  font-size: 15px;
+}
+
+.template-row-delete:active {
+  background: var(--tg-bg);
+  color: var(--tg-destructive, #e53935);
+}
+
+.template-row:active {
+  box-shadow: inset 0 0 0 100px rgba(0, 0, 0, 0.06);
+}
+
+.template-row + .template-row {
+  margin-top: 6px;
+}
+
+.template-row-empty {
+  color: var(--tg-hint);
+  cursor: default;
+}
+
+.save-template-button {
+  display: block;
+  width: 100%;
+  margin-top: 14px;
+  margin-bottom: 16px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--custom-g3-border, var(--field-border));
+  background: var(--custom-g3-fill, transparent);
+  color: var(--custom-g3-text, var(--tg-link));
+  font-size: 14px;
+}
+
+.row-block {
+  background: var(--custom-entry-bg, var(--tg-secondary-bg));
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 12px;
+  position: relative;
+}
+
+.field {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.field:last-child {
+  margin-bottom: 0;
+}
+
+/* flex-wrap:nowrap вище - кожен рядок ЗАВЖДИ label+поле в один рядок,
+   ніколи "назва зверху, поле знизу" на одних полях і в один рядок на
+   інших (та сама "зебра", яку користувач попросив прибрати - довга
+   назва типу "Адрес выгрузки" ламала рядок, бо не влазила поруч з
+   контролами). Якщо назва все ж занадто довга - обрізається "…", а не
+   ламає рядок. */
+.field label {
+  font-size: 15px;
+  font-weight: 500;
+  margin: 0;
+  color: var(--tg-text);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Задача користувача (ескіз): 3 групи полів мають власний колір тексту й
+   власні колір обведення/колір всередині для input/select - група 1
+   (#identity-fields - категорія/порода/клієнт/адреса/оплата), група 2
+   (.row-block та #single-fields - товщина/ширина/довжина/шт/ціна), група 3
+   (кнопки "Сохранить как шаблон"/"Продолжить продажу"). fallback -
+   попередній вигляд (успадкований колір/var(--field-border)/var(--tg-bg)). */
+#identity-fields .field label {
+  color: var(--custom-g1-text, var(--tg-text));
+}
+
+#identity-fields .field input,
+#identity-fields .field select {
+  border-color: var(--custom-g1-border, var(--field-border));
+  background: var(--custom-g1-fill, var(--tg-bg));
+}
+
+.row-block .field label,
+#single-fields .field label {
+  color: var(--custom-g2-text, var(--tg-text));
+}
+
+.row-block .field input,
+.row-block .field select,
+#single-fields .field input,
+#single-fields .field select {
+  border-color: var(--custom-g2-border, var(--field-border));
+  background: var(--custom-g2-fill, var(--tg-bg));
+}
+
+.field input,
+.field select {
+  padding: 8px 10px;
+  font-size: 17px;
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  min-height: 42px;
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: 84px;
+  text-align: center;
+}
+
+/* appearance:none вище прибирає й нативну стрілку select-а разом з
+   виглядом звичайного input - без цього select виглядав як текстове поле,
+   і незрозуміло, що по ньому можна тапнути й обрати зі списку. currentColor
+   у SVG сам підхоплює тему (light/dark), окремого JS не треба. */
+.field select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='currentColor' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px 7px;
+  padding-right: 22px;
+  text-align: left;
+  color: var(--tg-text);
+}
+
+/* Слова (спосіб оплати тощо) не влазять у вузьку колонку - трохи ширше,
+   тексту не хватає простору. */
+.field input.field-medium,
+.field select.field-medium {
+  width: 128px;
+  text-align: left;
+}
+
+/* Вільний текст (порода/клієнт/адреса) - ширина за змістом, а не на всю
+   довжину рядка, як просив користувач ("не на всю довжину"). */
+.field input.field-wide,
+.field select.field-wide {
+  width: 55%;
+  min-width: 140px;
+  text-align: left;
+}
+
+/* Адреса розвантаження - той самий "вільний текст", але довша за
+   породу/клієнта (задача користувача: "довші строки потрібні"), тож
+   ширина трохи більша за field-wide. Застосовується і поки для адреси ще
+   немає історії (голе текстове поле), і після (пара select+ручне поле,
+   .field-controls-правило нижче звужує саме ЦЕЙ клас під пару, не цей). */
+.field input.field-address,
+.field select.field-address {
+  width: 70%;
+  min-width: 170px;
+  text-align: left;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: var(--tg-button);
+  outline: none;
+}
+
+.field.invalid input,
+.field.invalid select {
+  border-color: var(--error);
+}
+
+/* Dropdown і поле "ввести вручну" - за проханням користувача -
+   ОБИДВА одразу видимі й доступні, не одне приховане позаду вибору в
+   select-і. Рядком (не колонкою): поле вводу МІЖ назвою поля і
+   випадаючим списком, сам список - скраю правого (останній елемент
+   flex-рядка). Ширина/вирівнювання успадковуються від .field input/.field
+   select-правил вище (звичайний descendant-селектор бачить їх і тут). */
+.field-controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.manual-value-input {
+  font-size: 15px;
+}
+
+/* Пара select+ручне поле (.field-controls) - разом ДВА боксa в один
+   рядок, тож кожен вужчий за одиночний field-medium (128px би вже не
+   влізло поруч із довгою назвою типу "Адрес выгрузки"). Одиночні
+   select/input (спосіб оплати, ціна) field-medium не чіпаємо - там
+   лише один бокс, місця й так достатньо. */
+.field-controls input.field-medium,
+.field-controls select.field-medium {
+  width: 96px;
+}
+
+/* Задача користувача: "для адреси розвантаження довші строки потрібні" -
+   той самий select+ручне поле, що й порода/клієнт (field-medium вище), але
+   ширші бокси - адреси зазвичай довші за назву породи чи клієнта. */
+.field-controls input.field-address,
+.field-controls select.field-address {
+  width: 115px;
+  min-width: 0;
+}
+
+/* Клікабельна цифра поточного залишку поруч із "Количество, шт" (Задача
+   користувача, скріншот 2026-08-08) - тап відразу підставляє це число в
+   поле кількості. Компактна пігулка, не окремий великий блок - з'являється/
+   ховається реактивно (display:none за замовчуванням, wireDimensionCascade
+   у app.js вмикає її лише коли обрано конкретну породу+розмір). */
+.stock-balance-hint {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1.5px solid var(--tg-button);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tg-button);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stock-balance-hint:active {
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+}
+
+/* Живий перерахунок "Количество" у м3/м2/мп ПРАВОРУЧ від самого поля
+   (пігулка залишку - ЛІВОРУЧ, той самий рядок) - Задача користувача
+   (скріншот "Списание одной формой"): "щоб користувач бачив відразу
+   скільки списує у всіх цифрах". Довідкова, не клікабельна (на відміну
+   від .stock-balance-hint) - тому без border/cursor, лише приглушений
+   колір тексту. */
+.measure-hint {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tg-hint);
+  white-space: nowrap;
+}
+
+.error {
+  color: var(--error);
+  font-size: 15px;
+  margin-top: 8px;
+  min-height: 1em;
+}
+
+.fallback-submit {
+  width: 100%;
+  padding: 15px;
+  font-size: 18px;
+  font-weight: 600;
+  border: none;
+  border-radius: 12px;
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  margin-top: 16px;
+  cursor: pointer;
+}
+
+/* Антисептирование - доп. послуга (чекбокс), а не окрема категорія -
+   об'єм рахується автоматично, лише ціна за м3 вводиться тут. */
+.antiseptic-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+/* .antiseptic-wrap несе клас "field" (щоб успадкувати колірні змінні групи
+   1/2 з панелі стилів) - але спільне правило ".field input" (appearance:none,
+   min-height:42px, width:84px, border-radius:10px, той самий фон, що й
+   сторінка) призначене для текстових полів і робило чекбокс розтягнутим
+   прямокутником. "appearance: checkbox" тут НЕ рятує - нативний рендер
+   чекбокса на iOS/Android WebView ігнорує задані width/height і все одно
+   тягне капсулу-піл. Тому малюємо чекбокс повністю самі (appearance:none +
+   власний фон/рамка/галочка через :checked), а не покладаємось на нативний
+   вигляд браузера. */
+.antiseptic-checkbox-label input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  min-width: 0;
+  max-width: 20px;
+  border-radius: 4px;
+  border: 1.5px solid var(--field-border);
+  background-color: var(--tg-bg);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 12px 12px;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.antiseptic-checkbox-label input[type="checkbox"]:checked {
+  border-color: var(--tg-link);
+  background-color: var(--tg-link);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M3 8l4 4 6-8'/%3E%3C/svg%3E");
+}
+
+/* Задача користувача: "з'являтись має ДОНИЗУ" - блок стартує ВИЩЕ свого
+   реального місця (translateY НЕГАТИВНИЙ) і опускається/розкривається
+   ВНИЗ до нормальної позиції між чекбоксом "Антисептирование" і кнопкою
+   "Сохранить как шаблон" - тобто рухається саме вниз, не вгору. Саме
+   розташування в потоці документа НЕ змінюється - анімується лише вигляд. */
+.antiseptic-block {
+  background: var(--tg-secondary-bg);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--tg-hint);
+  transform-origin: top;
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+
+.antiseptic-block-enter {
+  opacity: 0;
+  transform: translateY(-10px) scaleY(0.85);
+}
+
+.antiseptic-block-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.antiseptic-volume-line {
+  margin-bottom: 6px;
+}
+
+.antiseptic-price-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.antiseptic-price-row input {
+  width: 90px;
+  padding: 6px 8px;
+  font-size: 13px;
+  border: 1.5px solid var(--field-border);
+  border-radius: 8px;
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  text-align: right;
+}
+
+.antiseptic-sum-line {
+  font-weight: 600;
+  color: var(--tg-text);
+}
+
+/* "Сумма за товар" - завжди видима одразу під ціною товару (не потребує
+   антисептирования, щоб з'явитись - на відміну від .position-total-line
+   нижче, яка й несе підкреслення-роздільник перед "Итого"). */
+.goods-sum-line {
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tg-text);
+  margin: 4px 0 8px;
+}
+
+.position-total-line {
+  text-align: right;
+  font-size: 13px;
+  color: var(--tg-hint);
+  padding-top: 8px;
+  margin: 0 0 12px;
+  border-top: 1px solid var(--field-border);
+}
+
+/* "Продолжить продажу" (кошик мега-форми) - вторинна кнопка (контурна, не
+   заповнена, як fallback-submit) - "Отправить" лишається головною дією. */
+.add-position-button {
+  width: 100%;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  border: 2px solid var(--custom-g3-border, var(--tg-button));
+  border-radius: 12px;
+  background: var(--custom-g3-fill, transparent);
+  color: var(--custom-g3-text, var(--tg-button));
+  margin: 12px 0;
+  cursor: pointer;
+}
+
+/* Кошик - завжди перший блок форми (над "Категория"), картка-контейнер
+   із власним фоном/відступом, щоб чітко відділятись від полів вводу -
+   задача користувача: "все має бути компактно, гарно", "цей напис разом
+   із знаками має бути десь зверху". Порожній кошик - display:none
+   (JS-керований), не займає місця. */
+.cart-section {
+  background: var(--tg-secondary-bg);
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.cart-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tg-hint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+
+.cart-list {
+}
+
+/* Кожна позиція кошика - текст (розмір/кількість, задача користувача
+   "давай розмір висвітлювати") + дві компактні кнопки-чипи (✎ повернути
+   дані назад у форму для правки, ✕ прибрати позицію взагалі) - задача
+   користувача: "потрібно... щоб була змога повернутись назад і змінити
+   дані". Розділювач між рядками замість зайвих відступів - компактніше. */
+.cart-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--tg-text);
+  padding: 6px 0;
+  border-top: 1px solid var(--field-border);
+}
+
+.cart-item:first-child {
+  border-top: none;
+  padding-top: 2px;
+}
+
+.cart-item-text-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
+.cart-item-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Задача користувача: "суму окремо після кубатури, акуратненько" -
+   приглушений, менший рядок ПІД основним текстом позиції (антисептирование
+   з кошиком - ціна тепер на кожній дошці, не спільна). */
+.cart-item-sum {
+  font-size: 12px;
+  color: var(--tg-hint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cart-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+/* Задача користувача (рукописний ескіз): "Антисептировано" - окремим
+   фоном, у тому ж рядку позиції, там, де воно вже позначене чекбоксом у
+   формі (position.antiseptic). Заповнена пігулка (не просто текст) -
+   "окремий фон", як і просив користувач. */
+.cart-item-badge {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  white-space: nowrap;
+}
+
+.cart-item-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: var(--tg-bg);
+  color: var(--tg-button);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cart-item-btn-remove {
+  color: var(--error);
+}
