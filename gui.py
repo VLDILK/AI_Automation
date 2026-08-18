@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.49"
+__version__ = "1.0.50"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4705,13 +4705,58 @@ class ExcelViewerApp:
         except OSError:
             pass
 
-    # Задача користувача: пройшли через кілька раундів ("два додай" - коміти
-    # + diff --stat, потім повний кольоровий код-diff у двох картках з
-    # detach-кнопкою) - і врешті "купа інформації, очі на лоб лізуть...
-    # спрости до мінімуму, але щоб інформативність була всього". Diff
-    # прибрано повністю (разом з усім кодом його очистки/обрізки/
-    # кольорування, який був тут раніше) - лишається РІВНО список
-    # повідомлень комітів, самі коміти вже написані людською мовою.
+    # Задача користувача, кілька раундів: "два додай" (коміти + diff --stat)
+    # -> "1 в 1" повний кольоровий код-diff у detach-вікні -> "зовсім
+    # погано, купа інформації" -> прибрано diff ПОВНІСТЮ, лишились лише
+    # коміти -> "гарний мінімум, але я не про такий - хочу бачити і код і
+    # пояснення, тільки стисло і влучно". Остаточна форма: коміти
+    # (пояснення, людською мовою) + короткий ОЧИЩЕНИЙ diff (код) під ними,
+    # жорстко обрізаний до _DIFF_LINE_LIMIT (15, не 300, як у "1 в 1"
+    # версії) - досить, щоб побачити РЕАЛЬНІ рядки коду, замало, щоб це
+    # знову стало "книгою". _clean_diff_lines прибирає git-шум (diff --git/
+    # index) і version-bump-hunks (той самий фільтр, що вже довів
+    # корисність у попередньому раунді).
+    _DIFF_LINE_LIMIT = 15
+    _VERSION_LINE_RE = re.compile(r'^[+-]\s*__version__\s*=')
+
+    def _clean_diff_lines(self, raw_lines):
+        stage = []
+        i, n = 0, len(raw_lines)
+        while i < n:
+            line = raw_lines[i]
+            if line.startswith("diff --git ") or line.startswith("index ") or line.startswith("--- "):
+                i += 1
+                continue
+            if line.startswith("+++ "):
+                path = line[6:] if line.startswith("+++ b/") else line[4:]
+                stage.append(f"=== {path} ===")
+                i += 1
+                continue
+            if line.startswith("@@ "):
+                hunk = [line]
+                j = i + 1
+                while j < n and not raw_lines[j].startswith(("@@ ", "diff --git ", "--- ", "+++ ")):
+                    hunk.append(raw_lines[j])
+                    j += 1
+                changed = [l for l in hunk[1:] if l.startswith("+") or l.startswith("-")]
+                is_version_only = len(changed) == 2 and all(self._VERSION_LINE_RE.match(l) for l in changed)
+                if not is_version_only:
+                    stage.extend(hunk)
+                i = j
+                continue
+            stage.append(line)
+            i += 1
+
+        cleaned = []
+        n2 = len(stage)
+        for idx, line in enumerate(stage):
+            if line.startswith("=== ") and line.endswith(" ==="):
+                nxt = idx + 1
+                if nxt >= n2 or (stage[nxt].startswith("=== ") and stage[nxt].endswith(" ===")):
+                    continue
+            cleaned.append(line)
+        return cleaned
+
     # since=None (немає збереженої мітки останньої публікації) -> останні 5
     # комітів, той самий "щось краще за нічого" запасний варіант. Мітка
     # оновлюється лише ПІСЛЯ успішної публікації (_write_last_published_sha,
@@ -4721,7 +4766,7 @@ class ExcelViewerApp:
         root = self._project_git_root()
         if root is None:
             no_git_text = self._t("(Немає доступу до git-історії - запущено поза папкою проєкту.)")
-            return no_git_text, None
+            return no_git_text, [], None
         since = self._read_last_published_sha()
         range_spec = f"{since}..HEAD" if since else None
 
@@ -4737,6 +4782,7 @@ class ExcelViewerApp:
                 return ""
 
         commits_raw = run_git(["log", "--format=%s", range_spec] if range_spec else ["log", "--format=%s", "-5"])
+        diff_raw = run_git(["diff", "--no-color", range_spec] if range_spec else ["diff", "--no-color", "HEAD~5..HEAD"])
         current_sha = run_git(["rev-parse", "HEAD"]) or None
 
         commits_text = (
@@ -4744,7 +4790,12 @@ class ExcelViewerApp:
             if commits_raw
             else self._t("(Немає нових комітів з моменту останньої публікації.)")
         )
-        return commits_text, current_sha
+        diff_lines = self._clean_diff_lines(diff_raw.splitlines()) if diff_raw else []
+        if len(diff_lines) > self._DIFF_LINE_LIMIT:
+            hidden = len(diff_lines) - self._DIFF_LINE_LIMIT
+            diff_lines = diff_lines[: self._DIFF_LINE_LIMIT]
+            diff_lines.append(self._t("… ще {value} рядків, повний код - на GitHub після публікації").format(value=hidden))
+        return commits_text, diff_lines, current_sha
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
@@ -4846,15 +4897,12 @@ class ExcelViewerApp:
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
 
-        # Задача користувача (2026-08-18): спершу просили детальний
-        # перегляд (коміти + пофарбований diff, у двох картках з кнопкою
-        # "відкрити окремо") - після кількох раундів прийшли до "купа
-        # інформації, очі на лоб лізуть... спрости до мінімуму, але щоб
-        # інформативність була всього". Diff, кольори, окремі detached-
-        # вікна - все прибрано. Лишається РІВНО два прості елементи:
-        # "Просто" (вручну, як і раніше) і короткий список повідомлень
-        # комітів (самі коміти вже написані людською мовою, більше нічого
-        # додавати не треба).
+        # Задача користувача, підсумок кількох раундів: "хочу бачити і код і
+        # пояснення, тільки стисло і влучно" - "Просто" (вручну, пояснення)
+        # + короткий список комітів (пояснення з git) + короткий, ОЧИЩЕНИЙ
+        # diff (сам код, _DIFF_LINE_LIMIT=15 рядків - "влучно", не "книга").
+        # Без кольорових detached-вікон і зайвого приладдя - просто два
+        # компактних текстових блоки один під одним.
         tk.Label(body, text=self._t("Що змінилось:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
             anchor="w", pady=(0, 4)
         )
@@ -4862,7 +4910,8 @@ class ExcelViewerApp:
         plain_summary_var = tk.StringVar()
         tk.Entry(body, textvariable=plain_summary_var, width=60).pack(anchor="w", fill="x", pady=(2, 8))
 
-        commits_text, current_git_sha = self._compute_git_release_preview()
+        commits_text, diff_lines, current_git_sha = self._compute_git_release_preview()
+        diff_text = "\n".join(diff_lines)
 
         tk.Label(body, text=self._t("З git (коміти з моменту останньої публікації):"), anchor="w", fg="#555555").pack(
             anchor="w", pady=(0, 2)
@@ -4870,12 +4919,35 @@ class ExcelViewerApp:
         commits_widget = tk.Text(body, height=5, wrap="word", relief="flat", borderwidth=0)
         commits_widget.insert("1.0", commits_text)
         commits_widget.configure(state="disabled")
-        commits_widget.pack(anchor="w", fill="x", pady=(0, 12))
+        commits_widget.pack(anchor="w", fill="x", pady=(0, 8))
+
+        tk.Label(body, text=self._t("Ключові зміни в коді:"), anchor="w", fg="#555555").pack(anchor="w", pady=(0, 2))
+        diff_widget = tk.Text(body, height=8, wrap="none", relief="flat", borderwidth=0, font=("Consolas", 9))
+        diff_widget.tag_configure("added", foreground="#1a7f37")
+        diff_widget.tag_configure("removed", foreground="#d1242f")
+        diff_widget.tag_configure("meta", foreground="#57606a")
+        for line in diff_lines:
+            if line.startswith("=== ") and line.endswith(" ==="):
+                tag = "meta"
+            elif line.startswith("@@ "):
+                tag = "meta"
+            elif line.startswith("+"):
+                tag = "added"
+            elif line.startswith("-"):
+                tag = "removed"
+            else:
+                tag = None
+            diff_widget.insert("end", line + "\n", tag if tag else ())
+        if not diff_lines:
+            diff_widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
+        diff_widget.configure(state="disabled")
+        diff_widget.pack(anchor="w", fill="x", pady=(0, 12))
 
         def compose_release_notes():
             plain = plain_summary_var.get().strip()
             parts = [plain] if plain else []
             parts.append(self._t("Коміти:\n{value}").format(value=commits_text))
+            parts.append(self._t("Ключові зміни в коді:\n```diff\n{value}\n```").format(value=diff_text))
             return "\n\n".join(parts)
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
