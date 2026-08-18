@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.42"
+__version__ = "1.0.43"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4625,9 +4625,14 @@ class ExcelViewerApp:
     # Client/, той самий, що вже перевіряє свій download_update/robocopy-
     # заміна на боці client_app.py), не сирий код - той шлях, для якого цей
     # пакувальний і механізм самооновлення взагалі будувались.
+    # Той самий баг/фікс, що й gui_release_dir/client_dist_dir у
+    # open_publish_updates_dialog (2026-08-18, знайдено користувачем на
+    # живому зібраному .exe) - client_app.py (вихідний код, не зібраний
+    # .exe) лежить у корені проєкту, а НЕ поруч із самим запущеним .exe.
     def _read_client_app_version(self):
+        root = self._project_git_root() or BASE_DIR
         try:
-            source = (BASE_DIR / "client_app.py").read_text(encoding="utf-8")
+            source = (root / "client_app.py").read_text(encoding="utf-8")
         except OSError:
             return None
         match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', source, re.MULTILINE)
