@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.44"
+__version__ = "1.0.45"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4706,7 +4706,13 @@ class ExcelViewerApp:
             pass
 
     # Задача користувача: "два додай" (варіанти "автоматично з git-комітів"
-    # + "порівняння файлів (diff)") - повертає (текст_превью, поточний_sha).
+    # + "порівняння файлів (diff)"), потім "поправ як домовлялись 1 в 1" -
+    # перший варіант змішував коміти й diff в ОДИН суцільний текстовий
+    # блок (жодної візуальної різниці з двома окремими картками мокапу,
+    # які користувач обирав). Тепер повертає ТРИ окремих значення (коміти,
+    # diff, sha), щоб діалог міг намалювати їх як ДВІ окремі підписані
+    # рамки - той самий "field_box" стиль (highlightbackground/thickness),
+    # що вже скрізь у цій программі позначає одну логічну картку.
     # since=None (немає збереженої мітки останньої публікації) -> останні 5
     # комітів, той самий "щось краще за нічого" запасний варіант. Мітка
     # оновлюється лише ПІСЛЯ успішної публікації (_write_last_published_sha,
@@ -4715,7 +4721,8 @@ class ExcelViewerApp:
     def _compute_git_release_preview(self):
         root = self._project_git_root()
         if root is None:
-            return self._t("(Немає доступу до git-історії - запущено поза папкою проєкту.)"), None
+            no_git_text = self._t("(Немає доступу до git-історії - запущено поза папкою проєкту.)")
+            return no_git_text, "", None
         since = self._read_last_published_sha()
         range_spec = f"{since}..HEAD" if since else None
 
@@ -4734,17 +4741,13 @@ class ExcelViewerApp:
         diff_raw = run_git(["diff", "--stat", range_spec] if range_spec else ["diff", "--stat", "HEAD~5..HEAD"])
         current_sha = run_git(["rev-parse", "HEAD"]) or None
 
-        lines = []
-        if commits_raw:
-            lines.append(self._t("Коміти:"))
-            lines.extend(f"- {line}" for line in commits_raw.splitlines())
-        if diff_raw:
-            lines.append("")
-            lines.append(self._t("Змінені файли:"))
-            lines.append(diff_raw)
-        if not lines:
-            lines.append(self._t("Немає нових комітів з моменту останньої публікації."))
-        return "\n".join(lines), current_sha
+        commits_text = (
+            "\n".join(f"- {line}" for line in commits_raw.splitlines())
+            if commits_raw
+            else self._t("(Немає нових комітів з моменту останньої публікації.)")
+        )
+        diff_text = diff_raw or self._t("(Немає змінених файлів з моменту останньої публікації.)")
+        return commits_text, diff_text, current_sha
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
@@ -4852,17 +4855,37 @@ class ExcelViewerApp:
         plain_summary_var = tk.StringVar()
         tk.Entry(body, textvariable=plain_summary_var, width=60).pack(anchor="w", fill="x", pady=(2, 8))
 
-        tk.Label(body, text=self._t("Технічно (автоматично, з git):"), anchor="w", fg="#555555").pack(anchor="w")
-        tech_preview_text, current_git_sha = self._compute_git_release_preview()
-        tech_preview_widget = tk.Text(body, height=6, wrap="word")
-        tech_preview_widget.insert("1.0", tech_preview_text)
-        tech_preview_widget.configure(state="disabled")
-        tech_preview_widget.pack(anchor="w", fill="x", pady=(2, 12))
+        tk.Label(body, text=self._t("Технічно (автоматично, з git):"), anchor="w", fg="#555555").pack(
+            anchor="w", pady=(0, 4)
+        )
+        commits_text, diff_text, current_git_sha = self._compute_git_release_preview()
+
+        # Задача користувача: "поправ як домовлялись 1 в 1" - ДВІ окремі
+        # підписані рамки (той самий "field_box" стиль highlightbackground/
+        # highlightthickness, що вже скрізь у цій программі позначає одну
+        # логічну картку), а не один суцільний текстовий блок - точна
+        # відповідність двом карткам мокапу, які користувач обирав
+        # ("Автоматично з git-комітів" + "Порівняння файлів (diff)").
+        def build_preview_box(parent, title, content):
+            box = tk.Frame(parent, highlightbackground="#8c959f", highlightthickness=1)
+            box.pack(fill="x", pady=(0, 8))
+            tk.Label(
+                box, text=title, font=("Segoe UI", 9, "bold"), anchor="w",
+            ).pack(anchor="w", fill="x", padx=8, pady=(6, 0))
+            text_widget = tk.Text(box, height=4, wrap="word", relief="flat", borderwidth=0)
+            text_widget.insert("1.0", content)
+            text_widget.configure(state="disabled")
+            text_widget.pack(anchor="w", fill="x", padx=8, pady=(2, 8))
+            return text_widget
+
+        build_preview_box(body, self._t("Автоматично з git-комітів"), commits_text)
+        build_preview_box(body, self._t("Порівняння файлів (diff)"), diff_text)
 
         def compose_release_notes():
             plain = plain_summary_var.get().strip()
             parts = [plain] if plain else []
-            parts.append(self._t("Технічні деталі:\n{value}").format(value=tech_preview_text))
+            parts.append(self._t("Коміти:\n{value}").format(value=commits_text))
+            parts.append(self._t("Змінені файли:\n{value}").format(value=diff_text))
             return "\n\n".join(parts)
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
