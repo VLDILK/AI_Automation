@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.47"
+__version__ = "1.0.48"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4928,61 +4928,92 @@ class ExcelViewerApp:
         # логічну картку), а не один суцільний текстовий блок - точна
         # відповідність двом карткам мокапу, які користувач обирав
         # ("Автоматично з git-комітів" + "Порівняння файлів (diff)").
-        def build_preview_box(parent, title, content):
+        # Задача користувача (наступний раунд): "зроби його відокремлюваним.
+        # щоб я міг відокремити, розширити, прочитати" - маленька кнопка
+        # "⤢" у заголовку кожної картки відкриває ТОЙ САМИЙ вміст (через
+        # populate_fn - одна й та сама функція малює і компактний inline-
+        # варіант, і великий, у звичайному (НЕ grab_set) Toplevel, який
+        # можна вільно розтягнути/максимізувати, на відміну від фіксованого
+        # діалогу публікації.
+        def open_detached_preview_window(title, populate_fn):
+            window = tk.Toplevel(self.root)
+            window.title(title)
+            window.geometry("900x600")
+            window.minsize(420, 300)
+            frame = tk.Frame(window)
+            frame.pack(fill="both", expand=True, padx=8, pady=8)
+            scrollbar = ttk.Scrollbar(frame, orient="vertical")
+            text_widget = tk.Text(
+                frame, wrap="none", font=("Consolas", 10), relief="flat", borderwidth=0,
+                yscrollcommand=scrollbar.set,
+            )
+            scrollbar.config(command=text_widget.yview)
+            text_widget.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            populate_fn(text_widget)
+            text_widget.configure(state="disabled")
+            window.bind("<Escape>", lambda event: window.destroy())
+            self._apply_theme(window)
+
+        def build_preview_box(parent, title, populate_fn, height):
             box = tk.Frame(parent, highlightbackground="#8c959f", highlightthickness=1)
             box.pack(fill="x", pady=(0, 8))
-            tk.Label(
-                box, text=title, font=("Segoe UI", 9, "bold"), anchor="w",
-            ).pack(anchor="w", fill="x", padx=8, pady=(6, 0))
-            text_widget = tk.Text(box, height=4, wrap="word", relief="flat", borderwidth=0)
-            text_widget.insert("1.0", content)
+            title_row = tk.Frame(box)
+            title_row.pack(fill="x", padx=8, pady=(6, 0))
+            tk.Label(title_row, text=title, font=("Segoe UI", 9, "bold"), anchor="w").pack(
+                side="left", fill="x", expand=True
+            )
+            tk.Button(
+                title_row, text="⤢", width=3,
+                command=lambda: open_detached_preview_window(title, populate_fn),
+            ).pack(side="right")
+            text_frame = tk.Frame(box)
+            text_frame.pack(fill="x", padx=8, pady=(2, 8))
+            scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+            text_widget = tk.Text(
+                text_frame, height=height, wrap="none", relief="flat", borderwidth=0,
+                font=("Consolas", 9), yscrollcommand=scrollbar.set,
+            )
+            scrollbar.config(command=text_widget.yview)
+            text_widget.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            populate_fn(text_widget)
             text_widget.configure(state="disabled")
-            text_widget.pack(anchor="w", fill="x", padx=8, pady=(2, 8))
             return text_widget
 
-        build_preview_box(body, self._t("Автоматично з git-комітів"), commits_text)
+        def populate_commits(widget):
+            widget.insert("1.0", commits_text)
 
-        # Задача користувача (наступний раунд): "1 в 1 чекаю" на картку
-        # "Реальний код-diff" - на відміну від build_preview_box вище,
-        # тут САМІ РЯДКИ коду (не "скільки рядків"), пофарбовані по
-        # кожному рядку окремо через теги tk.Text (- червоним, + зеленим,
-        # той самий принцип, що GitHub показує diff), моноширинним
-        # шрифтом. Прокрутка (ttk.Scrollbar) - _DIFF_LINE_LIMIT все одно
-        # може дати сотні рядків при великій сесії правок.
-        diff_box = tk.Frame(body, highlightbackground="#8c959f", highlightthickness=1)
-        diff_box.pack(fill="x", pady=(0, 12))
-        tk.Label(
-            diff_box, text=self._t("Порівняння файлів (diff)"), font=("Segoe UI", 9, "bold"), anchor="w",
-        ).pack(anchor="w", fill="x", padx=8, pady=(6, 0))
-        diff_text_frame = tk.Frame(diff_box)
-        diff_text_frame.pack(fill="x", padx=8, pady=(2, 8))
-        diff_scrollbar = ttk.Scrollbar(diff_text_frame, orient="vertical")
-        diff_widget = tk.Text(
-            diff_text_frame, height=10, wrap="none", relief="flat", borderwidth=0,
-            font=("Consolas", 9), yscrollcommand=diff_scrollbar.set,
-        )
-        diff_scrollbar.config(command=diff_widget.yview)
-        diff_widget.pack(side="left", fill="both", expand=True)
-        diff_scrollbar.pack(side="right", fill="y")
-        diff_widget.tag_configure("added", foreground="#1a7f37")
-        diff_widget.tag_configure("removed", foreground="#d1242f")
-        diff_widget.tag_configure("meta", foreground="#57606a")
-        diff_widget.tag_configure("file_header", foreground="#0969da", font=("Consolas", 9, "bold"))
-        for line in diff_lines:
-            if line.startswith("=== ") and line.endswith(" ==="):
-                tag = "file_header"
-            elif line.startswith("@@ "):
-                tag = "meta"
-            elif line.startswith("+"):
-                tag = "added"
-            elif line.startswith("-"):
-                tag = "removed"
-            else:
-                tag = None
-            diff_widget.insert("end", line + "\n", tag if tag else ())
-        if not diff_lines:
-            diff_widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
-        diff_widget.configure(state="disabled")
+        build_preview_box(body, self._t("Автоматично з git-комітів"), populate_commits, height=4)
+
+        # Задача користувача (попередній раунд): "1 в 1 чекаю" на картку
+        # "Реальний код-diff" - тут САМІ РЯДКИ коду (не "скільки рядків"),
+        # пофарбовані по кожному рядку окремо через теги tk.Text (- червоним,
+        # + зеленим, той самий принцип, що GitHub показує diff), моно-
+        # ширинним шрифтом. Кожен виклик populate_diff НАЛАШТОВУЄ ВЛАСНІ
+        # теги на переданому widget (теги живуть на рівні конкретного
+        # tk.Text, не діляться між inline-версією і detached-вікном).
+        def populate_diff(widget):
+            widget.tag_configure("added", foreground="#1a7f37")
+            widget.tag_configure("removed", foreground="#d1242f")
+            widget.tag_configure("meta", foreground="#57606a")
+            widget.tag_configure("file_header", foreground="#0969da", font=("Consolas", 9, "bold"))
+            for line in diff_lines:
+                if line.startswith("=== ") and line.endswith(" ==="):
+                    tag = "file_header"
+                elif line.startswith("@@ "):
+                    tag = "meta"
+                elif line.startswith("+"):
+                    tag = "added"
+                elif line.startswith("-"):
+                    tag = "removed"
+                else:
+                    tag = None
+                widget.insert("end", line + "\n", tag if tag else ())
+            if not diff_lines:
+                widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
+
+        build_preview_box(body, self._t("Порівняння файлів (diff)"), populate_diff, height=10)
 
         def compose_release_notes():
             plain = plain_summary_var.get().strip()
