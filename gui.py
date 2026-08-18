@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.43"
+__version__ = "1.0.44"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4793,6 +4793,14 @@ class ExcelViewerApp:
         github_token_row.pack(anchor="w", pady=(0, 12), fill="x")
         github_token_entry = tk.Entry(github_token_row, textvariable=github_token_var, show="*", width=60)
         github_token_entry.pack(side="left", fill="x", expand=True)
+
+        # Задача користувача (2026-08-18): "я виходжу і він не зберігається" -
+        # раніше ключ зберігався на диск ЛИШЕ в момент натискання
+        # "Опублікувати" - закриття вікна без публікації губило щойно
+        # прикріплений/введений ключ. Той самий принцип, що й скрізь у цій
+        # программі (feedback_persist_all_ui_state) - жодних кнопок
+        # "Зберегти", збереження одразу при зміні поля.
+        github_token_var.trace_add("write", lambda *_args: self._write_github_publish_token(github_token_var.get()))
 
         # Задача користувача (2026-08-18): "додай змогу приєднати ключ
         # вручну" - довгий випадковий рядок незручно передруковувати чи
