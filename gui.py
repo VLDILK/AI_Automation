@@ -43,7 +43,6 @@ import update_check
 from i18n import DEFAULT_LANGUAGE, translate
 from paths import BASE_DIR, CLOUDFLARED_EXE, DB_PATH, DISPLAY_SETTINGS_PATH, FILE_PATH, SETTINGS_PATH
 from settings import DisplaySettingsStore, REQUEST_PROCESSING_MODES, SettingsStore
-from telegram_dialog import TelegramDialogMixin
 from utils import _display_bot_number, _display_value
 from webapp_server import WebappServer
 from warehouse_data import (
@@ -51,7 +50,6 @@ from warehouse_data import (
     ANTISEPTIC_SHEET_NAME,
     BOT_MESSAGE_DEFAULTS,
     DB_BACKUP_LIMIT,
-    RECOGNIZED_OPERATION_FIELD_KEYS,
     SALES_SHEET_NAME,
     CUSTOM_BUTTON_ACTIONS,
     antiseptic_columns,
@@ -72,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.38"
+__version__ = "1.0.39"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -112,44 +110,6 @@ RU_MONTHS = [
     "ноября",
     "декабря",
 ]
-
-
-# Крок "Дії" remote-sync (2026-08-18, аудит "у всього є істина?"): read-only
-# адаптер поверх self.store — делегує ВСЕ (заголовки/рядки складу й далі
-# легітимно локальні, gui.py має власний підключений Excel-файл для інших
-# екранів), окрім рівно цих 6 operations/fields/columns-методів, які тепер
-# читають з РЕМОТНО завантаженого кешу (app._operations_tree_cache), а не з
-# власної мертвої локальної bot_operations-таблиці gui.py. Через app._app
-# (не застигла копія store) — self.store може бути ПЕРЕПІДКЛЮЧЕНИЙ (інший
-# Excel-файл), лукап іде щоразу заново. Потрібен, бо ці самі методи
-# (_income_missing_fields/_sale_missing_prompt/...) з telegram_dialog*.py
-# приймають store як ОБ'ЄКТ-аргумент (не виклик self.store.X() напряму) —
-# лишається ЄДИНИЙ спосіб підмінити джерело саме цих 6 методів, не чіпаючи
-# решту роботи тих самих функцій з рештою store.
-class _RemoteOperationsStoreView:
-    def __init__(self, app):
-        self._app = app
-
-    def __getattr__(self, name):
-        return getattr(self._app.store, name)
-
-    def list_operations(self, parent_action_code=None, include_disabled=False):
-        return self._app._ops_list_operations(parent_action_code, include_disabled)
-
-    def get_operation(self, operation_id):
-        return self._app._ops_get_operation(operation_id)
-
-    def get_operation_by_code(self, code):
-        return self._app._ops_get_operation_by_code(code)
-
-    def list_operation_fields(self, operation_id, include_disabled=False):
-        return self._app._ops_list_operation_fields(operation_id, include_disabled)
-
-    def get_operation_field(self, field_id):
-        return self._app._ops_get_operation_field(field_id)
-
-    def list_operation_field_columns(self, operation_field_id):
-        return self._app._ops_list_operation_field_columns(operation_field_id)
 
 
 class ExcelViewerApp:
@@ -2009,7 +1969,6 @@ class ExcelViewerApp:
         # operations+fields+columns, що показує сусідня вкладка "Дії".
         self._operations_tree_cache = None
         self._actions_view_refresh_generation = 0
-        self._ops_store_view = _RemoteOperationsStoreView(self)
 
         top_bar = tk.Frame(self.custom_buttons_frame)
         top_bar.pack(side="top", fill="x", padx=8, pady=6)
@@ -2200,36 +2159,6 @@ class ExcelViewerApp:
                 ),
             )
 
-    # Яких логічних полів (Задача користувача: "що куди записується")
-    # стосується кожна дія з CUSTOM_BUTTON_ACTIONS, і з якого аркуша/якою
-    # функцією мапінгу (warehouse_columns/sales_columns, обидві —
-    # warehouse_data.py, чисті функції без побічних ефектів) читати РЕАЛЬНУ
-    # назву колонки в поточній таблиці. Це САМІ ЛИШЕ ролі дії — конкретна
-    # назва колонки завжди читається наживо (_refresh_actions_view), а не
-    # хардкодиться тут, тож перегляд завжди відповідає поточному стану
-    # аркушів. Поки лише перегляд (Задача користувача, крок 1) — можливість
-    # редагувати мапінг сама дія-код -> колонка лишається на майбутнє.
-    # Третій елемент кожного поля — "add"/"subtract"/"info" (Задача
-    # користувача: зелений "+"/червоний "−"/синій квадрат біля рядка):
-    # чи ця дія ЗБІЛЬШУЄ значення в цій колонці, ЗМЕНШУЄ, чи просто
-    # ідентифікує/показує (без зміни числа). Те саме логічне поле може мати
-    # РІЗНИЙ маркер у різних діях — напр. "Залишок" зростає при Приході, але
-    # зменшується при Реализации, тож маркер належить парі (дія, поле), а не
-    # самому полю.
-    # "start_income"/"start_sale" НЕМАЄ тут — вони пуре навігація (Задача
-    # користувача, Крок 3+ "Дії": "Начать приход товара — це не дія"); і
-    # "start_stock_report"/"start_sales_report" тут теж більше немає —
-    # Задача користувача: ці два звіти мають бути так само редаговані, як
-    # категорії приходу/продажу. Усі чотири тепер живуть у bot_operations/
-    # bot_operation_fields/bot_operation_field_columns (warehouse_data.py)
-    # і рендеряться в _render_operation_fields, не тут. Лишились лише
-    # "start_calculator"/"show_help" — вони справді ніколи не працювали з
-    # таблицею.
-    _ACTION_COLUMN_INFO = {
-        "start_calculator": [],
-        "show_help": [],
-    }
-
     # "+" зелений — дія ЗБІЛЬШУЄ число в цій колонці; "−" червоний —
     # ЗМЕНШУЄ; "■" синій — лише інформує/ідентифікує, число не змінюється.
     _ACTION_FIELD_MARKERS = {
@@ -2252,83 +2181,6 @@ class ExcelViewerApp:
     # ті самі україномовні підписи, що були раніше в статичному словнику.
     _PREFILL_FIELD_LABELS = {"product": "Товар", "condition": "Тип"}
 
-    # Задача користувача: "прибери із виду все, що нічого не робить, а
-    # просто перевіряє" — ці 6 ключів у приході/продажу лише звіряють
-    # рядок складу (не пишуть, не показують) і мають ЗАВЖДИ 0 прив'язок
-    # там (_remove_noop_identity_bindings, warehouse_data.py) — тому
-    # ховаємо їх з _render_operation_fields. У звітах (Остаток/Отчёт по
-    # продажам) ті самі ключі МАЮТЬ прив'язку (реально показують значення
-    # в звіті) — там вони й далі видимі, бо перевірка нижче саме на
-    # "немає жодної прив'язки", а не на сам ключ.
-    _IDENTITY_SHAPED_FIELD_KEYS = {"product", "breed", "condition", "thickness", "width", "length"}
-
-    # Задача користувача: "товар і тип продукта із редагування напису теж
-    # можна вже буде прибрати, тому що буде одне вікно для цього загалом,
-    # яке не буде жорстко до чогось прив'язане" — на відміну від породи/
-    # товщини/ширини/довжини (реально ЗІБРАНІ дані від користувача),
-    # товар/тип продукта на приході й продажу ЗАВЖДИ відомі наперед
-    # (prefill_json), тому вільний заголовок дії (_operation_header_text,
-    # telegram_dialog.py) тепер покриває цю роль — окреме перейменування
-    # цих 2 конкретних міток у "Технічні поля" більше не потрібне.
-    _HEADER_COVERED_FIELD_KEYS = {"product", "condition"}
-
-    # Задача користувача: "додай до приход м2 та мп - умови... гілка далі
-    # йде умова, мп если такие-то размери, і під нею Приход мп" — поле
-    # "Кількість, м3/м2/вимір" (приход і продаж) насправді виконує РІВНО
-    # одну з трьох пар прив'язок (income_volume/balance_volume ЧИ
-    # income_area/balance_area ЧИ income_linear/balance_linear — та сама
-    # логіка для sold_*/total_*), залежно від товару/розміру
-    # (_is_area_based_product/_is_linear_meter_size, telegram_dialog.py) —
-    # ця логіка розпізнавання НЕ редагована (поза межами системи), лише
-    # показ ЯКА умова відповідає якій прив'язці. Групування — чисто за
-    # суфіксом column_key (_volume/_area/_linear), нічого не виконує.
-    # Задача користувача: "основне — количество м3 — має виглядати як
-    # основне... а другорядне (умова) — як додаткове". Об'єм (м3) — це
-    # ЗВИЧАЙНИЙ, типовий випадок для більшості товарів, НЕ виняток, тож
-    # рендериться ПЕРШИМ і БЕЗ жодного спеціального маркування (як
-    # звичайні прив'язки). М2/мп — це РЕАЛЬНІ винятки (застосовні лише за
-    # умови), тож ідуть ПІСЛЯ, з дрібним приглушеним підписом-виноскою
-    # (не жовтий банер на всю ширину — це виглядало як рівноцінна
-    # альтернатива, а не як виняток).
-    _MEASURE_CONDITION_ORDER = ("volume", "area", "linear")
-    _MEASURE_CONDITION_LABELS = {
-        "area": "Виняток — лише якщо товар = Вагонка (тоді м2 замість м3):",
-        "linear": "Виняток — лише якщо розмір 25x50, 30x50 або 50x50 мм (тоді мп замість м3):",
-    }
-
-    def _measure_condition_group(self, column_key):
-        for suffix in self._MEASURE_CONDITION_ORDER:
-            if column_key.endswith(f"_{suffix}"):
-                return suffix
-        return None
-
-    # Задача користувача: "Доска АД, яка там вагонка може бути? ніякої, тому
-    # нащо це показувати?" — кожна дія прив'язана до ОДНОГО конкретного
-    # товару (prefill_json), тож лише ОДНА з трьох умов виміру справді
-    # МОЖЛИВА для неї; решта — мертвий, недосяжний код, а не рідкісний
-    # виняток. Обчислюємо через РЕАЛЬНУ функцію розпізнавання
-    # (_is_area_based_product, telegram_dialog.py, через _preview_worker) —
-    # не дублюємо список товарів тут. Товар типу Вагонка перевіряється в
-    # _row_measure_kind ПЕРШИМ (перед розміром), тож для нього "мп" так само
-    # недосяжний, як і "м3" — обидва приховуються, лишається лише "м2" за
-    # замовчуванням.
-    def _reachable_measure_groups(self, operation_id):
-        operation = self._ops_get_operation(operation_id)
-        prefill_json = operation[6] if operation else None
-        prefill = json.loads(prefill_json) if prefill_json else {}
-        if self._preview_worker()._is_area_based_product(prefill.get("product")):
-            return "area", set()
-        return "volume", {"linear"}
-
-    # Задача користувача (кілька раундів правок): спершу довгий список усіх
-    # дій одразу ("так важко листати") -> випадаючий список -> тепер:
-    # ГОЛІ заголовки-кнопки, кожен відкриває ОКРЕМЕ спливаюче (НЕ модальне)
-    # вікно з подробицями. Можна відкрити кілька вікон одразу — для дій, і
-    # для їхніх категорій — і порівнювати їх поруч (сам користувач це й
-    # попросив: "щоб можна було... для порівняння двох чи трьох+ дій
-    # одночасно"). Кожне вікно САМОДОСТАТНЄ (не просто "дивись інше вікно") —
-    # навіть категорія, що продовжує той самий потік (ДОСКА AD), показує
-    # ПОВНУ таблицю полів У СЕБЕ, а не лише посилання на батьківське вікно.
     # Крок "Дії" remote-sync (2026-08-18): 6 лукапів над self._operations_
     # tree_cache (id, code, kind, requires_row_identity, label,
     # parent_action_code, prefill_json, position, enabled, builtin_key для
@@ -2380,18 +2232,36 @@ class ExcelViewerApp:
             return []
         return [row for row in tree["columns"] if row[1] == operation_field_id]
 
+    # Крок "Дії" редизайн (2026-08-18): "заборони редагувати їх, і просто
+    # зроби як доступні для огляду, щоб бачити що звідки йде" — CRUD-попапи
+    # (додати/перейменувати/видалити категорію чи поле-запит, редагувати
+    # прив'язку) прибрані з коду повністю (gui.py/warehouse_data.py/
+    # webapp_server.py/remote_control_client.py), лишається лише перегляд.
+    # Замість дерева з попапами — плаский реєстр-таблиця (Дія | Поле | Куди
+    # пише | Знак): кожен рядок — ОДНА реальна прив'язка bot_operation_
+    # field_columns, той самий факт, що раніше показувався всередині попапу
+    # дії, тепер видно одразу, без відкриття/порівняння кількох вікон.
     def _build_actions_view(self, parent):
         top_note = tk.Label(
             parent,
-            text=(
-                self._t("Натисніть на дію, щоб побачити подробиці в окремому вікні — "
-                "можна відкрити кілька вікон одразу, щоб порівняти дії між собою.")
+            text=self._t(
+                "Реєстр усіх дій бота: кожен рядок — одне поле-запит і колонка таблиці, "
+                "куди воно записує значення. Лише перегляд."
             ),
             wraplength=640,
             justify="left",
         )
         top_note.pack(anchor="w", padx=16, pady=(16, 8))
-        self._render_add_row_button(parent, "+ Додати кнопку", lambda: self.add_custom_button_dialog(None))
+
+        search_row = tk.Frame(parent)
+        search_row.pack(fill="x", padx=16, pady=(0, 8))
+        tk.Label(search_row, text=self._t("Пошук:")).pack(side="left")
+        self._actions_search_var = tk.StringVar()
+        tk.Entry(search_row, textvariable=self._actions_search_var).pack(
+            side="left", fill="x", expand=True, padx=(6, 0)
+        )
+        self._actions_search_var.trace_add("write", lambda *_args: self._render_actions_registry_rows())
+
         self.actions_list_frame = self._create_scrollable_list(parent)
         self._refresh_actions_view()
 
@@ -2405,1401 +2275,14 @@ class ExcelViewerApp:
             "antiseptic": (antiseptic_headers, antiseptic_columns(antiseptic_headers) if antiseptic_headers else {}),
         }
 
-    # Будує самодостатній вузол для дії — з дітьми-категоріями (якщо є),
-    # кожна дитина теж самодостатня. "Начать приход товара"/"Начать
-    # продажу" — ЧИСТА навігація (Задача користувача, Крок 3+ "Дії"): без
-    # власної таблиці, лише список дітей. Самі діти (ДОСКА AD/KD/ОСБ/
-    # ВАГОНКА/АНТИСЕПТИРОВАНИЕ) тепер БД-дії (bot_operations) — редаговані
-    # через _render_operation_fields, а не статичний _ACTION_COLUMN_INFO.
-    # "Показать остаток склада"/"Показать отчёт по продажам" — теж БД-дії
-    # (Задача користувача: ці два звіти мають бути так само редаговані),
-    # але без категорій-дітей — самі несуть свій operation_id напряму.
-    # Задача користувача: "залиш тільки назви... кнопки мають бути
-    # однаковими" — кнопки (і верхнього списку, і категорій усередині
-    # попапу) показують ЛИШЕ назву дії/категорії, без "→ вкладка" чи "—
-    # не працює з таблицею" (це залежало від живих прив'язок — стороннє
-    # для непрограміста, і одного разу вже показало РЕАЛЬНУ сторонню
-    # прив'язку, додану під час живого тестування, як щось "нормальне").
-    # Крок 4.1: тепер будується з СИРОГО рядка custom_menu_buttons
-    # (list_custom_buttons/get_custom_button), рекурсивно — вузол може мати
-    # РЕАЛЬНИХ дітей у дереві (напр. ДАННЫЕ -> СКЛАД/ПРОДАЖИ), а не лише
-    # синтетичні bot_operations-категорії під start_income/start_sale.
-    # Пріоритет дітей ТОЙ САМИЙ, що й у реальній диспетчеризації бота
-    # (_enter_custom_button_node, telegram_dialog.py): спершу РЕАЛЬНІ діти
-    # дерева, і лише якщо їх немає — синтетичні категорії за action_code.
-    def _action_view_node(self, row):
-        node_id, label, _message_text, action_code, _section, _enabled, _layout, row_operation_id = row
-        is_navigation_only = action_code in ("start_income", "start_sale")
-        is_report_operation = action_code in ("start_stock_report", "start_sales_report")
-        own_groups = (
-            [] if (is_navigation_only or is_report_operation) else self._ACTION_COLUMN_INFO.get(action_code, [])
-        )
-        # Крок 4.3: вузол може нести ПРЯМЕ посилання на конкретну дію
-        # (custom_menu_buttons.operation_id) — тоді він сам себе описує
-        # (own_operation_id) і НЕ потребує синтетичних дітей нижче
-        # (is_navigation_only/is_report_operation лишаються як запасний
-        # варіант для ще НЕ мігрованих встановлень/кнопок без прямого
-        # посилання).
-        own_operation_id = row_operation_id
-        children = []
-        tree_children = self._custom_buttons_children(node_id)
-        if tree_children:
-            children = [self._action_view_node(child_row) for child_row in tree_children]
-        elif own_operation_id is not None:
-            pass
-        elif is_navigation_only:
-            category_nodes = []
-            for operation in self._ops_list_operations(action_code):
-                operation_id, _code, _kind, _requires_identity, op_label, _parent, prefill_json, *_rest = operation
-                prefill_raw = json.loads(prefill_json) if prefill_json else None
-                prefill = (
-                    {self._PREFILL_FIELD_LABELS.get(key, key): value for key, value in prefill_raw.items()}
-                    if prefill_raw
-                    else None
-                )
-                category_nodes.append(
-                    {
-                        "title": op_label,
-                        "prefill": prefill,
-                        "operation_id": operation_id,
-                        "no_table_text": None,
-                        "children": [],
-                        # Категорії не мають ВЛАСНОГО фіксованого вхідного
-                        # повідомлення — продовжують чек-лист батьківської
-                        # дії, тож редагованого тексту тут немає.
-                        "message_key": None,
-                    }
-                )
-            if action_code == "start_sale":
-                # Задача користувача (скріншот): відкривши РЕАЛИЗАЦИЯ, текст
-                # "Виберіть спосіб оплати" стоїть одразу над категоріями
-                # товару — але насправді бот між ними показує ЩЕ ОДИН,
-                # окремий текст (з'являється лише ПІСЛЯ вибору способу
-                # оплати, разом з клавіатурою категорій). Раніше цей текст
-                # був хардкоджений одразу у ДВОХ місцях telegram_dialog.py
-                # і взагалі не мав редагованого представлення — тому
-                # виглядало, ніби текст РЕАЛИЗАЦИЯ стосується категорій
-                # напряму. Тепер це окремий проміжний вузол зі своїм
-                # message_key ("start_sale_category_prompt"), категорії —
-                # його діти. category_parent_action_code позначає, що САМЕ
-                # цей вузол несе список категорій (kind='sale') — тут, а не
-                # на самій РЕАЛИЗАЦИЯ, показуємо +/ред/x (Задача
-                # користувача: "додай можливість додавати та видаляти ці
-                # параметри (кнопки), а також перейменовувати").
-                children = [
-                    {
-                        "title": self._t("Категорія товару (після вибору способу оплати)"),
-                        "prefill": None,
-                        "operation_id": None,
-                        "no_table_text": self._t("Ця кнопка лише показує категорії нижче — сама не пише в таблицю."),
-                        "children": category_nodes,
-                        "message_key": "start_sale_category_prompt",
-                        "category_parent_action_code": "start_sale",
-                    }
-                ]
-            else:
-                children = category_nodes
-        elif is_report_operation:
-            operations = self._ops_list_operations(action_code)
-            own_operation_id = operations[0][0] if operations else None
-        return {
-            "title": label,
-            "prefill": None,
-            "groups": own_groups,
-            "operation_id": own_operation_id,
-            "no_table_text": (
-                self._t("Ця кнопка лише показує категорії нижче — сама не пише в таблицю.")
-                if children
-                else (self._t("Ця дія не працює з таблицею складу.") if not own_groups and own_operation_id is None else None)
-            ),
-            "children": children,
-            "message_key": action_code if action_code in BOT_MESSAGE_DEFAULTS else None,
-            # Той самий принцип, що й для sale вище: коли ЦЕЙ вузол сам несе
-            # список категорій (income), +/ред/x показуються тут.
-            "category_parent_action_code": "start_income" if action_code == "start_income" else None,
-            # Реальний вузол дерева custom_menu_buttons (не синтетична
-            # категорія bot_operations) — потрібен, щоб інлайн +/ред/x для
-            # РЕАЛЬНИХ дітей (напр. ДАННЫЕ -> СКЛАД/ПРОДАЖИ) могли
-            # перевикористати вже готові add/edit/delete_custom_button_dialog.
-            # has_real_tree_children — ОКРЕМИЙ прапорець (не просто "чи є
-            # tree_node_id", який є завжди): без нього РЕАЛИЗАЦИЯ теж
-            # помилково отримала б інлайн-контроли custom_menu_buttons
-            # (у неї tree_node_id теж є, але її ЄДИНА дитина — синтетичний
-            # вузол "Категорія товару", не рядок custom_menu_buttons).
-            "tree_node_id": node_id,
-            "has_real_tree_children": bool(tree_children),
-            # Задача користувача: способи оплати, які клієнт реально бачить
-            # на цьому кроці, мають бути видні й редаговані ПРЯМО тут —
-            # видалю/додам/перейменую тут, і те саме одразу станеться в
-            # боті. Той самий payment_method_options (Крок 4.4) і ті самі
-            # діалоги, що й окремий екран "Способи оплати" в Налаштуваннях
-            # — не окремий, другий механізм, а те саме джерело даних.
-            "show_payment_methods": action_code == "start_sale",
-        }
-
-    def _render_action_column_groups(self, parent, groups, columns_by_source):
-        for group in groups:
-            headers, resolved_columns = columns_by_source[group["source"]]
-            tk.Label(
-                parent, text=self._t("Таблиця: {value}").format(value=group['sheet']), anchor="w", font=("Segoe UI", 10, "bold"),
-            ).pack(fill="x", pady=(8, 2))
-            if not headers:
-                tk.Label(parent, text=self._t("  (таблиця не знайдена)"), anchor="w").pack(fill="x")
-                continue
-            for field_key, field_label, marker in group["fields"]:
-                index = resolved_columns.get(field_key)
-                column_name = headers[index] if index is not None and index < len(headers) else None
-                value_text = (
-                    self._t('колонка «{value}»').format(value=column_name)
-                    if column_name
-                    else self._t("колонка не знайдена в поточній таблиці")
-                )
-                marker_symbol, marker_color = self._ACTION_FIELD_MARKERS[marker]
-                field_row = tk.Frame(parent)
-                field_row.pack(fill="x")
-                tk.Label(
-                    field_row, text=marker_symbol, fg=marker_color, font=("Segoe UI", 10, "bold"), width=2,
-                ).pack(side="left")
-                tk.Label(field_row, text=f"{field_label} → {value_text}", anchor="w").pack(
-                    side="left", fill="x", expand=True
-                )
-
-    # Коротке МОДАЛЬНЕ (grab_set — на відміну від вікон вузлів) віконце
-    # редагування одного повідомлення бота. on_saved викликається і після
-    # "Зберегти", і після "Скинути до типового" — оновлює лише текстове
-    # поле в батьківському вікні вузла, не перебудовуючи його ціле (щоб не
-    # зсунути позицію вікна на екрані каскадним зміщенням).
-    # default_text=None -> бере з BOT_MESSAGE_DEFAULTS (усі старі виклики,
-    # без змін). Задача користувача: заголовок дії — той самий механізм
-    # (bot_message_templates), АЛЕ його дефолт — ПОРОЖНІЙ текст (поки не
-    # заданий — заголовка просто нема), тож "не можна зберегти порожнім"
-    # має діяти лише коли типовий текст сам НЕ порожній (тих 6 фіксованих
-    # повідомлень справді не можна лишити без тексту).
-    def _open_message_template_editor(self, message_key, on_saved, default_text=None, title=None, prompt=None):
-        if default_text is None:
-            default_text = BOT_MESSAGE_DEFAULTS[message_key]
-        current_text = self.store.get_message_template(message_key, default_text)
-
-        window = tk.Toplevel(self.root)
-        window.title(title or self._t("Редагувати повідомлення бота"))
-        window.transient(self.root)
-        window.grab_set()
-
-        content = tk.Frame(window)
-        content.pack(fill="both", expand=True, padx=16, pady=16)
-
-        tk.Label(content, text=prompt or self._t("Текст, який бот напише в чат:"), anchor="w").pack(fill="x")
-        text_widget = tk.Text(content, width=50, height=8, wrap="word")
-        text_widget.insert("1.0", current_text)
-        text_widget.pack(fill="both", expand=True, pady=(4, 12))
-
-        button_row = tk.Frame(content)
-        button_row.pack(fill="x")
-
-        def cancel():
-            window.destroy()
-
-        def save():
-            new_text = text_widget.get("1.0", "end").rstrip("\n")
-            if not new_text.strip():
-                if default_text.strip():
-                    messagebox.showerror(self._t("Редагувати повідомлення"), self._t("Текст не може бути порожнім."))
-                    return
-                self.store.reset_message_template(message_key)
-            else:
-                self.store.set_message_template(message_key, new_text)
-            window.destroy()
-            on_saved()
-
-        def reset_to_default():
-            self.store.reset_message_template(message_key)
-            window.destroy()
-            on_saved()
-
-        tk.Button(button_row, text=self._t("Скинути до типового"), command=reset_to_default).pack(side="left")
-        tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
-        tk.Button(button_row, text=self._t("Зберегти"), command=save).pack(side="right")
-
-        window.bind("<Escape>", lambda event: cancel())
-        window.protocol("WM_DELETE_WINDOW", cancel)
-        self._center_window(window, width=460, height=360)
-
-    def _open_operation_header_editor(self, header_key, on_saved):
-        self._open_message_template_editor(
-            header_key, on_saved, default_text="",
-            title=self._t("Заголовок запиту бота"),
-            prompt=self._t(
-                "Вільний текст над автоматичним запитом (Товар/Порода/...\n"
-                "Не хватает данных...). Можна лишити порожнім — тоді заголовка нема:"
-            ),
-        )
-
-    # Крок 3+ "Дії", Етап 2: рендерить поля-запити ДІЇ (bot_operation_fields)
-    # і, всередині кожного, список його внутрішніх дій (bot_operation_
-    # field_columns) — на відміну від _render_action_column_groups (групує
-    # за вкладкою), тут групуємо за ПОЛЕМ, бо саме поле — обгортка, яку
-    # користувач редагує, а внутрішні дії можуть лежати на різних вкладках
-    # одночасно (Задача користувача: "Ширина... внутрішні дії... список").
-    # refresh — замикання, яке перебудовує ЛИШЕ цей блок (не все вікно),
-    # щоб не зсунути каскадну позицію popup-у на екрані.
-    # Задача користувача, скріншот "Клиент -> ■ ПРОДАЖА МАТЕРИАЛА: «Клиент»":
-    # "нам потрібно це відображати? що я ним можу змінити?" — чесна
-    # відповідь: НІЧОГО, коли write_mode='ledger'. Перевірено в коді:
-    # execute_operation_write (warehouse_data.py) виконує РІВНО прив'язки
-    # з write_mode='generic' — 'ledger' пропускає завжди, незалежно від
-    # маркера (тобто й "+"-позначені ledger-прив'язки на ПРОДАЖА МАТЕРИАЛА
-    # так само нічого не пишуть цим редактором — реальний запис робить
-    # sale_sheet_values/antiseptic_sheet_values). Для звітів ще
-    # категоричніше: _sales_report_spec/_stock_report_spec взагалі НІКОЛИ
-    # не читають bot_operation_field_columns — колонки звіту будуються
-    # лише з list_operation_fields (мітка/enabled/позиція) +
-    # _STOCK_REPORT_COLUMN_META/_SALES_REPORT_COLUMN_META. Тобто кнопка
-    # "Редагувати" на ledger-прив'язці й раніше нічого не міняла в
-    # реальній поведінці — лише вводила в оману, ніби змінює. Прибрано для
-    # ledger-прив'язок повністю, замінено на чесний, однаковий для всіх
-    # kind підпис (сам ФАКТ isinstance write_mode тут важливіший за kind).
-    def _binding_is_editable(self, write_mode):
-        return write_mode == "generic"
-
-    # Задача користувача (5 скріншотів полів без жодної видимої прив'язки —
-    # Клиент/Цена/Сумма/Способ оплаты у продажу, і весь список полів
-    # антисептирования): "тут потрібно всі поля дописати пояснення... що
-    # цей пункт саме це запитує... сума вираховує та вносить суму у таку-то
-    # колонку. і т.д. все що записується в колонки - має бути показано".
-    # Ledger-прив'язки цих полів свідомо ПРИХОВАНІ (_binding_is_editable,
-    # рядок вище) — вони не показують ЯКУ колонку/маркер реально
-    # використовує sale_sheet_values/antiseptic_sheet_values (warehouse_
-    # data.py), бо ці функції пишуть напряму, не через execute_operation_
-    # write. Текст нижче — ТОЧНИЙ переказ того, що ці функції РЕАЛЬНО
-    # роблять із кожним полем (перевірено рядок за рядком у коді, не
-    # здогадка) — саме "sale" (ДОСКА AD/KD/ОСБ/ВАГОНКА) і "service"
-    # (АНТИСЕПТИРОВАНИЕ) мають ledger-поля; "income" — жодного. Наступне
-    # уточнення користувача: "вказуй також КУДИ вноситься ця інфі" — назви
-    # вкладки/стовпця нижче взяті НАПРЯМУ з sales_columns/antiseptic_columns
-    # (warehouse_data.py) — реальні заголовки колонок цих аркушів, не
-    # семантичні ключі коду.
-    # Кожне значення — 2-кортеж (опис, речення "Вноситься у вкладку...") —
-    # призначені двом ОКРЕМИМ Label у _render_operation_fields, щоб друге
-    # речення можна було виділити стилем однаково скрізь (задача користувача:
-    # "Вноситься во вкладку якось потрібно виділити скрізь однаково").
-    _LEDGER_FIELD_EXPLANATIONS = {
-        "sale": {
-            "client": (
-                "Ім'я клієнта (компанія або фіз. особа), яке ввів клієнт/менеджер — записується як є, без обчислень.",
-                "Вноситься у вкладку «ПРОДАЖА МАТЕРИАЛА», стовпець «Клиент».",
-            ),
-            "address": (
-                "Адреса виграна, яку назвав клієнт — записується як є, без обчислень. Вводиться один раз на всю продажу.",
-                "Вноситься у вкладку «ПРОДАЖА МАТЕРИАЛА», стовпець «Адрес выгрузки».",
-            ),
-            "price_per_unit": (
-                "Ціна за одиницю виміру (м3/м2/мп — залежно від товару), яку назвав клієнт.",
-                "Вноситься у вкладку «ПРОДАЖА МАТЕРИАЛА», стовпець «Цена за ед.».",
-            ),
-            "total_amount": (
-                "Сума = ціна за одиницю × кількість. Рахується автоматично, якщо клієнт не назвав суму напряму.",
-                "Вноситься у вкладку «ПРОДАЖА МАТЕРИАЛА», стовпець «Сумма».",
-            ),
-            "payment_method": (
-                "Обраний спосіб оплати (зі списку «Способи оплати») — записується як є.",
-                "Вноситься у вкладку «ПРОДАЖА МАТЕРИАЛА», стовпець «Форма оплаты».",
-            ),
-        },
-        "service": {
-            "date": (
-                "Дата надання послуги — сьогоднішня, якщо клієнт не вказав іншу.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Дата».",
-            ),
-            "service_number": (
-                "Порядковий номер послуги — рахується автоматично (кількість уже записаних послуг + 1).",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «№ услуги».",
-            ),
-            "client": (
-                "Ім'я клієнта (компанія або фіз. особа), яке ввів клієнт/менеджер — записується як є, без обчислень.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Клиент».",
-            ),
-            "address": (
-                "Адреса виграна, яку назвав клієнт — записується як є, без обчислень.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Адрес выгрузки».",
-            ),
-            "service": (
-                "Завжди фіксований текст «Антисептирование» — тип послуги, не змінюється.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Услуга».",
-            ),
-            "unit": (
-                "Завжди «м3» — одиниця виміру цієї послуги, не змінюється.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Ед. изм.».",
-            ),
-            "volume": (
-                "Об'єм послуги (м3), який назвав клієнт.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Объем, м3».",
-            ),
-            "price_per_unit": (
-                "Ціна за м3. Якщо клієнт одразу назвав суму без ціни — ціна рахується у зворотному напрямку (сума ÷ об'єм).",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Цена за м3, MDL».",
-            ),
-            "total_amount": (
-                "Сума = ціна за м3 × об'єм. Рахується автоматично, якщо клієнт не назвав суму напряму.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Стоимость, MDL».",
-            ),
-            "payment_method": (
-                "Обраний спосіб оплати (зі списку «Способи оплати») — записується як є.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Тип расчета».",
-            ),
-            "payment_status": (
-                "Завжди «Оплачено» — часткова чи відкладена оплата в програмі не ведеться.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Статус оплаты».",
-            ),
-            "document": (
-                "Тип документа, якщо клієнт його вказав — інакше лишається порожнім.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «№ документа».",
-            ),
-            "cash_amount": (
-                "Уся сума послуги, якщо оплата ГОТІВКОЮ (не «ЕФАКТУРА Б/Н») — інакше 0.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Приход наличных, MDL».",
-            ),
-            "bank_amount": (
-                "Уся сума послуги, якщо оплата БАНКОМ («ЕФАКТУРА Б/Н») — інакше 0.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Приход по банку, MDL».",
-            ),
-            "reflection": (
-                "«БАНК» або «НАЛИЧНЫЕ» — залежно від способу оплати.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Отражение в расчетах».",
-            ),
-            "manager": (
-                "Ім'я менеджера, який оформив послугу (з профілю Telegram або вказане напряму).",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Ответственный».",
-            ),
-            "comment": (
-                "Текст повідомлення клієнта в Telegram + додатковий коментар, якщо є.",
-                "Вноситься у вкладку «АНТИСЕПТИРОВАНИЕ», стовпець «Комментарий».",
-            ),
-        },
-    }
-
-    def _render_operation_fields(self, parent, operation_id, refresh):
-        columns_by_source = self._actions_columns_by_source()
-        fields = self._ops_list_operation_fields(operation_id)
-        operation_row = self._ops_get_operation(operation_id)
-        operation_kind = operation_row[2] if operation_row else None
-        ledger_explanations = self._LEDGER_FIELD_EXPLANATIONS.get(operation_kind, {})
-        if not fields:
-            tk.Label(parent, text=self._t("(немає полів-запитів)"), anchor="w", fg="#57606a").pack(fill="x")
-        for field in fields:
-            field_id, _operation_id, field_key, label, is_identity, _position, _enabled, _builtin_key = field
-            bindings = self._ops_list_operation_field_columns(field_id)
-            # Задача користувача: "прибери із виду все, що нічого не
-            # робить, а просто перевіряє" — товар/порода/тип/товщина/
-            # ширина/довжина без жодної прив'язки (приход/продаж, після
-            # _remove_noop_identity_bindings) — це РІВНО такі поля: бот
-            # звіряє ними рядок складу, нічого не пише й не показує. У
-            # звітах (Остаток/Отчёт по продажам) ті самі поля МАЮТЬ
-            # прив'язку (показують значення) — тому лишаються видимими.
-            if field_key in self._IDENTITY_SHAPED_FIELD_KEYS and not bindings:
-                continue
-            # Задача користувача: "не видно не примружившись, скільки там
-            # взагалі вікон" — товщий/темніший контур + більший відступ між
-            # коробками, щоб межі кожного поля-запиту було видно одразу.
-            field_box = tk.Frame(parent, highlightbackground="#8c959f", highlightthickness=2)
-            field_box.pack(fill="x", pady=(0, 12))
-
-            header_row = tk.Frame(field_box, bg="#ddf4ff")
-            header_row.pack(fill="x")
-            title_text = f"🔒 {label}" if is_identity else label
-            # Крок 3+ "Дії", Етап 3: захищені (is_identity) поля видалити не
-            # можна — бот шукає рядок складу саме за ними (_warehouse_row_
-            # matches, telegram_dialog.py); лише замок, без кнопки.
-            if not is_identity:
-                tk.Button(
-                    header_row, text=self._t("Видалити поле"),
-                    command=lambda fid=field_id, lbl=label: self._delete_operation_field_confirm(fid, lbl, refresh),
-                ).pack(side="right", padx=(4, 8))
-            self._render_inline_label_row(
-                header_row, field_id, label, refresh, display_text=title_text,
-                font=("Segoe UI", 10, "bold"), bg="#ddf4ff", pack_kwargs={"padx": (8, 0), "pady": 6},
-            )
-
-            ledger_explanation = ledger_explanations.get(field_key)
-            if ledger_explanation:
-                description_text, destination_text = ledger_explanation
-                tk.Label(
-                    field_box, text=self._t(description_text), anchor="w", justify="left",
-                    fg="#57606a", wraplength=520,
-                ).pack(fill="x", padx=8, pady=(4, 0))
-                # Задача користувача: "Вноситься во вкладку якось потрібно
-                # виділити скрізь однаково" — той самий "info blue" колір,
-                # що вже позначає ■-маркер (див. _render_binding_marker),
-                # плюс жирний шрифт, щоб речення про призначення поля
-                # читалось окремо від опису вище.
-                tk.Label(
-                    field_box, text=self._t(destination_text), anchor="w", justify="left",
-                    fg="#0969da", font=("Segoe UI", 9, "bold"), wraplength=520,
-                ).pack(fill="x", padx=8, pady=(0, 6))
-
-            def render_binding_row(binding, indent):
-                column_id, _field_id2, sheet, column_key, marker, write_mode, _position2, _builtin_key2 = binding
-                # Задача користувача: "мертвий вантаж дишився, видали
-                # його" — пояснювальний підпис під ledger-прив'язкою й
-                # досі займав місце, показуючи щось, що НІЧОГО не робить.
-                # Той самий принцип, що вже застосований до no-op identity-
-                # прив'язок (_IDENTITY_SHAPED_FIELD_KEYS): не пояснювати, а
-                # взагалі не показувати. Поле саме (заголовок, перейменування,
-                # видалення, "+ Додати прив'язку") лишається — прибирається
-                # лише РЯДОК прив'язки, яка нічого не виконує.
-                if not self._binding_is_editable(write_mode):
-                    return
-                headers, resolved_columns = columns_by_source.get(self._SHEET_TO_SOURCE.get(sheet), ([], {}))
-                index = resolved_columns.get(column_key)
-                column_name = headers[index] if index is not None and index < len(headers) else None
-                value_text = f'«{column_name}»' if column_name else self._t("колонка не знайдена в поточній таблиці")
-                marker_symbol, marker_color = self._ACTION_FIELD_MARKERS[marker]
-                binding_row = tk.Frame(field_box)
-                binding_row.pack(fill="x", padx=indent, pady=1)
-                tk.Label(
-                    binding_row, text=marker_symbol, fg=marker_color, font=("Segoe UI", 10, "bold"), width=2,
-                ).pack(side="left")
-                tk.Label(binding_row, text=f"{sheet}: {value_text}", anchor="w").pack(
-                    side="left", fill="x", expand=True
-                )
-                tk.Button(
-                    binding_row, text=self._t("Редагувати"),
-                    command=lambda fid=field_id, cid=column_id: self._open_operation_binding_editor(fid, cid, refresh),
-                ).pack(side="right")
-
-            # Задача користувача: показати умови м2/мп як гілки — якщо
-            # прив'язки цього поля охоплюють БІЛЬШЕ ОДНІЄЇ умови (напр.
-            # "Кількість, м3/м2/вимір" завжди має усі 3), групуємо під
-            # заголовком-умовою; інакше (звичайне поле з однією чи жодною
-            # умовою) — як і раніше, плаский список без заголовків.
-            grouped_bindings = {}
-            ungrouped_bindings = []
-            for binding in bindings:
-                group_key = self._measure_condition_group(binding[3])
-                if group_key:
-                    grouped_bindings.setdefault(group_key, []).append(binding)
-                else:
-                    ungrouped_bindings.append(binding)
-
-            if len(grouped_bindings) > 1:
-                for binding in ungrouped_bindings:
-                    render_binding_row(binding, indent=8)
-                # Задача користувача: "Доска АД, яка там вагонка може бути?
-                # ніякої, тому нащо це показувати?" — кожна дія прив'язана
-                # до ОДНОГО конкретного товару, тож лише ОДНА з трьох умов
-                # виміру справді МОЖЛИВА для неї; групи, які цій дії
-                # структурно недосяжні, взагалі не показуємо (не "виняток",
-                # а мертвий код).
-                default_group, exception_groups = self._reachable_measure_groups(operation_id)
-                for group_key in self._MEASURE_CONDITION_ORDER:
-                    if group_key != default_group and group_key not in exception_groups:
-                        continue
-                    group = grouped_bindings.get(group_key)
-                    if not group:
-                        continue
-                    if group_key == default_group:
-                        # Задача користувача: "Вагонка? значить і інформація
-                        # за умовчуванням для м2 потрібна, яке м3 у
-                        # вагонці?" — єдиний реально можливий варіант для
-                        # цієї дії показується як звичайна прив'язка, без
-                        # жодної виноски (для більшості дій це, як і
-                        # раніше, об'єм/м3; для Вагонки — площа/м2).
-                        for binding in group:
-                            render_binding_row(binding, indent=8)
-                    else:
-                        # Задача користувача: "умови жовтим - таке собі...
-                        # другорядне має виглядати як додаткове" — дрібна
-                        # приглушена виноска замість жовтого банера на всю
-                        # ширину (той виглядав як рівноцінна альтернатива,
-                        # а не як виняток). Потім: "виняток теж виділи, щоб
-                        # було помітно оку, але щоб не нав'язливо" — суто
-                        # приглушений текст губився поруч зі звичайними
-                        # прив'язками, тож додано легкий підфарбований "чіп"
-                        # (bg лише навколо тексту, anchor="w" БЕЗ fill="x" —
-                        # щоб підсвітка не розтягувалась на всю ширину й не
-                        # ставала знову банером), напівжирний замість курсиву
-                        # (курсив читається гірше, тож не привертав увагу).
-                        exception_label = self._t(self._MEASURE_CONDITION_LABELS[group_key])
-                        tk.Label(
-                            field_box, text=exception_label,
-                            font=("Segoe UI", 8, "bold"), fg="#8a5a00", bg="#fff3d6",
-                            anchor="w", padx=6, pady=1,
-                        ).pack(anchor="w", padx=28, pady=(4, 0))
-                        for binding in group:
-                            render_binding_row(binding, indent=28)
-            else:
-                for binding in bindings:
-                    render_binding_row(binding, indent=8)
-
-            tk.Button(
-                field_box, text=self._t("+ Додати прив'язку до таблиці"),
-                command=lambda fid=field_id: self._open_operation_binding_editor(fid, None, refresh),
-                fg="#1a7f37", **self._chip_button_style(),
-            ).pack(anchor="w", padx=8, pady=(2, 6))
-
-        tk.Button(
-            parent, text=self._t("+ Додати поле-запит"),
-            command=lambda op_id=operation_id: self._open_operation_field_add_dialog(op_id, refresh),
-            fg="#1a7f37", **self._chip_button_style(),
-        ).pack(anchor="w", pady=(4, 0))
-
-    # Один спільний легкий "воркер" лише для виклику готових функцій
-    # чек-листа бота (telegram_dialog.py) з GUI, щоб прев'ю монітора НІКОЛИ
-    # не розходилось з реальним чат-повідомленням (та сама причина, що й
-    # звіти раніше були "бутафорією" — тут одразу береться СПРАВЖНІЙ код,
-    # а не переписаний окремо текст). Не має мережевих викликів — суто
-    # текстова логіка, безпечно створювати поза Telegram-ботом.
-    def _preview_worker(self):
-        if getattr(self, "_cached_preview_worker", None) is None:
-            class _PreviewWorker(TelegramDialogMixin):
-                pass
-
-            self._cached_preview_worker = _PreviewWorker()
-        return self._cached_preview_worker
-
-    # Задача користувача: "знизу має бути показане поле, як виглядатиме
-    # запит бота" — той самий текст, що бот напише в чат "Не хватает
-    # данных...", обчислений так, ніби ЖОДНЕ поле ще не заповнене (окрім
-    # наперед заданих product/condition з prefill_json цієї дії) — тобто
-    # ПОВНИЙ чек-лист з усіма поточними мітками по порядку. kind='report'
-    # не має чек-листа (звіт нічого не питає, лише показує дані) — для
-    # нього прев'ю не рендериться взагалі.
-    def _compute_operation_request_preview(self, operation_id):
-        operation = self._ops_get_operation(operation_id)
-        if operation is None:
-            return None
-        kind = operation[2]
-        prefill_json = operation[6]
-        payload = json.loads(prefill_json) if prefill_json else {}
-        worker = self._preview_worker()
-        # self._ops_store_view — той самий store, лише operations/fields/
-        # columns читає з remote-кешу (Крок "Дії" remote-sync); все інше
-        # (get_headers/fetch_rows/get_message_template тощо, які ці самі
-        # функції теж викликають) лишається легітимно локальним self.store.
-        if kind == "income":
-            missing = worker._income_missing_fields(self._ops_store_view, payload, kind="income")
-            return worker._income_missing_prompt(missing, payload, store=self._ops_store_view)
-        if kind == "sale":
-            missing = worker._income_missing_fields(self._ops_store_view, payload, kind="sale")
-            return worker._sale_missing_prompt(missing, payload, store=self._ops_store_view)
-        if kind == "service":
-            return worker._antiseptic_mandatory_fields_prompt(self._ops_store_view, payload)
-        return None
-
-    # Крок "Дії" remote-sync (2026-08-18): той самий _push_custom_button_
-    # action/_push_payment_method_action патерн (фон-потік, HTTPError->JSON
-    # "error", messagebox при помилці) — з ОДНІЄЮ відмінністю: при успіху
-    # одразу перезавантажує ВЕСЬ operations_tree (не лише кличе on_success),
-    # тільки ПОТІМ кличе on_success — локальні refresh_fields/refresh_
-    # children_block у вже відкритих popup-вікнах читають self._operations_
-    # tree_cache СИНХРОННО (без власного мережевого запиту), тож кеш має
-    # бути вже свіжим до їхнього виклику.
-    def _push_operation_tree_action(self, action, on_success=None):
-        def worker():
-            error = None
-            tree = None
-            try:
-                action()
-                tree = remote_control_client.fetch_remote_operations_tree()
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")
-                try:
-                    detail = json.loads(detail).get("error") or detail
-                except ValueError:
-                    pass
-                error = detail
-            except Exception as exc:
-                error = str(exc)
-
-            def finish():
-                if error:
-                    messagebox.showerror(self._t("Дії"), error)
-                    return
-                if tree is not None:
-                    self._operations_tree_cache = tree
-                if on_success:
-                    on_success()
-
-            self._run_on_main_thread(finish)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    # Задача користувача: "зроби прям біля кнопок просто квадратики з
-    # олівцем всередині... коли її натискатиму — строка ставатиме активною
-    # для написання... потім появившуся кнопку окей (зелений квадрат із
-    # галочкою)" — inline-редагування мітки замість модального віконця.
-    # Мітка стає Entry на місці, ✏ ховається і замінюється на ✅ у ТІЙ
-    # САМІЙ контрольній рамці (controls), тож решта кнопок у рядку
-    # (напр. "Видалити поле") лишаються на своєму місці незалежно від
-    # цього перемикання.
-    def _render_inline_label_row(self, parent, field_id, current_label, refresh, display_text=None, font=None, bg=None, pack_kwargs=None):
-        display_text = current_label if display_text is None else display_text
-        pack_kwargs = pack_kwargs or {}
-
-        controls = tk.Frame(parent, bg=bg) if bg else tk.Frame(parent)
-        controls.pack(side="right")
-
-        label_widget = tk.Label(parent, text=display_text, anchor="w", font=font, bg=bg)
-        label_widget.pack(side="left", fill="x", expand=True, **pack_kwargs)
-
-        def save(entry):
-            new_label = entry.get().strip()
-            if new_label:
-                self._push_operation_tree_action(
-                    lambda: remote_control_client.update_remote_operation_field(field_id, new_label),
-                    on_success=refresh,
-                )
-            else:
-                refresh()
-
-        def start_edit():
-            label_widget.pack_forget()
-            pencil_button.pack_forget()
-            entry = tk.Entry(parent)
-            entry.insert(0, current_label)
-            entry.pack(side="left", fill="x", expand=True, **pack_kwargs)
-            entry.focus_set()
-            entry.select_range(0, "end")
-            entry.bind("<Return>", lambda event: save(entry))
-            entry.bind("<Escape>", lambda event: refresh())
-            confirm_button = tk.Button(controls, text=self._t("✅"), width=3, fg="#1a7f37", command=lambda: save(entry))
-            confirm_button.pack(side="left")
-
-        pencil_button = tk.Button(controls, text=self._t("✏"), width=3, command=start_edit)
-        pencil_button.pack(side="left")
-
-    # Задача користувача: "маю можливість змінювати назви тих заголовків-
-    # запитів, які бот має запитувати" — товар/порода/тип/товщина/ширина/
-    # довжина (is_identity, з 0 прив'язок) не мають ВЛАСНОГО блоку вище
-    # (_IDENTITY_SHAPED_FIELD_KEYS ховає його як "нічого не робить"), але
-    # бот і далі питає їх у чек-листі — тож перейменування для них тут,
-    # компактним списком (лише мітка + кнопка), без повернення всього
-    # блоку з прив'язками.
-    def _render_operation_technical_fields(self, parent, operation_id, refresh):
-        technical_fields = [
-            field
-            for field in self._ops_list_operation_fields(operation_id)
-            if field[2] in self._IDENTITY_SHAPED_FIELD_KEYS
-            and field[2] not in self._HEADER_COVERED_FIELD_KEYS
-            and not self._ops_list_operation_field_columns(field[0])
-        ]
-        if not technical_fields:
-            return
-        tk.Label(
-            parent,
-            text=(
-                self._t("Технічні поля (лише для пошуку рядка складу, немає власного блоку — "
-                "можна перейменувати мітку, яку бот запитує):")
-            ),
-            anchor="w", fg="#57606a", wraplength=480, justify="left",
-        ).pack(fill="x", pady=(10, 2))
-        for field in technical_fields:
-            field_id, _operation_id, _field_key, label, _is_identity, _position, _enabled, _builtin_key = field
-            row = tk.Frame(parent)
-            row.pack(fill="x", pady=1)
-            self._render_inline_label_row(row, field_id, label, refresh, display_text=f"🔒 {label}")
-
-    # Задача користувача: "поле має оновлюватись в реальному часі... хоча б
-    # 1 раз в секунду... щоб коли я буду переставляти, редагувати дії —
-    # щоб це було відразу видно в запиті бота". Миттєво — безкоштовно:
-    # будь-яка правка в цьому попапі й так викликає refresh (перебудовує
-    # весь блок, разом з монітором). Таймер нижче — лише страховка на
-    # випадок, якщо ТА САМА дія відкрита у ДРУГОМУ попапі одночасно
-    # (попапи не модальні, можна відкрити двічі) — щоб і там текст ожив
-    # без ручного перевідкриття. Кожен виклик _render_operation_fields
-    # створює СВІЙ Text-віджет і СВІЙ таймер; старий таймер від
-    # попереднього рендеру просто зупиняється сам (winfo_exists() стає
-    # False після self._clear_frame), без витоків чи дублювання.
-    def _render_operation_request_monitor(self, parent, operation_id, refresh):
-        self._render_operation_technical_fields(parent, operation_id, refresh)
-        preview_text = self._compute_operation_request_preview(operation_id)
-        if preview_text is None:
-            return
-        # Задача користувача: "запит-питання чат-бота має складатись із 2х
-        # частин. 1 частина - заголовок, редагувати можна на свій смак...
-        # а все сам запрос формується автоматично" — вільний заголовок
-        # редагується ОКРЕМО від решти (яка й далі автоматична, лише
-        # мітки полів редаговані, як і раніше). Порожній за замовчуванням —
-        # доки адмін щось не напише, заголовка просто нема.
-        operation = self._ops_get_operation(operation_id)
-        header_key = f"operation_header_{operation[1]}"
-        header_text = self.store.get_message_template(header_key, "")
-        header_row = tk.Frame(parent)
-        header_row.pack(fill="x", pady=(10, 0))
-        tk.Button(
-            header_row, text=self._t("✏ Заголовок запиту"),
-            command=lambda: self._open_operation_header_editor(header_key, refresh),
-        ).pack(side="left")
-        tk.Label(
-            header_row,
-            text=header_text if header_text else self._t("(немає заголовка — запит одразу починається з даних)"),
-            anchor="w", fg=("#1f2328" if header_text else "#8c959f"),
-        ).pack(side="left", fill="x", expand=True, padx=(8, 0))
-        tk.Label(
-            parent, text=self._t("Так виглядатиме запит бота (оновлюється автоматично):"),
-            font=("Segoe UI", 10, "bold"), anchor="w",
-        ).pack(fill="x", pady=(10, 2))
-        # Задача користувача: "має бути видно ВЕСЬ текст" — висота рахується
-        # за реальною кількістю рядків (а не фіксовані 6), щоб текст ніколи
-        # не обрізався і не вимагав прокрутки ВСЕРЕДИНІ самого віджета.
-        preview_widget = tk.Text(parent, height=max(preview_text.count("\n") + 1, 3), wrap="word")
-        preview_widget.insert("1.0", preview_text)
-        preview_widget.configure(state="disabled")
-        preview_widget.pack(fill="x")
-
-        def tick(widget=preview_widget, op_id=operation_id):
-            if not widget.winfo_exists():
-                return
-            text = self._compute_operation_request_preview(op_id) or ""
-            widget.configure(state="normal", height=max(text.count("\n") + 1, 3))
-            widget.delete("1.0", "end")
-            widget.insert("1.0", text)
-            widget.configure(state="disabled")
-            widget.after(1000, tick)
-
-        preview_widget.after(1000, tick)
-
-    # Крок 3+ "Дії", Етап 3: видалення поля-запиту (каскадно прибирає всі
-    # його прив'язки-колонки через ON DELETE CASCADE) — попереджає, скільки
-    # прив'язок зникне разом з ним, як і скрізь у цій програмі при
-    # каскадному видаленні (custom_menu_buttons тощо). is_identity-поля не
-    # мають цієї кнопки взагалі (_render_operation_fields), тож сюди дійти
-    # неможливо для них, але store.delete_operation_field все одно
-    # відмовить програмно, якби хтось викликав це напряму.
-    def _delete_operation_field_confirm(self, field_id, label, on_saved):
-        bindings_count = len(self._ops_list_operation_field_columns(field_id))
-        if bindings_count:
-            question = self._t(
-                'Видалити поле-запит "{label}"?\n'
-                "Разом з ним видаляться {count} його прив'язок до таблиці."
-            ).format(label=label, count=bindings_count)
-        else:
-            question = self._t('Видалити поле-запит "{value}"?').format(value=label)
-        if not messagebox.askyesno(self._t("Видалити поле-запит"), question):
-            return
-        # Перевірка is_identity/втрати обліку залишку тепер лише на сервері
-        # (client_app.py) — помилку 409 показує _push_operation_tree_action.
-        self._push_operation_tree_action(
-            lambda: remote_control_client.delete_remote_operation_field(field_id), on_success=on_saved,
-        )
-
-    # Крок 3+ "Дії", Етап 3: модальне (grab_set) віконце додавання НОВОГО
-    # поля-запиту до дії. field_key — ЗАКРИТИЙ список (RECOGNIZED_
-    # OPERATION_FIELD_KEYS, warehouse_data.py) мінус ті, що дія вже має
-    # (UNIQUE(operation_id, field_key) все одно захистив би, але краще не
-    # пропонувати завідомо неможливий вибір); adminи не можуть вигадати
-    # новий ключ — розпізнавання тексту лишається незмінним.
-    def _open_operation_field_add_dialog(self, operation_id, on_saved):
-        used_keys = {field[2] for field in self._ops_list_operation_fields(operation_id, include_disabled=True)}
-        available = [(key, label) for key, label in RECOGNIZED_OPERATION_FIELD_KEYS if key not in used_keys]
-        if not available:
-            messagebox.showinfo(
-                self._t("Додати поле-запит"),
-                self._t("Усі відомі боту поля вже додані до цієї дії."),
-            )
-            return
-
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Додати поле-запит"))
-        window.transient(self.root)
-        window.grab_set()
-
-        content = tk.Frame(window)
-        content.pack(fill="both", expand=True, padx=16, pady=16)
-
-        tk.Label(content, text=self._t("Яке поле додати:"), anchor="w").pack(fill="x")
-        label_by_display = {label: key for key, label in available}
-        display_values = [label for _key, label in available]
-        field_var = tk.StringVar(value=display_values[0])
-        field_combo = ttk.Combobox(
-            content, textvariable=field_var, values=display_values, state="readonly",
-        )
-        field_combo.pack(fill="x", pady=(2, 10))
-
-        tk.Label(content, text=self._t("Назва в чек-листі бота:"), anchor="w").pack(fill="x")
-        label_entry = tk.Entry(content, width=42)
-        label_entry.insert(0, display_values[0])
-        label_entry.pack(fill="x", pady=(2, 12))
-
-        def sync_label_default(*_args):
-            label_entry.delete(0, "end")
-            label_entry.insert(0, field_var.get())
-
-        field_combo.bind("<<ComboboxSelected>>", sync_label_default)
-
-        button_row = tk.Frame(content)
-        button_row.pack(fill="x")
-
-        def cancel():
-            window.destroy()
-
-        def save():
-            field_key = label_by_display.get(field_var.get())
-            new_label = label_entry.get().strip()
-            if not field_key or not new_label:
-                messagebox.showerror(self._t("Додати поле-запит"), self._t("Оберіть поле й вкажіть назву."))
-                return
-            window.destroy()
-            self._push_operation_tree_action(
-                lambda: remote_control_client.add_remote_operation_field(operation_id, field_key, new_label),
-                on_success=on_saved,
-            )
-
-        tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
-        tk.Button(button_row, text=self._t("Зберегти"), command=save).pack(side="right")
-
-        window.bind("<Escape>", lambda event: cancel())
-        window.protocol("WM_DELETE_WINDOW", cancel)
-        self._center_window(window, width=420, height=260)
-
-    # Модальне (grab_set) віконце додавання НОВОЇ прив'язки до таблиці
-    # (column_id=None) або редагування/видалення вже існуючої. Колонки у
-    # випадаючому списку — РЕАЛЬНІ поточні назви заголовків (не внутрішні
-    # коди), знайдені через ту саму гнучку систему пошуку заголовків, що й
-    # усюди в програмі (warehouse_columns/sales_columns/antiseptic_columns);
-    # доступні лише ті семантичні "слоти", які бот УЖЕ вміє записувати
-    # (Задача користувача, наразі: обирати з наявного, не вигадувати нове).
-    def _open_operation_binding_editor(self, field_id, column_id, on_saved):
-        columns_by_source = self._actions_columns_by_source()
-        sheet_options = ["СКЛАД", SALES_SHEET_NAME, ANTISEPTIC_SHEET_NAME]
-
-        existing = None
-        if column_id is not None:
-            existing = next(
-                (row for row in self._ops_list_operation_field_columns(field_id) if row[0] == column_id), None
-            )
-
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Додати прив'язку до таблиці") if existing is None else self._t("Редагувати прив'язку до таблиці"))
-        window.transient(self.root)
-        window.grab_set()
-
-        content = tk.Frame(window)
-        content.pack(fill="both", expand=True, padx=16, pady=16)
-
-        tk.Label(content, text=self._t("Вкладка (аркуш):"), anchor="w").pack(fill="x")
-        sheet_var = tk.StringVar(value=existing[2] if existing else sheet_options[0])
-        sheet_combo = ttk.Combobox(content, textvariable=sheet_var, values=sheet_options, state="readonly")
-        sheet_combo.pack(fill="x", pady=(2, 10))
-
-        tk.Label(content, text=self._t("Колонка:"), anchor="w").pack(fill="x")
-        column_var = tk.StringVar()
-        column_combo = ttk.Combobox(content, textvariable=column_var, state="readonly")
-        column_combo.pack(fill="x", pady=(2, 10))
-        column_key_by_display = {}
-
-        def refresh_column_choices(*_args):
-            sheet_name = sheet_var.get()
-            source = self._SHEET_TO_SOURCE.get(sheet_name)
-            headers, resolved_columns = columns_by_source.get(source, ([], {}))
-            column_key_by_display.clear()
-            display_values = []
-            for key, index in resolved_columns.items():
-                if index is None or index >= len(headers):
-                    continue
-                display = headers[index]
-                column_key_by_display[display] = key
-                display_values.append(display)
-            column_combo.configure(values=display_values)
-            if existing is not None and sheet_name == existing[2]:
-                current_index = resolved_columns.get(existing[3])
-                current_display = (
-                    headers[current_index] if current_index is not None and current_index < len(headers) else None
-                )
-                if current_display:
-                    column_var.set(current_display)
-                    return
-            column_var.set(display_values[0] if display_values else "")
-
-        sheet_combo.bind("<<ComboboxSelected>>", refresh_column_choices)
-        refresh_column_choices()
-
-        tk.Label(content, text=self._t("Що робить ця дія із введеним числом:"), anchor="w").pack(fill="x")
-        marker_row = tk.Frame(content)
-        marker_row.pack(fill="x", pady=(2, 12))
-        marker_var = tk.StringVar(value=existing[4] if existing else "add")
-        for marker_key, (symbol, color) in self._ACTION_FIELD_MARKERS.items():
-            tk.Radiobutton(
-                marker_row, text=symbol, fg=color, font=("Segoe UI", 11, "bold"),
-                variable=marker_var, value=marker_key,
-            ).pack(side="left", padx=(0, 12))
-
-        button_row = tk.Frame(content)
-        button_row.pack(fill="x")
-
-        def cancel():
-            window.destroy()
-
-        def save():
-            display = column_var.get()
-            column_key = column_key_by_display.get(display)
-            if not column_key:
-                messagebox.showerror(self._t("Прив'язка до таблиці"), self._t("Оберіть колонку зі списку."))
-                return
-            sheet_name = sheet_var.get()
-            # СКЛАД-прив'язки якогось із 12 відомих семантичних слотів
-            # (income_qty/sold_qty/balance_qty і трійка м3/м2/мп) — це те,
-            # що реально виконує execute_operation_write (warehouse_data.py);
-            # усе інше (ПРОДАЖА МАТЕРИАЛА/АНТИСЕПТИРОВАНИЕ, чи інші поля на
-            # СКЛАД типу "Порода") — лише показ, запис і далі робить
-            # sale_sheet_values/antiseptic_sheet_values.
-            write_mode = "generic" if sheet_name == "СКЛАД" else "ledger"
-            # "Спершу додати нову (виключивши стару з перевірки дублю), лише
-            # при успіху видалити стару" — тепер відбувається ОДНИМ запитом
-            # на сервері (webapp_server._handle_operation_tree_action_
-            # request, op=add_column), включно з тим самим rollback-ом при
-            # невдалому видаленні старої; помилку 409 показує _push_
-            # operation_tree_action.
-            window.destroy()
-            self._push_operation_tree_action(
-                lambda: remote_control_client.add_remote_operation_field_column(
-                    field_id, sheet_name, column_key, marker_var.get(), write_mode,
-                    exclude_column_id=column_id if existing is not None else None,
-                ),
-                on_success=on_saved,
-            )
-
-        def delete():
-            if not messagebox.askyesno(self._t("Видалити прив'язку"), self._t("Видалити цю прив'язку до таблиці?")):
-                return
-            window.destroy()
-            self._push_operation_tree_action(
-                lambda: remote_control_client.delete_remote_operation_field_column(column_id), on_success=on_saved,
-            )
-
-        if existing is not None:
-            tk.Button(button_row, text=self._t("Видалити"), command=delete, fg="#d1242f").pack(side="left")
-        tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
-        tk.Button(button_row, text=self._t("Зберегти"), command=save).pack(side="right")
-
-        window.bind("<Escape>", lambda event: cancel())
-        window.protocol("WM_DELETE_WINDOW", cancel)
-        self._center_window(window, width=420, height=340)
-
-    # Задача користувача: "занадто грубо виглядає, та по застарілому стилю
-    # ... кнопки не мають бути такими довгими" — рядок категорії й кнопки
-    # "ред"/"x" мали важкий 3D-рельєф стандартного tk.Button (стандартний
-    # Windows95-стиль) без жодного padx/pady-контролю. Один спільний
-    # рендерер рядка для "Категорії"/"Способи оплати"/дітей дерева: той
-    # самий tk.Button лишається кнопкою (існуючі GUI-тести навігують по
-    # дереву через .invoke() на ній — заміна на tk.Label зламала б їх),
-    # але з relief="flat"/bd=1 та явним компактним padx/pady замість
-    # важкого рельєфу й генерозного OS-відступу за замовчуванням.
-    #
-    # Наступне уточнення користувача: перша плоска версія (без bg/border)
-    # злилася з фоном і взагалі перестала виглядати як кнопка — "поверни
-    # видімість кнопці, і зменш її ширину, щоб було компактно". Тепер:
-    # видимий тонкий контур + світлий фон (той самий підхід, що й хайлайт
-    # активного рядка в _render_custom_button_row, #d0e8ff/#f6f8fa —
-    # GitHub-подібна палітра), і pack(side="left") БЕЗ fill/expand — кнопка
-    # стає завширшки рівно під свій текст, а не розтягується на весь рядок.
-    def _render_editable_list_row(self, container, text, on_click, on_edit=None, on_delete=None):
-        row = tk.Frame(container)
-        row.pack(anchor="w", fill="x", pady=2)
-
-        # on_click лишається справжньою tk.Button (не Label) — існуючі
-        # GUI-тести навігують по дереву через .invoke() на цій кнопці
-        # (напр. відкриття "Категорія товару"); стиль лише знімає важкий
-        # 3D-рельєф і компактизує ширину, не міняє тип віджета.
-        if on_click:
-            tk.Button(
-                row, text=text, anchor="w", command=on_click, font=("Segoe UI", 9), fg=self._chip_text_color(),
-                padx=8, pady=3, **self._chip_button_style(),
-            ).pack(side="left")
-        else:
-            tk.Label(row, text=text, anchor="w", font=("Segoe UI", 9)).pack(
-                side="left", fill="x", expand=True, ipady=3, padx=(6, 0)
-            )
-
-        button_style = dict(font=("Segoe UI", 9), **self._chip_button_style())
-        if on_delete:
-            tk.Button(row, text=self._t("x"), width=2, fg="#d1242f", command=on_delete, **button_style).pack(
-                side="right", padx=(3, 0)
-            )
-        if on_edit:
-            tk.Button(
-                row, text=self._t("ред"), width=3, fg=self._chip_text_color(), command=on_edit, **button_style
-            ).pack(side="right", padx=(3, 0))
-        return row
-
-    # Задача користувача: "скрізь зроби їх видимими кнопками, бо зараз не
-    # видно що це те, на що можна натиснути" — той самий видимий контур +
-    # світлий фон, що й у _render_editable_list_row вище, для "+ Додати...".
-    def _render_add_row_button(self, container, text, command):
-        tk.Button(
-            container, text=self._t(text), command=command, fg="#1a7f37", font=("Segoe UI", 9, "bold"),
-            anchor="w", padx=8, pady=3, **self._chip_button_style(),
-        ).pack(anchor="w", pady=(6, 0))
-
-    # Спливаюче (НЕ модальне — жодного grab_set) вікно з подробицями ОДНОГО
-    # вузла (дії або категорії). Каскадне зміщення при кожному новому
-    # відкритті — щоб кілька вікон, відкритих одночасно для порівняння, не
-    # лягали рівно одне на одне.
-    def _open_action_node_window(self, node):
-        window = tk.Toplevel(self.root)
-        window.title(node["title"])
-        window.bind("<Escape>", lambda event: window.destroy())
-
-        content = tk.Frame(window)
-        content.pack(fill="both", expand=True, padx=16, pady=16)
-
-        tk.Label(content, text=node["title"], font=("Segoe UI", 12, "bold"), anchor="w").pack(fill="x")
-
-        prefill = node.get("prefill")
-        if prefill:
-            prefill_text = ", ".join(f"{key}={value}" for key, value in prefill.items())
-            tk.Label(content, text=self._t("Наперед заповнює: {value}").format(value=prefill_text), anchor="w").pack(fill="x", pady=(4, 0))
-
-        # Задача користувача: показати (і дати редагувати) текст, який бот
-        # пише в чат одразу після натискання цієї дії. message_key є лише
-        # для 6 кореневих дій (не для категорій — ті не мають власного
-        # фіксованого вхідного тексту, див. _action_view_node).
-        message_key = node.get("message_key")
-        if message_key:
-            tk.Label(
-                content, text=self._t("Повідомлення бота одразу після натискання:"),
-                font=("Segoe UI", 10, "bold"), anchor="w",
-            ).pack(fill="x", pady=(10, 2))
-            message_display = tk.Text(content, height=4, wrap="word")
-            message_display.pack(fill="x")
-
-            def refresh_message_display(widget=message_display, key=message_key):
-                widget.configure(state="normal")
-                widget.delete("1.0", "end")
-                widget.insert("1.0", self.store.get_message_template(key, BOT_MESSAGE_DEFAULTS[key]))
-                widget.configure(state="disabled")
-
-            refresh_message_display()
-            tk.Button(
-                content, text=self._t("Редагувати текст"),
-                command=lambda key=message_key, cb=refresh_message_display: self._open_message_template_editor(key, cb),
-            ).pack(anchor="e", pady=(4, 10))
-
-        # Задача користувача: способи оплати, які клієнт бачить одразу
-        # після цього тексту, мають бути видні й редаговані ПРЯМО тут —
-        # видалю/додам/перейменую тут, і те саме одразу діє в боті. Той
-        # самий store.list/add/update/delete_payment_method_option (Крок
-        # 4.4) і ті самі діалоги, що й окремий екран "Способи оплати" в
-        # Налаштуваннях — тут просто ще одне місце показу тих самих даних.
-        if node.get("show_payment_methods"):
-            tk.Label(
-                content, text=self._t("Способи оплати:"), font=("Segoe UI", 10, "bold"), anchor="w",
-            ).pack(fill="x", pady=(10, 2))
-            payment_methods_frame = tk.Frame(content)
-            payment_methods_frame.pack(fill="x", pady=(0, 10))
-
-            def refresh_payment_methods_block(container=payment_methods_frame):
-                self._clear_frame(container)
-                for option_id, option_label, _option_kind in self.store.list_payment_method_options():
-                    def edit_and_refresh(oid=option_id, lbl=option_label):
-                        self.edit_payment_method_dialog(oid, lbl)
-                        refresh_payment_methods_block()
-
-                    def delete_and_refresh(oid=option_id, lbl=option_label):
-                        self.delete_payment_method_dialog(oid, lbl)
-                        refresh_payment_methods_block()
-
-                    self._render_editable_list_row(
-                        container, option_label, on_click=None,
-                        on_edit=edit_and_refresh, on_delete=delete_and_refresh,
-                    )
-
-                def add_and_refresh():
-                    self.add_payment_method_dialog()
-                    refresh_payment_methods_block()
-
-                self._render_add_row_button(container, "+ Додати спосіб оплати", add_and_refresh)
-
-            refresh_payment_methods_block()
-
-        operation_id = node.get("operation_id")
-        groups = node.get("groups") or []
-        if operation_id is not None:
-            # Крок 3+ "Дії", Етап 2: РЕДАГОВАНІ поля-запити цієї дії
-            # (bot_operations) — на відміну від groups нижче (лише перегляд
-            # для звітів). refresh_fields перебудовує ЛИШЕ цей блок після
-            # будь-якого збереження, не все вікно (щоб не зсунути каскадну
-            # позицію popup-у на екрані — той самий принцип, що й у
-            # refresh_message_display вище).
-            tk.Label(
-                content,
-                text=self._t("Поля-запити цієї дії — натисни «Редагувати», щоб змінити назву чи прив'язку до таблиці:"),
-                anchor="w", fg="#57606a", wraplength=480, justify="left",
-            ).pack(fill="x", pady=(8, 4))
-
-            # Задача користувача: "цей нижній рядок має бути закріпленим
-            # рядком, який відразу видно у весь текст" — monitor_frame
-            # ПАКУЄМО ПЕРШИМ, side="bottom" (Tk-пакер віддає місце в
-            # ПОРЯДКУ pack-виклику; фіксований низ має "забронювати" своє
-            # місце ДО того, як scrollable-список вище заявить
-            # fill="both", expand=True — інакше побратиме собі весь
-            # простір і низ або не влізе, або зникне при прокрутці).
-            monitor_frame = tk.Frame(content, highlightbackground="#8c959f", highlightthickness=2)
-            monitor_frame.pack(side="bottom", fill="x", pady=(8, 0), ipady=6)
-            fields_container = self._create_scrollable_list(content, bordered=True)
-
-            def refresh_fields(container=fields_container, monitor=monitor_frame, op_id=operation_id):
-                self._clear_frame(container)
-                self._clear_frame(monitor)
-                self._render_operation_fields(container, op_id, refresh_fields)
-                self._render_operation_request_monitor(monitor, op_id, refresh_fields)
-
-            refresh_fields()
-        elif not groups:
-            tk.Label(content, text=node.get("no_table_text") or "", anchor="w").pack(fill="x", pady=(8, 0))
-        else:
-            tk.Label(
-                content, text=self._t("■ — це поле бот лише показує, не змінює."), anchor="w", fg="#57606a",
-            ).pack(fill="x", pady=(8, 4))
-            fields_frame = self._create_scrollable_list(content)
-            self._render_action_column_groups(fields_frame, groups, self._actions_columns_by_source())
-
-        children = node.get("children") or []
-        category_parent_action_code = node.get("category_parent_action_code")
-        tree_node_id = node.get("tree_node_id") if node.get("has_real_tree_children") else None
-        if children or category_parent_action_code:
-            tk.Label(content, text=self._t("Категорії:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
-                fill="x", pady=(12, 4)
-            )
-            children_frame = tk.Frame(content)
-            children_frame.pack(fill="x")
-
-            # Задача користувача: "додай можливість додавати та видаляти ці
-            # параметри (кнопки), а також перейменовувати. це для гнучкості
-            # налаштувань на майбутнє" — перебудовує список ЗАВЖДИ зі
-            # свіжих даних store (не з кешованого node["children"]), інакше
-            # rename/delete/add показали б застарілий список одразу після
-            # власної ж дії.
-            def refresh_children_block(container=children_frame):
-                self._clear_frame(container)
-                if category_parent_action_code:
-                    for operation in self._ops_list_operations(category_parent_action_code):
-                        operation_id, _code, kind, _requires_identity, op_label, *_rest = operation
-                        prefill_json = operation[6]
-                        prefill_raw = json.loads(prefill_json) if prefill_json else None
-                        prefill = (
-                            {self._PREFILL_FIELD_LABELS.get(key, key): value for key, value in prefill_raw.items()}
-                            if prefill_raw
-                            else None
-                        )
-                        child_node = {
-                            "title": op_label, "prefill": prefill, "operation_id": operation_id,
-                            "no_table_text": None, "children": [], "message_key": None,
-                        }
-
-                        def open_child(c=child_node):
-                            self._open_action_node_window(c)
-
-                        # Сервісні дії (kind='service', напр. антисептирование)
-                        # НЕ отримують ред/x тут — це окремий, спеціалізований
-                        # флоу (клієнт+обсяг+ціна+оплата, без розмірів/складу),
-                        # і немає рівнозначного "+ Додати" для його відтворення,
-                        # якщо видалити — залишається лише як звичайна кнопка.
-                        if kind != "service":
-                            def rename_and_refresh(oid=operation_id, lbl=op_label, pac=category_parent_action_code):
-                                self.edit_operation_category_dialog(oid, lbl, pac, refresh_children_block)
-
-                            def delete_and_refresh(oid=operation_id, lbl=op_label, pac=category_parent_action_code):
-                                self.delete_operation_category_dialog(oid, lbl, pac, refresh_children_block)
-
-                            self._render_editable_list_row(
-                                container, op_label, on_click=open_child,
-                                on_edit=rename_and_refresh, on_delete=delete_and_refresh,
-                            )
-                        else:
-                            self._render_editable_list_row(container, op_label, on_click=open_child)
-
-                    def add_category_and_refresh(pac=category_parent_action_code):
-                        self.add_operation_category_dialog(pac, refresh_children_block)
-
-                    self._render_add_row_button(container, "+ Додати категорію", add_category_and_refresh)
-                elif tree_node_id is not None:
-                    for child_row in self._custom_buttons_children(tree_node_id):
-                        child_node = self._action_view_node(child_row)
-                        child_id = child_row[0]
-
-                        def open_child(c=child_node):
-                            self._open_action_node_window(c)
-
-                        def edit_and_refresh(cid=child_id):
-                            self.edit_custom_button_dialog(cid)
-                            refresh_children_block()
-
-                        def delete_and_refresh(cid=child_id, lbl=child_node["title"]):
-                            self.delete_custom_button_confirm(cid, lbl)
-                            refresh_children_block()
-
-                        self._render_editable_list_row(
-                            container, child_node["title"], on_click=open_child,
-                            on_edit=edit_and_refresh, on_delete=delete_and_refresh,
-                        )
-
-                    def add_child_and_refresh(pid=tree_node_id):
-                        self.add_custom_button_dialog(pid)
-                        refresh_children_block()
-
-                    self._render_add_row_button(container, "+ Додати кнопку", add_child_and_refresh)
-                else:
-                    for child in children:
-                        def open_child(c=child):
-                            self._open_action_node_window(c)
-
-                        self._render_editable_list_row(container, child["title"], on_click=open_child)
-
-            refresh_children_block()
-
-        # Задача користувача: спершу "зроби розміри вікна більші в рази" —
-        # попап був жорстко 520x560 і стискав вміст; фіксована частка
-        # екрана виправила стиснення, але для КОРОТКИХ дій (мало полів)
-        # лишала "вікно-поле" з купою порожнього простору внизу ("вікна не
-        # мають бути 'полем', дуже багато пустого простору - виглядає
-        # погано"). Тепер висота — під РЕАЛЬНИЙ вміст: scrollable-канвас
-        # (_create_scrollable_list) не пропагує reqheight свого вмісту
-        # (Canvas завжди повертає власний, малий "бажаний" розмір,
-        # незалежно від того, скільки контенту прокручується) — тому
-        # природну висоту прокручуваних розділів рахуємо НАПРЯМУ через
-        # fields_container/monitor_frame/fields_frame (звичайні Frame,
-        # їхній reqheight ЗАВЖДИ точний), а не через content.winfo_
-        # reqheight() (там ця частина була б занижена).
-        window.update_idletasks()
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        chrome_height = 170  # заголовок + паднги content-фрейму (16px x2)
-        extra_height = 40
-        if operation_id is not None:
-            extra_height = fields_container.winfo_reqheight() + monitor_frame.winfo_reqheight() + 30
-        elif groups:
-            extra_height = fields_frame.winfo_reqheight() + 30
-        if message_key:
-            extra_height += 150
-        if children:
-            extra_height += 40 + len(children) * 28
-        max_height = int(screen_height * 0.85)
-        popup_height = min(max(chrome_height + extra_height, 500), max_height)
-        popup_width = min(1000, int(screen_width * 0.9))
-
-        self._action_popup_cascade = (getattr(self, "_action_popup_cascade", -1) + 1) % 8
-        offset = self._action_popup_cascade * 32
-        root_x = self.root.winfo_rootx()
-        root_y = self.root.winfo_rooty()
-        window.geometry(f"{popup_width}x{popup_height}+{root_x + 60 + offset}+{root_y + 60 + offset}")
-        self._apply_theme(window)
-
-    # Задача користувача: "додай можливість додавати та видаляти ці
-    # параметри (кнопки), а також перейменовувати. це для гнучкості
-    # налаштувань на майбутнє" — реальний CRUD над категоріями товару
-    # (bot_operations, kind='income'/'sale'), тими самими, що й
-    # store.list_operations. Нова категорія отримує ТОЧНО той самий набір
-    # полів-запитів, що й 8 вбудованих (товар/порода/товщина/ширина/
-    # довжина + кількість/вимір, і для продажу ще клієнт/ціна/сума/оплата)
-    # — add_operation_category (warehouse_data.py) сама їх сіє.
-    def add_operation_category_dialog(self, parent_action_code, on_saved=None):
-        label = simpledialog.askstring(self._t("Нова категорія"), self._t("Назва кнопки категорії:"))
-        if not label:
-            return
-        label = label.strip()
-        if not label:
-            return
-        product = simpledialog.askstring(
-            self._t("Нова категорія"), self._t("Товар (за яким бот шукатиме рядок складу), напр. Фанера:")
-        )
-        if not product:
-            return
-        product = product.strip()
-        if not product:
-            return
-        condition = simpledialog.askstring(
-            self._t("Нова категорія"),
-            self._t("Тип/сорт (необов'язково, напр. AD чи KD — залиште порожнім, якщо немає):"),
-        ) or ""
-        condition = condition.strip() or None
-        kind = "income" if parent_action_code == "start_income" else "sale"
-        # Перевірка збігу назви тепер лише на сервері (client_app.py) —
-        # помилку 409 показує _push_operation_tree_action.
-        self._push_operation_tree_action(
-            lambda: remote_control_client.add_remote_operation_category(
-                parent_action_code, kind, label, product, condition,
-            ),
-            on_success=on_saved,
-        )
-
-    # Перейменування ЗБЕРІГАЄ стару назву як розпізнаваний синонім
-    # назавжди (Крок 4.4, той самий принцип для способів оплати) — клієнт,
-    # який звик натискати/писати стару назву кнопки, не "загубиться".
-    def edit_operation_category_dialog(self, operation_id, current_label, parent_action_code, on_saved=None):
-        new_label = simpledialog.askstring(
-            self._t("Перейменувати категорію"), self._t("Нова назва:"), initialvalue=current_label
-        )
-        if not new_label:
-            return
-        new_label = new_label.strip()
-        if not new_label:
-            return
-        self._push_operation_tree_action(
-            lambda: remote_control_client.rename_remote_operation_category(operation_id, new_label),
-            on_success=on_saved,
-        )
-
-    # Видалення (на відміну від перейменування) прибирає категорію
-    # ПОВНІСТЮ — кнопка й розпізнавання в тексті клієнта зникають назавжди,
-    # разом з усіма її полями-запитами. Захист "має лишитись хоча б одна
-    # категорія" тепер лише на сервері (той самий 409-принцип, що й "має
-    # лишитись хоча б один спосіб оплати").
-    def delete_operation_category_dialog(self, operation_id, label, parent_action_code, on_saved=None):
-        if not messagebox.askyesno(
-            self._t("Видалити категорію"),
-            self._t(
-                'Видалити категорію "{value}"? Кнопка й розпізнавання в тексті клієнта зникнуть повністю, '
-                "разом з усіма її полями-запитами (на відміну від перейменування)."
-            ).format(value=label),
-        ):
-            return
-        self._push_operation_tree_action(
-            lambda: remote_control_client.delete_remote_operation_category(operation_id), on_success=on_saved,
-        )
-
-    # Крок 4.1: "Дії" тепер показує РЕАЛЬНЕ дерево custom_menu_buttons
-    # (Приход/Реализация/Данные/Калькулятор/Помощь — ті самі корені, що й
-    # "Налаштування гілок"), а не окремий плаский CUSTOM_BUTTON_ACTIONS.
-    # Задача користувача: "ось це має бути замінено на Приход, Реализация,
-    # Данные" — оскільки ці 3(+2) вузли вже мігровані в custom_menu_buttons
-    # попередніми сесіями (ДАННЫЕ вже несе СКЛАД/ПРОДАЖИ як РЕАЛЬНИХ дітей),
-    # це чиста зміна джерела даних без жодної зміни поведінки бота.
-    # Задача користувача: "додай змогу створювати, видаляти та редагувати ці
-    # кнопки. розміри вони із за цього свої не повинні змінювати" — сама
-    # кнопка дії (текст/шрифт/pack без fill/expand) лишається БУКВАЛЬНО
-    # такою ж, як і була; ред/x лише додаються поруч у тому ж рядку, не
-    # чіпаючи власний розмір основної кнопки. Це той самий кореневий рівень
-    # custom_menu_buttons, що й "Налаштування гілок" — тому створення/
-    # видалення/редагування тут повторно використовують ті самі діалоги
-    # (add_custom_button_dialog(None)/edit_custom_button_dialog/
-    # delete_custom_button_confirm), а не окремий, другий механізм.
-    # Задача користувача: "іконка типу дії + компактні кнопки" (обраний
-    # варіант A) — символ ПОПЕРЕД назвою кнопки, що позначає РІД дії
-    # (прихід/продаж/списання/звіт/...), без залежності від конкретного
-    # товару чи категорії; +/ред/x лишаються вузькими символами, не словами.
-    _ACTION_TYPE_ICONS = {
-        "start_income": "↓", "start_income_form": "↓",
-        "start_sale": "↑", "start_sale_form": "↑",
-        "start_writeoff": "−", "start_writeoff_form": "−",
-        "start_antiseptic_form": "◇",
-        "start_stock_report": "▤", "start_sales_report": "▤",
-        "start_antiseptic_report": "▤", "start_sales_by_client_report": "▤",
-        "start_low_stock_report": "▤", "start_data_browser_form": "▤",
-        "start_calculator": "#",
-        "show_help": "?",
-    }
-
-    def _action_type_icon(self, action_code):
-        return self._ACTION_TYPE_ICONS.get(action_code, "•")
-
-    # Крок "Дії" remote-sync (2026-08-18, аудит "у всього є істина?"):
-    # "Дії" досі читала ВЛАСНУ локальну self.store gui.py (і дерево
-    # custom_menu_buttons, і bot_operations/fields/columns) - той самий
-    # мертвий-запис клас багу, що вже виправлено для Редактора кнопок/
-    # Способів оплати. Той самий фон-потік + generation-guard + "Завантаження..."
-    # патерн - НЕЗАЛЕЖНИЙ від _refresh_custom_buttons (окремий, власний
-    # запит; обидва можуть виконуватись одночасно, кожен зі своїм
-    # generation-лічильником, як і Персонал/Способи оплати одне від одного).
+    # Крок "Дії" remote-sync (2026-08-18, аудит "у всього є істина?"),
+    # адаптовано під редизайн на реєстр-таблицю: той самий фон-потік +
+    # generation-guard + "Завантаження..." патерн, що й раніше — НЕЗАЛЕЖНИЙ
+    # від _refresh_custom_buttons (окремий, власний запит; обидва можуть
+    # виконуватись одночасно, кожен зі своїм generation-лічильником, як і
+    # Персонал/Способи оплати одне від одного). Тепер тягне лише operations_
+    # tree (custom_menu_buttons тут більше не потрібні — реєстр будується
+    # напряму з bot_operations/fields/columns, не з дерева кнопок).
     def _refresh_actions_view(self):
         if not hasattr(self, "actions_list_frame"):
             return
@@ -3813,64 +2296,118 @@ class ExcelViewerApp:
         generation = self._actions_view_refresh_generation
 
         def worker():
-            buttons = remote_control_client.fetch_remote_custom_buttons()
             tree = remote_control_client.fetch_remote_operations_tree()
-            self._run_on_main_thread(lambda: self._apply_actions_view_data(buttons, tree, generation))
+            self._run_on_main_thread(lambda: self._apply_actions_view_data(tree, generation))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_actions_view_data(self, buttons, tree, generation=None):
+    def _apply_actions_view_data(self, tree, generation=None):
         if not hasattr(self, "actions_list_frame"):
             return
         if generation is not None and generation != self._actions_view_refresh_generation:
             return
-        self._custom_buttons_cache = buttons
         self._operations_tree_cache = tree
+        self._render_actions_registry_rows()
+
+    # Плаский реєстр (Дія | Поле | Куди пише | Знак) — одна прив'язка
+    # bot_operation_field_columns на рядок, зібрана НАПРЯМУ з self._
+    # operations_tree_cache (без фільтрації write_mode='generic'/'ledger':
+    # старий _binding_is_editable ховав ledger-прив'язки, бо цей редактор
+    # не міг їх змінити — тут мета інша, показати ПОВНУ правду про те, що
+    # реально записує кожна дія, тож ledger-рядки теж входять). Ідентичність-
+    # поля (Товар/Порода/...) природно не дають жодного рядка — сідінг
+    # (_seed_warehouse_identity_fields) ніколи не створює для них bot_
+    # operation_field_columns, спеціальна фільтрація тут не потрібна.
+    def _actions_registry_rows(self):
+        tree = self._operations_tree_cache
+        if not tree:
+            return None
+        columns_by_source = self._actions_columns_by_source()
+        fields_by_operation = {}
+        for field in tree["fields"]:
+            fields_by_operation.setdefault(field[1], []).append(field)
+        columns_by_field = {}
+        for column in tree["columns"]:
+            columns_by_field.setdefault(column[1], []).append(column)
+
+        rows = []
+        for operation in tree["operations"]:
+            operation_id, _code, _kind, _requires_identity, operation_label, _parent, _prefill, _position, enabled, _builtin = operation
+            if not enabled:
+                continue
+            for field in fields_by_operation.get(operation_id, []):
+                field_id, _op_id, _field_key, field_label, _is_identity, _position2, field_enabled, _builtin2 = field
+                if not field_enabled:
+                    continue
+                for column in columns_by_field.get(field_id, []):
+                    _column_id, _field_id2, sheet, column_key, marker, _write_mode, _position3, _builtin3 = column
+                    headers, resolved_columns = columns_by_source.get(self._SHEET_TO_SOURCE.get(sheet), ([], {}))
+                    index = resolved_columns.get(column_key)
+                    column_name = headers[index] if index is not None and index < len(headers) else None
+                    destination = (
+                        self._t("{sheet} → «{column}»").format(sheet=sheet, column=column_name)
+                        if column_name
+                        else self._t("{sheet} → колонка не знайдена").format(sheet=sheet)
+                    )
+                    rows.append((operation_label, field_label, destination, marker))
+        return rows
+
+    def _render_actions_registry_rows(self):
+        if not hasattr(self, "actions_list_frame"):
+            return
         self._clear_frame(self.actions_list_frame)
-        if buttons is None or tree is None:
+        rows = self._actions_registry_rows()
+        if rows is None:
             tk.Label(
                 self.actions_list_frame,
-                text=self._t("Не удалось получить дерево действий — нет связи с client_app.py."),
+                text=self._t("Не удалось получить реестр действий — нет связи с client_app.py."),
                 anchor="w", fg="#d1242f",
             ).pack(anchor="w", fill="x", pady=4)
             self._apply_theme(self.actions_list_frame)
             return
-        for row in self._custom_buttons_children(None):
-            node_id, label, action_code = row[0], row[1], row[3]
-            node = self._action_view_node(row)
-            row_frame = tk.Frame(self.actions_list_frame)
-            row_frame.pack(fill="x", pady=2, padx=4)
-            # Задача користувача: порядок СТВОРЕННЯ/пакування тепер зліва
-            # направо, як і читання рядка — спершу основна кнопка (мітка),
-            # тоді КЕРОВАНИЙ проміжок (окремий tk.Frame-спейсер — саме він,
-            # а не мітка, тепер несе fill="x"/expand=True і забирає залишок
-            # ширини рядка), і лише тоді "x"/"ред". Візуальний результат
-            # (x/ред притиснуті до правого краю, вирівняні між рядками —
-            # задача користувача з попереднього кроку) лишається той самий,
-            # бо спейсер і далі поглинає весь вільний простір; але тепер
-            # ширина мітки й позиція "x"/"ред" — дві окремі, незалежно
-            # редаговані речі (мітка сама по собі, спейсер сам по собі,
-            # padx на "x"/"ред" сам по собі), а не одна залежить від іншої
-            # через порядок пакування, як було раніше.
-            tk.Button(
-                row_frame,
-                text=f"{self._action_type_icon(action_code)} {node['title']}",
-                anchor="center",
-                width=18,
-                font=("Segoe UI", 9),
-                command=lambda n=node: self._open_action_node_window(n),
-            ).pack(side="left")
-            tk.Frame(row_frame).pack(side="left", fill="x", expand=True)
-            tk.Button(
-                row_frame, text="✕", width=3, fg="#d1242f",
-                command=lambda nid=node_id, lbl=label: self.delete_custom_button_confirm(nid, lbl),
-                **self._chip_button_style(),
-            ).pack(side="left")
-            tk.Button(
-                row_frame, text="✎", width=3, fg=self._chip_text_color(),
-                command=lambda nid=node_id: self.edit_custom_button_dialog(nid),
-                **self._chip_button_style(),
-            ).pack(side="left", padx=(6, 0))
+
+        query = self._actions_search_var.get().strip().lower() if hasattr(self, "_actions_search_var") else ""
+        if query:
+            rows = [
+                row for row in rows
+                if query in row[0].lower() or query in row[1].lower() or query in row[2].lower()
+            ]
+
+        if not rows:
+            tk.Label(
+                self.actions_list_frame, text=self._t("Нічого не знайдено."), anchor="w", fg="#57606a",
+            ).pack(anchor="w", fill="x", pady=4)
+            self._apply_theme(self.actions_list_frame)
+            return
+
+        theme = self._theme()
+        self.actions_list_frame.grid_columnconfigure(0, weight=1)
+        self.actions_list_frame.grid_columnconfigure(1, weight=1)
+        self.actions_list_frame.grid_columnconfigure(2, weight=2)
+        self.actions_list_frame.grid_columnconfigure(3, weight=0)
+
+        headers = (self._t("Дія"), self._t("Поле"), self._t("Куди пише"), self._t("Знак"))
+        for col, header_text in enumerate(headers):
+            tk.Label(
+                self.actions_list_frame, text=header_text, font=("Segoe UI", 8, "bold"),
+                fg="#8c959f", bg=theme["panel_bg"], anchor="w" if col < 3 else "center",
+            ).grid(row=0, column=col, sticky="w", padx=(6 if col == 0 else 8, 0), pady=(0, 6))
+
+        for index, (action_label, field_label, destination, marker) in enumerate(rows, start=1):
+            marker_symbol, marker_color = self._ACTION_FIELD_MARKERS.get(marker, ("•", "#57606a"))
+            tk.Label(self.actions_list_frame, text=action_label, anchor="w", bg=theme["panel_bg"]).grid(
+                row=index, column=0, sticky="ew", padx=(6, 0), pady=3
+            )
+            tk.Label(self.actions_list_frame, text=field_label, anchor="w", bg=theme["panel_bg"]).grid(
+                row=index, column=1, sticky="ew", padx=8, pady=3
+            )
+            tk.Label(self.actions_list_frame, text=destination, anchor="w", bg=theme["panel_bg"]).grid(
+                row=index, column=2, sticky="ew", padx=8, pady=3
+            )
+            tk.Label(
+                self.actions_list_frame, text=marker_symbol, fg=marker_color, font=("Segoe UI", 10, "bold"),
+                bg=theme["panel_bg"], anchor="center",
+            ).grid(row=index, column=3, padx=(8, 6), pady=3)
         self._apply_theme(self.actions_list_frame)
 
     # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -

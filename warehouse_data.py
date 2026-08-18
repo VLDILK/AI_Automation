@@ -374,52 +374,6 @@ _ANTISEPTIC_FIELD_DEFS = [
     ("comment", "Комментарий", "info"),
 ]
 
-# Крок 3+ "Дії", Етап 3: ЗАКРИТИЙ (не довільний) перелік семантичних
-# ключів, які адміністратор може обрати, додаючи НОВЕ поле-запит до вже
-# існуючої дії. Це саме ті ключі, які бот УЖЕ вміє розпізнавати з тексту
-# (product/breed/condition/thickness/width/length/quantity/measure з
-# приходу-продажу, client/price_per_unit/total_amount/payment_method зі
-# продажу, решта — з антисептирования) — розпізнавання тексту тут НЕ
-# змінюється (Задача користувача, ще Крок 3+ старт), тож новий ключ
-# вигадати не можна, лише додати вже наявний до дії, де його ще нема.
-RECOGNIZED_OPERATION_FIELD_KEYS = [
-    ("product", "Товар"),
-    ("breed", "Порода"),
-    ("condition", "Тип продукта"),
-    ("thickness", "Толщина"),
-    ("width", "Ширина"),
-    ("length", "Длина"),
-    ("quantity", "Количество, шт"),
-    ("measure", "Количество, м3"),
-    ("client", "Клиент"),
-    ("address", "Адрес выгрузки"),
-    ("price_per_unit", "Цена"),
-    ("total_amount", "Сумма"),
-    ("payment_method", "Способ оплаты"),
-    ("date", "Дата"),
-    ("service_number", "№ услуги"),
-    ("service", "Услуга"),
-    ("unit", "Ед. изм."),
-    ("payment_status", "Статус оплаты"),
-    ("document", "№ документа"),
-    ("cash_amount", "Приход наличных"),
-    ("bank_amount", "Приход по банку"),
-    ("reflection", "Отражение в расчетах"),
-    ("manager", "Ответственный"),
-    ("comment", "Комментарий"),
-    # Задача користувача: звіти (stock_report/sales_report) тепер теж
-    # реально підключені — ці ключі відповідають РЕАЛЬНИМ колонкам звіту
-    # (_STOCK_REPORT_COLUMN_META/_SALES_REPORT_COLUMN_META), потрібні тут,
-    # щоб адмін міг ДОДАТИ назад видалену колонку звіту через "+ Додати
-    # поле-запит".
-    ("size", "Размер (товщина x ширина x длина)"),
-    ("position", "Товар (позиция целиком)"),
-    ("volume", "Объем, м3"),
-    ("area", "Площадь, м2"),
-    ("linear", "Длина, мп"),
-    ("note", "Примечание"),
-]
-
 # Задача користувача: "Показать остаток склада"/"Показать отчёт по
 # продажам" теж мають бути редаговані так само, як категорії приходу/
 # продажу — додавати/прибирати внутрішні дії. Це ЗВІТИ (не дії, що
@@ -2740,19 +2694,6 @@ class ExcelSqliteStore:
             (code,),
         ).fetchone()
 
-    def delete_operation(self, operation_id):
-        with self.conn:
-            # Аудит коду: custom_menu_buttons.operation_id немає SQLite FK
-            # (навмисно, схема це документує) — без цього очищення видалена
-            # дія лишала б "осиротіле" посилання: кнопка з прямим посиланням
-            # мовчки перетворювалась би на no-op (_start_operation_leaf
-            # повертає None для operation_id, що не існує).
-            self.conn.execute(
-                "UPDATE custom_menu_buttons SET operation_id = NULL WHERE operation_id = ?",
-                (operation_id,),
-            )
-            self.conn.execute("DELETE FROM bot_operations WHERE id = ?", (operation_id,))
-
     # Крок "Дії" remote-sync (2026-08-18): той самий bulk-read принцип, що
     # вже й list_all_custom_buttons — client_app.py віддає ВЕСЬ дерево
     # (операції+поля-запити+прив'язки) ОДНИМ запитом, gui.py сам групує в
@@ -2933,188 +2874,12 @@ class ExcelSqliteStore:
             (field_id,),
         ).fetchone()
 
-    def add_operation_field(self, operation_id, field_key, label, is_identity=False):
-        now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            position = self.conn.execute(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM bot_operation_fields WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()[0]
-            cursor = self.conn.execute(
-                """
-                INSERT INTO bot_operation_fields
-                    (operation_id, field_key, label, is_identity, position, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (operation_id, field_key, label, 1 if is_identity else 0, position, now, now),
-            )
-            return cursor.lastrowid
-
-    # Критична знахідка аудиту 28.07.2026 (#1): видалення/вимкнення
-    # ОСТАННЬОЇ generic-прив'язки до "СКЛАД" серед усіх полів операції
-    # мовчки зупиняє облік залишку для цілої категорії —
-    # execute_operation_write просто нічого не записує, без помилки й без
-    # сигналу (is_identity нижче захищає ЛИШЕ Порода/Товщина/Ширина/
-    # Довжина, а не quantity/measure). Перевіряємо лише для
-    # requires_row_identity=1 (звичайний прихід/продаж, що веде облік
-    # складу) — сервіс-дії (антисептирование) і звіти (kind='report')
-    # мають requires_row_identity=0 і ЖОДНОЇ generic/СКЛАД-прив'язки
-    # взагалі, перевірка їх не стосується. Інваріант — "лишиться БОДАЙ
-    # ОДНА" (не "лишаться quantity І measure одночасно"): ОСБ-подібна
-    # категорія (лише quantity, без measure) лишається валідною, видалення
-    # measure там, де лишається quantity, і далі дозволено.
-    def _operation_would_lose_balance_tracking(
-        self, operation_id, exclude_field_id=None, exclude_column_id=None, owning_field_id=None
-    ):
-        operation = self.get_operation(operation_id)
-        if operation is None or not operation[3]:
-            return False
-        if exclude_column_id is not None:
-            # Свіжий пере-аудит (2026-08-02, New-Important #5): видаляється
-            # ОДНА прив'язка, а САМЕ ПОЛЕ лишається активним (і далі
-            # проситиме користувача цю величину) — тож перевіряємо ЛИШЕ
-            # прив'язки ЦЬОГО САМОГО поля, а НЕ всієї операції. Приклад
-            # реальної діри, яку це закриває: поле "quantity" з окремими
-            # income_qty/balance_qty — видалення САМЕ balance_qty, коли
-            # income_qty лишається, раніше хибно дозволялось, якщо
-            # десь-інде в операції (напр. поле "measure") лишалась ІНША
-            # balance_-прив'язка — хоча ця, зовсім інша величина (об'єм),
-            # ніяк не рятує "Остаток, шт", який після цього назавжди
-            # застигає, хоча бот і далі питає й пише "Приход, шт".
-            for binding in self.list_operation_field_columns(owning_field_id):
-                column_id, _operation_field_id, sheet, column_key, _marker, write_mode, _position, _builtin_key = binding
-                if column_id == exclude_column_id:
-                    continue
-                if write_mode == "generic" and sheet == "СКЛАД" and column_key.startswith("balance_"):
-                    return False
-            return True
-        # exclude_field_id (ціле поле йде геть) — лишається операційно-
-        # широкий інваріант "лишиться БОДАЙ ОДНА (в ІНШОМУ полі)", той
-        # самий, що вже дозволяє ОСБ-подібний стан (видалення "measure" з
-        # доски, коли "quantity" лишається, лишається валідним) — на
-        # відміну від видалення ОДНІЄЇ прив'язки вище, тут саме ПОЛЕ (і всі
-        # його прив'язки) зникає разом, тож нічого "осиротілого" не лишається.
-        for field in self.list_operation_fields(operation_id):
-            if field[0] == exclude_field_id:
-                continue
-            for binding in self.list_operation_field_columns(field[0]):
-                column_id, _operation_field_id, sheet, column_key, _marker, write_mode, _position, _builtin_key = binding
-                if write_mode == "generic" and sheet == "СКЛАД" and column_key.startswith("balance_"):
-                    return False
-        return True
-
-    # is_identity=1 (Порода/Товар/Товщина/Ширина/Довжина, коли операція
-    # шукає рядок складу) — захищене поле: enabled=0 і видалення заборонені
-    # програмно (не лише в GUI), бо _warehouse_row_matches (telegram_dialog.py)
-    # порівнює саме ці значення БЕЗ винятку "якщо порожньо — пропустити".
-    def update_operation_field(self, field_id, label, enabled=True):
-        row = self.get_operation_field(field_id)
-        if row is None:
-            return
-        is_identity = bool(row[4])
-        if is_identity and not enabled:
-            raise ValueError(
-                "Це поле не можна вимкнути: бот використовує його, щоб знайти потрібний рядок на складі."
-            )
-        if not enabled and self._operation_would_lose_balance_tracking(row[1], exclude_field_id=field_id):
-            raise ValueError(
-                "Це поле не можна вимкнути: без нього бот перестане оновлювати залишок складу для цієї категорії."
-            )
-        now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            self.conn.execute(
-                "UPDATE bot_operation_fields SET label = ?, enabled = ?, updated_at = ? WHERE id = ?",
-                (label, 1 if enabled else 0, now, field_id),
-            )
-
-    def delete_operation_field(self, field_id):
-        row = self.get_operation_field(field_id)
-        if row is None:
-            return
-        if row[4]:
-            raise ValueError(
-                "Це поле не можна видалити: бот використовує його, щоб знайти потрібний рядок на складі."
-            )
-        if self._operation_would_lose_balance_tracking(row[1], exclude_field_id=field_id):
-            raise ValueError(
-                "Це поле не можна видалити: без нього бот перестане оновлювати залишок складу для цієї категорії."
-            )
-        with self.conn:
-            self.conn.execute("DELETE FROM bot_operation_fields WHERE id = ?", (field_id,))
-
     def list_operation_field_columns(self, operation_field_id):
         return self.conn.execute(
             "SELECT id, operation_field_id, sheet, column_key, marker, write_mode, position, builtin_key "
             "FROM bot_operation_field_columns WHERE operation_field_id = ? ORDER BY position, id",
             (operation_field_id,),
         ).fetchall()
-
-    # Захист від подвійного запису (Крок 3+ "Дії", Етап 3): execute_operation_
-    # write резолвить значення ЗА column_key (warehouse_data.py, _OPERATION_
-    # FIELD_ITEM_KEYS), не за тим, ЯКЕ поле власник прив'язки — тож якщо
-    # ДВІ прив'язки (навіть із різних полів-запитів) вказують на ОДНУ й ту ж
-    # генеровану (write_mode='generic') колонку, значення застосується
-    # ДВІЧІ (напр. "Остаток, шт" зменшиться вдвічі). Перевіряємо це саме тут
-    # (не лише в GUI), щоб жоден шлях додавання прив'язки не міг створити
-    # такий дубль.
-    # exclude_column_id — при РЕДАГУВАННІ вже наявної прив'язки (не
-    # створенні нової) виключає саму цю прив'язку з перевірки дублю, інакше
-    # збереження без зміни колонки (лише маркера) завжди хибно "конфліктувало"
-    # б само із собою.
-    def add_operation_field_column(
-        self, operation_field_id, sheet, column_key, marker, write_mode="generic", exclude_column_id=None,
-    ):
-        if write_mode == "generic":
-            field_row = self.get_operation_field(operation_field_id)
-            operation_id = field_row[1] if field_row else None
-            query = """
-                SELECT 1 FROM bot_operation_field_columns c
-                JOIN bot_operation_fields f ON f.id = c.operation_field_id
-                WHERE f.operation_id = ? AND c.sheet = ? AND c.column_key = ? AND c.write_mode = 'generic'
-            """
-            params = [operation_id, sheet, column_key]
-            if exclude_column_id is not None:
-                query += " AND c.id != ?"
-                params.append(exclude_column_id)
-            conflict = self.conn.execute(query, params).fetchone()
-            if conflict:
-                raise ValueError(
-                    "Ця колонка вже отримує значення від іншого поля цієї дії — "
-                    "спершу приберіть стару прив'язку."
-                )
-        now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            position = self.conn.execute(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM bot_operation_field_columns "
-                "WHERE operation_field_id = ?",
-                (operation_field_id,),
-            ).fetchone()[0]
-            cursor = self.conn.execute(
-                """
-                INSERT INTO bot_operation_field_columns
-                    (operation_field_id, sheet, column_key, marker, write_mode, position, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (operation_field_id, sheet, column_key, marker, write_mode, position, now, now),
-            )
-            return cursor.lastrowid
-
-    def delete_operation_field_column(self, column_id):
-        binding = self.conn.execute(
-            "SELECT operation_field_id FROM bot_operation_field_columns WHERE id = ?",
-            (column_id,),
-        ).fetchone()
-        if binding is not None:
-            field_row = self.get_operation_field(binding[0])
-            operation_id = field_row[1] if field_row else None
-            if operation_id is not None and self._operation_would_lose_balance_tracking(
-                operation_id, exclude_column_id=column_id, owning_field_id=binding[0]
-            ):
-                raise ValueError(
-                    "Цю прив'язку не можна видалити: без неї бот перестане оновлювати залишок складу для цієї категорії."
-                )
-        with self.conn:
-            self.conn.execute("DELETE FROM bot_operation_field_columns WHERE id = ?", (column_id,))
 
     def _insert_operation_field(self, operation_id, field_key, label, is_identity, builtin_key, now):
         position = self.conn.execute(
@@ -3441,7 +3206,8 @@ class ExcelSqliteStore:
             # вручну доданих рядків). Видаляємо ЛИШЕ оригінально засіяне поле.
             if field_row[1] != "measure":
                 continue
-            self.delete_operation_field(field_row[0])
+            with self.conn:
+                self.conn.execute("DELETE FROM bot_operation_fields WHERE id = ?", (field_row[0],))
 
     # Одноразове виправлення мови (Задача користувача, знайдено при
     # підключенні чек-листа до конфігурації): перший сідінг (Крок 3+
@@ -4553,124 +4319,6 @@ class ExcelSqliteStore:
                     """,
                     (telegram_id, username, full_name, role, now, now),
                 )
-
-    # --- Категорії товару (bot_operations) — реальний CRUD ---
-
-    _CYRILLIC_TO_LATIN_SLUG = {
-        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-        "ж": "zh", "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m",
-        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "",
-        "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya", "і": "i", "ї": "i",
-        "є": "e", "ґ": "g",
-    }
-
-    def _slugify_operation_code(self, text):
-        chars = []
-        for ch in text.lower():
-            if ch in self._CYRILLIC_TO_LATIN_SLUG:
-                chars.append(self._CYRILLIC_TO_LATIN_SLUG[ch])
-            elif ch.isalnum() and ch.isascii():
-                chars.append(ch)
-            else:
-                chars.append("_")
-        slug = re.sub(r"_+", "_", "".join(chars)).strip("_")
-        return slug or "category"
-
-    def _unique_operation_code(self, parent_action_code, label):
-        base = f"{parent_action_code.replace('start_', '')}_{self._slugify_operation_code(label)}"
-        candidate = base
-        suffix = 2
-        while self.conn.execute("SELECT 1 FROM bot_operations WHERE code = ?", (candidate,)).fetchone():
-            candidate = f"{base}_{suffix}"
-            suffix += 1
-        return candidate
-
-    # Задача користувача: "додай можливість додавати... ці параметри
-    # (кнопки)... для гнучкості налаштувань на майбутнє" — нова категорія
-    # придатна до роботи ТОЧНО так само, як і 8 вбудованих (ДОСКА AD і
-    # т.д.): той самий набір полів-запитів (товар/порода/товщина/ширина/
-    # довжина + кількість/вимір, і для продажу — клієнт/ціна/сума/оплата).
-    # requires_row_identity=1 завжди — нова категорія це такий самий
-    # фізичний товар зі складу, як і всі існуючі; дії БЕЗ пошуку рядка
-    # складу (kind='service', на кшталт антисептирования) — окремий,
-    # спеціалізований сценарій, не пропонується як шлях додавання тут.
-    def add_operation_category(self, parent_action_code, kind, label, product, condition=None):
-        label = label.strip()
-        product = product.strip()
-        condition = condition.strip() if condition else None
-        now = datetime.now().isoformat(timespec="seconds")
-        code = self._unique_operation_code(parent_action_code, label)
-        prefill = {"product": product}
-        if condition:
-            prefill["condition"] = condition
-        with self.conn:
-            position = self.conn.execute(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM bot_operations WHERE parent_action_code = ?",
-                (parent_action_code,),
-            ).fetchone()[0]
-            cursor = self.conn.execute(
-                """
-                INSERT INTO bot_operations
-                    (code, kind, requires_row_identity, label, parent_action_code, prefill_json,
-                     position, enabled, created_at, updated_at)
-                VALUES (?, ?, 1, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (code, kind, label, parent_action_code, json.dumps(prefill, ensure_ascii=False), position, now, now),
-            )
-            operation_id = cursor.lastrowid
-            self._seed_warehouse_identity_fields(operation_id, bool(condition), now)
-            self._seed_quantity_measure_fields(operation_id, kind, now)
-            if kind == "sale":
-                self._seed_sale_ledger_fields(operation_id, now)
-            return operation_id
-
-    # Перейменування ЗБЕРІГАЄ стару назву як розпізнаваний синонім
-    # назавжди (той самий принцип, що й update_payment_method_option) —
-    # клієнт, який звик натискати/писати стару назву кнопки, не
-    # "загубиться" після перейменування.
-    def rename_operation_category(self, operation_id, new_label):
-        new_label = new_label.strip()
-        row = self.conn.execute("SELECT label FROM bot_operations WHERE id = ?", (operation_id,)).fetchone()
-        if not row:
-            return
-        old_label = row[0]
-        now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            if _normalize_phrase(old_label) != _normalize_phrase(new_label):
-                self.conn.execute(
-                    "INSERT INTO bot_operation_synonyms (operation_id, phrase, created_at) VALUES (?, ?, ?)",
-                    (operation_id, old_label, now),
-                )
-            self.conn.execute(
-                "UPDATE bot_operations SET label = ?, updated_at = ? WHERE id = ?",
-                (new_label, now, operation_id),
-            )
-
-    # Видалення (на відміну від перейменування) прибирає категорію
-    # ПОВНІСТЮ: каскадно й усі її поля-запити/прив'язки/синоніми (FK ON
-    # DELETE CASCADE) — кнопка й розпізнавання зникають назавжди.
-    def delete_operation_category(self, operation_id):
-        with self.conn:
-            # Той самий "осиротілий" ризик, що й у delete_operation вище —
-            # категорія теж є рядком bot_operations, на який може вести
-            # пряме посилання кастомної кнопки.
-            self.conn.execute(
-                "UPDATE custom_menu_buttons SET operation_id = NULL WHERE operation_id = ?",
-                (operation_id,),
-            )
-            self.conn.execute("DELETE FROM bot_operations WHERE id = ?", (operation_id,))
-
-    def operation_category_label_collides(self, parent_action_code, label, exclude_id=None):
-        normalized = _normalize_phrase(label)
-        for operation in self.list_operations(parent_action_code, include_disabled=True):
-            operation_id = operation[0]
-            op_label = operation[4]
-            if exclude_id is not None and operation_id == exclude_id:
-                continue
-            if _normalize_phrase(op_label) == normalized:
-                return True
-        return False
 
     # Єдина точка "яка це категорія" — звіряє і з поточними мітками, і з
     # усіма збереженими синонімами (старі перейменовані назви + "osb"
