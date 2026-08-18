@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.52"
+__version__ = "1.0.53"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4724,6 +4724,14 @@ class ExcelViewerApp:
     _DIFF_LINE_LIMIT = 15
     _DIFF_HARD_CAP = 500
     _VERSION_LINE_RE = re.compile(r'^[+-]\s*__version__\s*=')
+    # Задача користувача (2026-08-19): "ти знову змішав код і пояснення" -
+    # у цьому репо КОЖНА реальна зміна супроводжується великим поясненням-
+    # коментарем ("Задача користувача: ..."); те саме пояснення вже видно
+    # в "Коміти:" (git log) і в полі "Просто" - у секції "Код" воно лише
+    # затуляє РЕАЛЬНІ рядки логіки. Тому змінені (+/-) рядки, що є ЛИШЕ
+    # коментарем, тут прибираються з diff-у; НЕзмінені (контекстні) рядки-
+    # коментарі лишаються як є.
+    _COMMENT_LINE_RE = re.compile(r'^[+-]\s*#')
 
     def _clean_diff_lines(self, raw_lines):
         stage = []
@@ -4744,10 +4752,15 @@ class ExcelViewerApp:
                 while j < n and not raw_lines[j].startswith(("@@ ", "diff --git ", "--- ", "+++ ")):
                     hunk.append(raw_lines[j])
                     j += 1
-                changed = [l for l in hunk[1:] if l.startswith("+") or l.startswith("-")]
+                body = hunk[1:]
+                changed = [l for l in body if l.startswith("+") or l.startswith("-")]
                 is_version_only = len(changed) == 2 and all(self._VERSION_LINE_RE.match(l) for l in changed)
                 if not is_version_only:
-                    stage.extend(hunk)
+                    filtered_body = [l for l in body if not self._COMMENT_LINE_RE.match(l)]
+                    remaining_changed = [l for l in filtered_body if l.startswith("+") or l.startswith("-")]
+                    if remaining_changed:
+                        stage.append(hunk[0])
+                        stage.extend(filtered_body)
                 i = j
                 continue
             stage.append(line)
@@ -5126,10 +5139,17 @@ class ExcelViewerApp:
             window.clipboard_append(diff_text, type="STRING")
 
         def open_diff_in_file():
+            # Реальний баг (2026-08-19, знайдено користувачем): ".diff"
+            # розширення відкривало PyCharm-ом його ВЛАСНИЙ спеціалізований
+            # в'юер патчів, а не звичайний текстовий редактор - наш
+            # _clean_diff_lines-очищений текст не є застосовним патчем
+            # (без diff --git/index/---), тож PyCharm показував "Invalid
+            # patch file" замість самого тексту. ".txt" відкривається як
+            # звичайний текст будь-де, без спеціалізованої обробки формату.
             try:
                 preview_dir = Path(tempfile.gettempdir()) / "ai_automation_diff_preview"
                 preview_dir.mkdir(parents=True, exist_ok=True)
-                diff_file = preview_dir / "diff_preview.diff"
+                diff_file = preview_dir / "diff_preview.txt"
                 diff_file.write_text(diff_text, encoding="utf-8")
                 os.startfile(str(diff_file))
             except OSError as exc:
