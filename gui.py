@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.46"
+__version__ = "1.0.47"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4725,6 +4725,55 @@ class ExcelViewerApp:
     # у on_gui_publish_finished/on_publish_finished нижче) - невдала спроба
     # не повинна "з'їдати" історію змін, яку так і не опублікували.
     _DIFF_LINE_LIMIT = 300
+    _VERSION_LINE_RE = re.compile(r'^[+-]\s*__version__\s*=')
+
+    # Задача користувача: "зовсім погано" - сирий `git diff` тягне за собою
+    # git-службові рядки (diff --git/index), яких ніхто, крім git, не читає,
+    # а перший видимий рядок часто виявлявся зовсім тривіальним підняттям
+    # версії (__version__ = "X" -> "Y") - цей рядок з'являється в КОЖНОМУ
+    # коміті цієї сесії, тож "з'їдав" верх перегляду, створюючи враження
+    # "оце й усе, що змінилось". Прибирає git-шум і схлопує "hunk"-и, де
+    # ЄДИНА зміна - саме ця версійна константа (не інші однорядкові зміни -
+    # лише точно цей патерн), замінює --- a/X / +++ b/X на компактний
+    # заголовок файлу; другий прохід прибирає заголовки файлів, під якими
+    # після цього не лишилось жодного реального hunk-у.
+    def _clean_diff_lines(self, raw_lines):
+        stage = []
+        i, n = 0, len(raw_lines)
+        while i < n:
+            line = raw_lines[i]
+            if line.startswith("diff --git ") or line.startswith("index ") or line.startswith("--- "):
+                i += 1
+                continue
+            if line.startswith("+++ "):
+                path = line[6:] if line.startswith("+++ b/") else line[4:]
+                stage.append(f"=== {path} ===")
+                i += 1
+                continue
+            if line.startswith("@@ "):
+                hunk = [line]
+                j = i + 1
+                while j < n and not raw_lines[j].startswith(("@@ ", "diff --git ", "--- ", "+++ ")):
+                    hunk.append(raw_lines[j])
+                    j += 1
+                changed = [l for l in hunk[1:] if l.startswith("+") or l.startswith("-")]
+                is_version_only = len(changed) == 2 and all(self._VERSION_LINE_RE.match(l) for l in changed)
+                if not is_version_only:
+                    stage.extend(hunk)
+                i = j
+                continue
+            stage.append(line)
+            i += 1
+
+        cleaned = []
+        n2 = len(stage)
+        for idx, line in enumerate(stage):
+            if line.startswith("=== ") and line.endswith(" ==="):
+                nxt = idx + 1
+                if nxt >= n2 or (stage[nxt].startswith("=== ") and stage[nxt].endswith(" ===")):
+                    continue
+            cleaned.append(line)
+        return cleaned
 
     def _compute_git_release_preview(self):
         root = self._project_git_root()
@@ -4754,7 +4803,7 @@ class ExcelViewerApp:
             if commits_raw
             else self._t("(Немає нових комітів з моменту останньої публікації.)")
         )
-        diff_lines = diff_raw.splitlines() if diff_raw else []
+        diff_lines = self._clean_diff_lines(diff_raw.splitlines()) if diff_raw else []
         if len(diff_lines) > self._DIFF_LINE_LIMIT:
             hidden = len(diff_lines) - self._DIFF_LINE_LIMIT
             diff_lines = diff_lines[: self._DIFF_LINE_LIMIT]
@@ -4918,8 +4967,11 @@ class ExcelViewerApp:
         diff_widget.tag_configure("added", foreground="#1a7f37")
         diff_widget.tag_configure("removed", foreground="#d1242f")
         diff_widget.tag_configure("meta", foreground="#57606a")
+        diff_widget.tag_configure("file_header", foreground="#0969da", font=("Consolas", 9, "bold"))
         for line in diff_lines:
-            if line.startswith("+++") or line.startswith("---") or line.startswith("diff ") or line.startswith("index "):
+            if line.startswith("=== ") and line.endswith(" ==="):
+                tag = "file_header"
+            elif line.startswith("@@ "):
                 tag = "meta"
             elif line.startswith("+"):
                 tag = "added"
