@@ -49,11 +49,14 @@ import customtkinter as ctk
 from PIL import Image
 
 import paths
+import autostart
+import watchdog_task
 import code_backup
 import config_backup
 import excel_source
 import github_releases
 import permissions as perm
+import standard_menu_cloud
 import update_check
 from settings import SettingsStore
 from warehouse_data import (
@@ -72,6 +75,7 @@ from warehouse_data import (
     apply_standard_table_format,
     ensure_workbook_has_required_sheets,
     create_db_snapshot,
+    create_excel_backup,
     list_db_snapshots,
     restore_db_snapshot,
     regenerate_excel_after_restore,
@@ -85,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.53"
+__version__ = "0.2.69"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -118,6 +122,10 @@ COLOR_ON = "#3EA96E"
 # найдовший підпис (тут - рос. ROLE_LABELS_RU, "Администратор ▾"), щоб
 # кнопка "Удалить" поруч не "стрибала" залежно від довжини ролі.
 ROLE_CHIP_WIDTH = max(len(f"{label} ▾") for label in perm.ROLE_LABELS_RU.values())
+# Задача користувача (2026-08-17): "точно такий же вигляд зроби і в
+# клієнті. ролі - стаціонарні кнопци. відвідуваність теж." - той самий
+# фіксований відступ під колонку "Час", що вже й gui.py._LAST_SEEN_WIDTH.
+LAST_SEEN_WIDTH = 16
 COLOR_WARN = "#D9A441"
 COLOR_STOP = ("#E7EAEE", "#3A3F46")
 COLOR_STOP_TEXT = ("#B23B3B", "#E08080")
@@ -269,6 +277,7 @@ class ClientApp(ctk.CTk):
 
         self.settings = SettingsStore(paths.SETTINGS_PATH)
         self.store = ExcelSqliteStore(paths.DB_PATH)
+        _reconcile_standard_menu_with_cloud(self.store)
         self.telegram_worker = None
         self._bot_stop_in_progress = False
         self._bot_next_auto_check_at = None
@@ -370,6 +379,14 @@ class ClientApp(ctk.CTk):
         self._action_log_detail_windows = {}
         self.personnel_window = None
         self.personnel_list_frame = None
+        # Задача користувача (2026-08-17): "точно такий же вигляд зроби і в
+        # клієнті" - той самий кеш+сортування+фільтр стан, що вже й gui.py
+        # (_personnel_users_cache/_personnel_sort_field/_personnel_sort_
+        # reverse/_personnel_role_filter).
+        self._personnel_users_cache = None
+        self._personnel_sort_field = None
+        self._personnel_sort_reverse = False
+        self._personnel_role_filter = None
         self.excel_sync_timer_window = None
         self.table_format_window = None
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
@@ -410,7 +427,7 @@ class ClientApp(ctk.CTk):
 
         self._build_main_screen()
         self._refresh_webapp_status_text()
-        self.protocol("WM_DELETE_WINDOW", self._on_exit_clicked)
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close_clicked)
         self.after(500, self._poll_bot_status)
         self.after(2000, self._poll_for_update)
         self.after(1800000, self._schedule_code_backup_tick)
@@ -888,6 +905,8 @@ class ClientApp(ctk.CTk):
         ).pack(side="left")
         ctk.CTkLabel(header, text="Настройки", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left", padx=(8, 0))
 
+        self._build_autostart_settings_section(parent)
+
         self._build_bot_settings_section(parent)
 
         self._build_data_settings_section(parent)
@@ -1017,12 +1036,12 @@ class ClientApp(ctk.CTk):
         self.backup_footer_label.configure(text=f"Хранится локально: {len(snapshots)} копий.")
 
     def _render_cloud_backup_rows(self):
-        onedrive_root = os.environ.get("OneDrive")
-        if not onedrive_root:
+        backups_root = standard_menu_cloud.cloud_folder_path()
+        if backups_root is None:
             self._build_backup_empty_label("OneDrive не найден на этом компьютере.")
             self.backup_footer_label.configure(text="")
             return
-        online_dir = Path(onedrive_root) / "AI_Automation_Backups"
+        online_dir = backups_root / "db_backups"
         online_files = sorted(
             online_dir.glob("app_data_*"), key=lambda path: path.stat().st_mtime, reverse=True,
         ) if online_dir.exists() else []
@@ -1217,7 +1236,7 @@ class ClientApp(ctk.CTk):
             except Exception as exc:
                 error = str(exc)
             if snapshot_path and not error:
-                self._mirror_backup_to_onedrive(snapshot_path)
+                self._mirror_backup_to_onedrive(snapshot_path, "db_backups", "app_data_*")
             self._run_on_main_thread(lambda: self._on_backup_now_finished(error))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1233,6 +1252,119 @@ class ClientApp(ctk.CTk):
     # що вже й _build_data_settings_section нижче (підпис ПІД конкретним
     # рядком "ТГ ключ", не під усією карткою) - лише шлях до файлу, НІКОЛИ
     # сам вміст токена.
+    # Задача користувача (2026-08-17): "підготуй нове оновлення для
+    # автозапуску... покажи як це виглядатиме у нашому стилі" - макет
+    # погоджено (окрема секція "Автозапуск" перед "Бот", CTkSwitch
+    # праворуч замість кнопки-навігації, той самий стиль картки, що й
+    # решта Настроек). is_enabled() читається СВІЖО з реєстру щоразу при
+    # відкритті екрана (settings_frame перебудовується наново, той самий
+    # принцип, що й excel_source.current_source_label() поруч) - реальний
+    # стан реєстру лишається єдиним джерелом правди, без окремого прапорця
+    # в settings.json, який міг би розійтись (напр. якщо хтось прибрав
+    # автозапуск через штатні "Параметры автозагрузки" Windows).
+    def _build_autostart_settings_section(self, parent):
+        ctk.CTkLabel(parent, text="Автозапуск", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))
+        card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10)
+        card.pack(fill="x", pady=(0, 16))
+
+        row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        row.pack(fill="x", padx=1, pady=1)
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        icon_row = ctk.CTkFrame(left, fg_color="transparent")
+        icon_row.pack(anchor="w")
+        ctk.CTkLabel(icon_row, text="", image=_load_icon("power")).pack(side="left")
+        ctk.CTkLabel(
+            icon_row, text="Запуск с Windows", font=("", 13), text_color=COLOR_TEXT,
+        ).pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            left, text="Программа запустится сама при включении компьютера",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+
+        self._autostart_switch_var = ctk.IntVar(value=1 if autostart.is_enabled() else 0)
+        ctk.CTkSwitch(
+            row, text="", variable=self._autostart_switch_var, onvalue=1, offvalue=0,
+            command=self._on_autostart_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+
+        # Задача користувача (2026-08-17): "якщо програма закриється - то
+        # щоб запустилась знову, якщо включений ПК. щоб сам віндовс її
+        # запускав чи намагався запустити" - другий рядок тієї самої
+        # картки (той самий стиль/CTkSwitch, що й "Запуск с Windows" вище).
+        row2 = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        row2.pack(fill="x", padx=1, pady=(0, 1))
+
+        left2 = ctk.CTkFrame(row2, fg_color="transparent")
+        left2.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        icon_row2 = ctk.CTkFrame(left2, fg_color="transparent")
+        icon_row2.pack(anchor="w")
+        ctk.CTkLabel(icon_row2, text="", image=_load_icon("refresh")).pack(side="left")
+        ctk.CTkLabel(
+            icon_row2, text="Перезапускать при закрытии", font=("", 13), text_color=COLOR_TEXT,
+        ).pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            left2, text="Если программа закроется неожиданно - запустится снова сама",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+
+        self._watchdog_switch_var = ctk.IntVar(value=1 if watchdog_task.is_enabled() else 0)
+        ctk.CTkSwitch(
+            row2, text="", variable=self._watchdog_switch_var, onvalue=1, offvalue=0,
+            command=self._on_watchdog_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+
+    # frozen-guard (той самий принцип, що й code_backup.py.create_code_
+    # snapshot/reports.py PDF-підпроцес) - у dev-режимі (python client_app.
+    # py) sys.executable вказує на сам python.exe, запуск якого при вході
+    # у Windows не запустив би цю программу, а відкрив би голий інтерпретатор.
+    #
+    # Взаємовиключність з "Перезапускать при закрытии" (watchdog_task.py):
+    # обидва вмикають запуск при вході в Windows (Run-ключ тут, LogonTrigger
+    # там був би - тепер періодична перевірка щохвилини) - разом вони дали
+    # б ДВА одночасні запуски одразу після входу в Windows, а це прямий
+    # шлях до подвійного опитування Telegram (той самий клас бага, що вже
+    # й у watchdog телеграм-бота, project_telegram_watchdog). Увімкнення
+    # одного тому вимикає інший.
+    def _on_autostart_toggle_clicked(self):
+        enabled = bool(self._autostart_switch_var.get())
+        if enabled and not getattr(sys, "frozen", False):
+            self._autostart_switch_var.set(0)
+            messagebox.showerror("Автозапуск", "Автозапуск доступен только в собранной версии программы.")
+            return
+        try:
+            if enabled:
+                autostart.enable(f'"{sys.executable}"')
+                if self._watchdog_switch_var.get():
+                    watchdog_task.disable()
+                    self._watchdog_switch_var.set(0)
+            else:
+                autostart.disable()
+        except OSError as exc:
+            self._autostart_switch_var.set(0 if enabled else 1)
+            messagebox.showerror("Автозапуск", f"Не удалось изменить автозапуск: {exc}")
+
+    def _on_watchdog_toggle_clicked(self):
+        enabled = bool(self._watchdog_switch_var.get())
+        if enabled and not getattr(sys, "frozen", False):
+            self._watchdog_switch_var.set(0)
+            messagebox.showerror("Перезапуск", "Перезапуск доступен только в собранной версии программы.")
+            return
+        try:
+            if enabled:
+                watchdog_task.enable(f'"{sys.executable}" --watchdog-check')
+                if self._autostart_switch_var.get():
+                    autostart.disable()
+                    self._autostart_switch_var.set(0)
+            else:
+                watchdog_task.disable()
+        except OSError as exc:
+            self._watchdog_switch_var.set(0 if enabled else 1)
+            messagebox.showerror("Перезапуск", f"Не удалось изменить перезапуск: {exc}")
+
     def _build_bot_settings_section(self, parent):
         ctk.CTkLabel(parent, text="Бот", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))
         card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10)
@@ -2169,72 +2301,171 @@ class ClientApp(ctk.CTk):
         self.personnel_list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self._refresh_personnel()
 
+    # Задача користувача (2026-08-17): "точно такий же вигляд зроби і в
+    # клієнті. ролі - стаціонарні кнопци. відвідуваність теж. все не
+    # рухається а стабільно рівне." - той самий фікс, що вже й у gui.py
+    # (_render_personnel_list): раніше КОЖЕН рядок був окремим tk.Frame з
+    # pack() - Tk рахує розкладку кожного pack()-контейнера незалежно, тож
+    # однакові width= на бейджі/часі все одно не гарантували однакову
+    # позицію між РІЗНИМИ Frame (звідси "стрибання"). grid() усередині
+    # ОДНОГО спільного personnel_list_frame - усі рядки й шапка тепер
+    # справжні комірки однієї таблиці, тому колонки структурно не можуть
+    # розійтись. Кеш+рендер розділені так само, як у gui.py - сортування/
+    # фільтр лише перемальовують уже прочитане, без повторного store.list_
+    # users().
     def _refresh_personnel(self):
         if self.personnel_list_frame is None:
             return
+        self._personnel_users_cache = self.store.list_users()
+        self._render_personnel_list()
+
+    def _render_personnel_list(self):
         for child in self.personnel_list_frame.winfo_children():
             child.destroy()
-        users = self.store.list_users()
+        users = self._personnel_users_cache
         if not users:
             tk.Label(
                 self.personnel_list_frame, text="Пользователей пока нет.",
                 fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
             ).pack(anchor="w", pady=8)
             return
-        for index, (user_id, telegram_id, username, full_name, role, last_seen_at) in enumerate(users, start=1):
-            self._build_personnel_row(index, user_id, telegram_id, username, full_name, role, last_seen_at)
 
-    # Той самий фікс продуктивності, що й у _build_action_log_row вище -
-    # звичайні tk-віджети замість CTk для кожного рядка списку.
-    def _build_personnel_row(self, index, user_id, telegram_id, username, full_name, role, last_seen_at):
-        display_name = full_name or username or str(telegram_id)
-        username_text = f" @{username}" if username else ""
-        normalized_role = perm.normalize_role(role)
-        role_label = perm.ROLE_LABELS_RU.get(normalized_role, role)
-        role_bg, role_fg = perm.ROLE_CHIP_COLORS.get(normalized_role, perm.ROLE_CHIP_COLORS[perm.GUEST])
-        row_bg = self._tk_color(COLOR_ROW)
         text_color = self._tk_color(COLOR_TEXT)
         muted_color = self._tk_color(COLOR_TEXT_MUTED)
+        row_bg = self._tk_color(COLOR_ROW)
+        header_bg = self._tk_color(COLOR_BG)
 
-        row = tk.Frame(self.personnel_list_frame, bg=row_bg)
-        row.pack(fill="x", pady=(0, 6))
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, weight=0)
+        self.personnel_list_frame.grid_columnconfigure(0, weight=1)
+        self.personnel_list_frame.grid_columnconfigure(1, weight=0)
+        self.personnel_list_frame.grid_columnconfigure(2, weight=0)
+        self.personnel_list_frame.grid_columnconfigure(3, weight=0)
 
-        headline = f"{index}. {display_name}{username_text} — ID: {telegram_id}"
-        tk.Label(row, text=headline, font=("Segoe UI", 10), fg=text_color, bg=row_bg, anchor="w").grid(
-            row=0, column=0, sticky="w", padx=12, pady=(10, 2),
+        self._build_personnel_header_row(header_bg, muted_color)
+
+        visible_users = self._personnel_filtered_sorted_users(users)
+        for index, (user_id, telegram_id, username, full_name, role, last_seen_at) in enumerate(visible_users, start=1):
+            display_name = full_name or username or str(telegram_id)
+            username_text = f" @{username}" if username else ""
+            normalized_role = perm.normalize_role(role)
+            role_label = perm.ROLE_LABELS_RU.get(normalized_role, role)
+            role_bg, role_fg = perm.ROLE_CHIP_COLORS.get(normalized_role, perm.ROLE_CHIP_COLORS[perm.GUEST])
+
+            headline = f"{index}. {display_name}{username_text} — ID: {telegram_id}"
+            tk.Label(
+                self.personnel_list_frame, text=headline, font=("Segoe UI", 10),
+                fg=text_color, bg=row_bg, anchor="w",
+            ).grid(row=index, column=0, sticky="ew", padx=(6, 0), pady=6)
+
+            # Задача користувача (2026-08-16): "роби такого адміна і в
+            # домашній і в клієнті" - той самий клікабельний бейдж, що й у
+            # gui.py (там - push через тунель; тут - напряму, БД під рукою).
+            chip = tk.Label(
+                self.personnel_list_frame, text=f"{role_label} ▾", font=("Segoe UI", 9, "bold"),
+                bg=role_bg, fg=role_fg, padx=8, pady=3, cursor="hand2",
+                width=ROLE_CHIP_WIDTH, anchor="center",
+            )
+            chip.grid(row=index, column=1, padx=8)
+            chip.bind(
+                "<Button-1>",
+                lambda event, uid=user_id, tid=telegram_id, r=normalized_role, w=chip: self._open_role_menu(w, uid, tid, r),
+            )
+
+            last_seen_text = self._format_last_seen(last_seen_at) if last_seen_at else ""
+            tk.Label(
+                self.personnel_list_frame, text=last_seen_text, font=("Segoe UI", 8),
+                fg=muted_color, bg=row_bg, width=LAST_SEEN_WIDTH, anchor="e",
+            ).grid(row=index, column=2, sticky="e", padx=(8, 6))
+
+            # Задача користувача (2026-08-17): "приберіть кнопку видалити -
+            # спершу ховаєш, тестим і тоді видаляєм" - сховано (не
+            # намальовано), код кнопки/handler'а поки лишається.
+            # tk.Button(
+            #     self.personnel_list_frame, text="Удалить", width=9, fg="#B23B3B",
+            #     command=lambda uid=user_id, name=display_name: self._on_delete_user_clicked(uid, name),
+            # ).grid(row=index, column=3, padx=(0, 6))
+
+    def _personnel_sort_arrow(self, field):
+        if self._personnel_sort_field != field:
+            return ""
+        return " ↓" if self._personnel_sort_reverse else " ↑"
+
+    def _build_personnel_header_row(self, header_bg, muted_color):
+        name_header = tk.Label(
+            self.personnel_list_frame, text=f"Имя{self._personnel_sort_arrow('name')}",
+            font=("Segoe UI", 8, "bold"), fg=muted_color, bg=header_bg,
+            cursor="hand2", anchor="w",
         )
-        last_seen_text = self._format_last_seen(last_seen_at) if last_seen_at else "ещё не писал(а) боту"
-        tk.Label(row, text=last_seen_text, font=("Segoe UI", 9), fg=muted_color, bg=row_bg, anchor="w").grid(
-            row=1, column=0, sticky="w", padx=12, pady=(0, 10),
-        )
+        name_header.grid(row=0, column=0, sticky="w", padx=(6, 0), pady=(0, 6))
+        name_header.bind("<Button-1>", lambda event: self._toggle_personnel_sort("name"))
 
-        buttons = tk.Frame(row, bg=row_bg)
-        buttons.grid(row=0, column=1, rowspan=2, sticky="e", padx=12, pady=10)
-
-        # Задача користувача (2026-08-16): "роби такого адміна і в домашній
-        # і в клієнті" - той самий клікабельний бейдж, що й у gui.py (там -
-        # push через тунель; тут - напряму, БД під рукою). Кнопка "Ред"
-        # (редагування імені/username) прибрана за прямим проханням
-        # користувача (2026-08-16) - бейдж лишається єдиним, швидким шляхом
-        # для ролі; _ask_user_form лишається (використовується для "Новый
-        # пользователь" нижче), прибрано лише _on_edit_user_clicked та кнопку.
-        chip = tk.Label(
-            buttons, text=f"{role_label} ▾", font=("Segoe UI", 9, "bold"),
-            bg=role_bg, fg=role_fg, padx=8, pady=3, cursor="hand2",
-            width=ROLE_CHIP_WIDTH, anchor="center",
+        if self._personnel_role_filter:
+            role_header_text = f"Роль: {perm.ROLE_LABELS_RU.get(self._personnel_role_filter, self._personnel_role_filter)} ▾"
+        else:
+            role_header_text = "Роль ▾"
+        role_header = tk.Label(
+            self.personnel_list_frame, text=role_header_text,
+            font=("Segoe UI", 8, "bold"), fg=muted_color, bg=header_bg,
+            cursor="hand2", anchor="center", width=ROLE_CHIP_WIDTH,
         )
-        chip.pack(side="left", padx=(0, 6))
-        chip.bind(
-            "<Button-1>",
-            lambda event, uid=user_id, tid=telegram_id, r=normalized_role, w=chip: self._open_role_menu(w, uid, tid, r),
-        )
+        role_header.grid(row=0, column=1, padx=8, pady=(0, 6))
+        role_header.bind("<Button-1>", lambda event, w=role_header: self._open_personnel_role_filter_menu(w))
 
-        tk.Button(
-            buttons, text="Удалить", width=9, fg="#B23B3B",
-            command=lambda: self._on_delete_user_clicked(user_id, display_name),
-        ).pack(side="left")
+        time_header = tk.Label(
+            self.personnel_list_frame, text=f"Время{self._personnel_sort_arrow('time')}",
+            font=("Segoe UI", 8, "bold"), fg=muted_color, bg=header_bg,
+            cursor="hand2", anchor="e", width=LAST_SEEN_WIDTH,
+        )
+        time_header.grid(row=0, column=2, sticky="e", padx=(8, 6), pady=(0, 6))
+        time_header.bind("<Button-1>", lambda event: self._toggle_personnel_sort("time"))
+
+    def _toggle_personnel_sort(self, field):
+        if self._personnel_sort_field == field:
+            self._personnel_sort_reverse = not self._personnel_sort_reverse
+        else:
+            self._personnel_sort_field = field
+            self._personnel_sort_reverse = False
+        self._render_personnel_list()
+
+    def _open_personnel_role_filter_menu(self, header_widget):
+        menu = tk.Menu(
+            header_widget, tearoff=0,
+            bg=self._tk_color(COLOR_ROW), fg=self._tk_color(COLOR_TEXT),
+            activebackground=self._tk_color(COLOR_HOVER), activeforeground=self._tk_color(COLOR_TEXT),
+            selectcolor=self._tk_color(COLOR_TEXT), bd=0,
+        )
+        filter_var = tk.StringVar(value=self._personnel_role_filter or "")
+        menu.add_radiobutton(
+            label="Все", variable=filter_var, value="",
+            command=lambda: self._set_personnel_role_filter(None),
+        )
+        for role in perm.ROLES:
+            menu.add_radiobutton(
+                label=perm.ROLE_LABELS_RU[role], variable=filter_var, value=role,
+                command=lambda r=role: self._set_personnel_role_filter(r),
+            )
+        x = header_widget.winfo_rootx()
+        y = header_widget.winfo_rooty() + header_widget.winfo_height()
+        menu.tk_popup(x, y)
+
+    def _set_personnel_role_filter(self, role):
+        self._personnel_role_filter = role
+        self._render_personnel_list()
+
+    def _personnel_filtered_sorted_users(self, users):
+        result = list(users)
+        if self._personnel_role_filter:
+            result = [u for u in result if perm.normalize_role(u[4]) == self._personnel_role_filter]
+        if self._personnel_sort_field == "name":
+            def name_key(u):
+                _user_id, telegram_id, username, full_name, _role, _last_seen_at = u
+                return str(full_name or username or telegram_id).lower()
+            result.sort(key=name_key, reverse=self._personnel_sort_reverse)
+        elif self._personnel_sort_field == "time":
+            # ISO-8601 рядки порівнюються лексикографічно = хронологічно.
+            # Порожньо/None (ще ніколи не писав) - найменше значення,
+            # природно опиняється скраю списку.
+            result.sort(key=lambda u: u[5] or "", reverse=self._personnel_sort_reverse)
+        return result
 
     def _open_role_menu(self, chip_widget, user_id, telegram_id, current_role):
         menu = tk.Menu(
@@ -3633,7 +3864,11 @@ class ClientApp(ctk.CTk):
     # best-effort: якщо OneDrive не налаштований на цій машині, просто
     # тихо нічого не робимо (видно в _refresh_backup_status_text, не
     # спливаючим вікном на кожен тік).
-    _ONEDRIVE_BACKUP_LIMIT = 10
+    # Задача користувача (2026-08-18): "поств ліміти на бекапи. максимум
+    # по 20 файлів" - було 10, окремо на кожен тип (db_backups/
+    # config_backups рахуються незалежно, той самий принцип, що й раніше
+    # для одної спільної теки).
+    _ONEDRIVE_BACKUP_LIMIT = 20
 
     # Задача користувача (2026-08-16): "резервні копії будуть зберігатись
     # раз в годину" - той самий except Exception, що вже й _on_backup_now_
@@ -3662,8 +3897,9 @@ class ClientApp(ctk.CTk):
                         "AI Automation", f"Не удалось создать автоматическую резервную копию: {error_text}",
                     ))
                     return
-                self._mirror_backup_to_onedrive(snapshot_path)
+                self._mirror_backup_to_onedrive(snapshot_path, "db_backups", "app_data_*")
                 self._create_and_mirror_config_snapshot()
+                self._create_and_mirror_excel_backup()
                 self._run_on_main_thread(self._refresh_backup_lists_if_open)
 
             threading.Thread(target=worker, daemon=True).start()
@@ -3673,16 +3909,20 @@ class ClientApp(ctk.CTk):
         if self.backup_window is not None and self.backup_window.winfo_exists():
             self._refresh_backup_lists()
 
-    # glob_pattern параметризовано (2026-08-16, "бекап і на хмару" для
-    # settings.json/ключа тунелю) — раніше жорстко "app_data_*", тепер той
-    # самий метод дзеркалить і config_*.zip (create_config_snapshot) в ту ж
-    # OneDrive-теку, лише ротація рахується окремо для кожного префіксу,
-    # щоб знімки БД і конфігурації не витісняли одне одного з ліміту.
-    def _mirror_backup_to_onedrive(self, snapshot_path, glob_pattern="app_data_*"):
-        onedrive_root = os.environ.get("OneDrive")
-        if not onedrive_root:
+    # subfolder/glob_pattern тепер явні аргументи (2026-08-18, "всі файли
+    # в своїх папках") — раніше subfolder вгадувався з glob_pattern
+    # ("app_data_*"/інше), що ламалось би для Excel-бекапів (їхнє ім'я
+    # починається з РЕАЛЬНОГО імені підключеного файлу, не фіксованого
+    # префікса). Кожен тип пише у ВЛАСНУ підтеку, ротація рахується окремо
+    # для кожної. standard_menu_cloud.cloud_folder_path() (не голий
+    # os.environ.get("OneDrive")) — той самий пошук, що вже виправлений
+    # для "Открыть папку": ця машина має ДВІ теки OneDrive під одним
+    # акаунтом (особисту й тенантну), голий env var вказував би не на ту.
+    def _mirror_backup_to_onedrive(self, snapshot_path, subfolder, glob_pattern):
+        backups_root = standard_menu_cloud.cloud_folder_path()
+        if backups_root is None:
             return
-        target_dir = Path(onedrive_root) / "AI_Automation_Backups"
+        target_dir = backups_root / subfolder
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(snapshot_path, target_dir / Path(snapshot_path).name)
@@ -3701,7 +3941,26 @@ class ClientApp(ctk.CTk):
         except OSError:
             return
         if snapshot_path:
-            self._mirror_backup_to_onedrive(snapshot_path, glob_pattern="config_*")
+            self._mirror_backup_to_onedrive(snapshot_path, "config_backups", "config_*")
+
+    # Задача користувача (2026-08-18): "дзеркалити Excel-бекапи в OneDrive
+    # так само, як БД" - create_excel_backup() і так уже викликається на
+    # кожен реальний запис у таблицю (sync_sheets_to_excel), але щогодинний
+    # тік (той самий, що й БД/конфіг) гарантує СВІЖИЙ хмарний знімок навіть
+    # у годину без жодного запису - той самий принцип, що вже й у БД-тіка.
+    # glob_pattern - РЕАЛЬНЕ ім'я підключеного файлу (не фіксований
+    # префікс, як у app_data_*/config_*), тож будується динамічно з
+    # excel_source.backup_file_name_parts() - тим самим, що й сам
+    # create_excel_backup() використовує для власного локального імені.
+    def _create_and_mirror_excel_backup(self):
+        try:
+            snapshot_path = create_excel_backup()
+        except Exception:
+            return
+        if not snapshot_path:
+            return
+        stem, suffix = excel_source.backup_file_name_parts()
+        self._mirror_backup_to_onedrive(snapshot_path, "excel_backups", f"{stem}_*{suffix}")
 
     # Реальний баг (аудит коду, 2026-08-14): той самий клас зависання, що
     # вже знайшли й виправили для "Обновить эксели" (коментар нижче) - тут
@@ -3900,7 +4159,18 @@ class ClientApp(ctk.CTk):
             # рубіж захисту: /XF settings.json означає, що ЦЕЙ файл НІКОЛИ
             # не буде перезаписаний оновленням, хоч би що опинилось у
             # завантаженому пакеті.
-            f'robocopy "{source}" "{install_dir}" /E /IS /IT /XF settings.json /R:5 /W:1 >NUL',
+            #
+            # Той самий клас бага, лише інший файл (2026-08-17, живий
+            # продакшн, "куди дівається час відвідування"): тестовий запуск
+            # dist/AI_Automation_Client.exe на машині розробника створив
+            # СВІЖУ, майже порожню app_data.sqlite3 - опублікований пакет
+            # client-v0.2.57 підхопив саме її (не було жодного /XF для
+            # бази даних), і встановлення на робочому ПК затерло б реальний
+            # склад/персонал/журнали. /XF app_data.sqlite3 - той самий
+            # принцип, що й settings.json вище: файл користувача НІКОЛИ не
+            # буде перезаписаний оновленням, незалежно від того, що опиниться
+            # в пакеті.
+            f'robocopy "{source}" "{install_dir}" /E /IS /IT /XF settings.json app_data.sqlite3 /R:5 /W:1 >NUL',
             # Реальний баг (аудит коду, 2026-08-15): раніше джерело
             # видалялось БЕЗУМОВНО, незалежно від того, чи robocopy реально
             # встиг скопіювати все (код виходу robocopy >=8 - це помилка,
@@ -4063,7 +4333,35 @@ class ClientApp(ctk.CTk):
         self.settings.set("client_dark_mode", self._dark_mode)
 
     # ---------- вихід ----------
+    # Задача користувача (2026-08-18, живий продакшн - "не працює кнопка
+    # перезапустить... я закрив хрестиком, і вона не відкрилась"): реальний
+    # баг - WM_DELETE_WINDOW (хрестик вікна) і кнопка "Выход" ОБИДВІ вели в
+    # ОДИН _on_exit_clicked, який БЕЗУМОВНО писав graceful-exit позначку.
+    # Але задача користувача, яка ввела цю позначку (2026-08-17), явно
+    # називала саме кнопку "Выход" ("вихід программи через кнопку вихід"),
+    # а хрестик - інша дія: користувач очікує, що watchdog-перевірка
+    # відрізнить "я справді хочу вийти" (кнопка) від "просто закрив вікно"
+    # (хрестик, як і крах) і в другому випадку все одно перезапустить.
+    # Тепер два окремі, тонкі входи в СПІЛЬНИЙ _shutdown - позначку пише
+    # лише "Выход".
     def _on_exit_clicked(self):
+        self._write_graceful_exit_marker()
+        self._shutdown()
+
+    def _on_window_close_clicked(self):
+        self._shutdown()
+
+    def _write_graceful_exit_marker(self):
+        # Пишеться ЗАВЖДИ (не лише коли перезапуск-при-закритті увімкнено) -
+        # дешево, і на випадок, якщо користувач увімкне цю опцію пізніше,
+        # стара позначка не лишиться "зависла" з попереднього разу.
+        try:
+            paths.GRACEFUL_EXIT_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+            paths.GRACEFUL_EXIT_MARKER_PATH.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+
+    def _shutdown(self):
         # Той самий порядок, що й gui.py.on_close: is_closing=True ПЕРШИМ
         # (щоб жоден фоновий callback більше не чіплявся до вже знищеного
         # вікна), стоп бота - "запустив і забув" (daemon-потік), без
@@ -4079,6 +4377,85 @@ class ClientApp(ctk.CTk):
         self.destroy()
 
 
+# "Хмарна істина" для стандартного меню — Задача користувача (2026-08-18),
+# три уточнення того самого дня:
+#   1. "якщо при запуску в застосунку не та істина що в хмарі -
+#      вирівнюється з хмари" - хмара перемагає локальний стан.
+#   2. "лише якщо кнопку натис - хмара оновилась... точний контроль" -
+#      запис У хмару лише через explicit-кнопку в gui.py
+#      (/control/save_standard_menu_to_cloud), НІКОЛИ звідси.
+#   3. "розкладки кнопок більше не можуть братися нізвідки окрім як з
+#      хмари. а точніше копіювання з хмари в локальний файл щоб лагів не
+#      було" - крім підлаштування SQLite (для Редактора кнопок), хмарний
+#      стан ще й КОПІЮЄТЬСЯ в окремий локальний файл-кеш
+#      (paths.STANDARD_MENU_CACHE_PATH, звичайна тека system/) - реальна
+#      копія на диску, а не лише рядок у БД, щоб показ меню бота ніколи не
+#      залежав від стану синхронізації самого OneDrive-файлу.
+#
+# Викликається РІВНО ОДИН РАЗ одразу після відкриття self.store при старті
+# (не з ExcelSqliteStore.__init__ у warehouse_data.py — див. коментар на
+# початку standard_menu_cloud.py: gui.py теж створює ExcelSqliteStore
+# локально, а її власне дерево custom_menu_buttons давно мертве, тож ця
+# синхронізація мала б сидіти лише тут, у client_app.py, реальному хості
+# живого бота).
+#
+# Хмара відсутня (адміністратор ще НІ РАЗУ не натискав кнопку "Зберегти
+# стандарт у хмару") - НЕМА чого звіряти, локальний стан (уже вирішений
+# безпечним фолбеком _apply_standard_menu_policy - 5 кнопок "(форма)")
+# лишається як є, і САМЕ ВІН стає початковим вмістом локального кешу, щоб
+# кеш ніколи не був порожнім. Якщо хмара вже є - для КОЖНОГО спільного
+# ключа хмара перемагає (підлаштовуємо локальний стан під неї); ключі,
+# яких хмара ще не знає (майбутні версії коду), лишаються локальними
+# значеннями - потраплять у хмару, коли адміністратор наступного разу явно
+# натисне кнопку.
+def _reconcile_standard_menu_with_cloud(store):
+    cloud_state = standard_menu_cloud.read_cloud_state()
+    local_state = store.get_standard_menu_state()
+    if cloud_state is None:
+        standard_menu_cloud.write_local_cache(local_state)
+        return
+    merged_state = dict(local_state)
+    merged_state.update({key: value for key, value in cloud_state.items() if key in local_state})
+    if merged_state != local_state:
+        store.apply_standard_menu_state(merged_state)
+    standard_menu_cloud.write_local_cache(merged_state)
+
+
+# Задача користувача (2026-08-17): "якщо програма закриється - то щоб
+# запустилась знову, якщо включений ПК" - викликається watchdog_task.py's
+# запланованим завданням (раз/хв), НЕ звичайним запуском - тому виконує
+# перевірку й одразу виходить, без відкриття GUI. tasklist з двома
+# фільтрами (IMAGENAME + PID ne <свій>) - інакше сама перевірка завжди
+# "бачила б" себе саму серед процесів з тим самим іменем.
+def _run_watchdog_check():
+    if not getattr(sys, "frozen", False):
+        return
+    exe_path = Path(sys.executable)
+    result = subprocess.run(
+        [
+            "tasklist", "/FI", f"IMAGENAME eq {exe_path.name}", "/FI", f"PID ne {os.getpid()}",
+            "/FO", "CSV", "/NH",
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    already_running = exe_path.name.lower() in (result.stdout or "").lower()
+    if already_running:
+        return
+    marker = paths.GRACEFUL_EXIT_MARKER_PATH
+    if marker.exists():
+        # Останнє закриття було свідомим (кнопка "Выход") - споживаємо
+        # позначку й нічого не запускаємо. Якщо процес зникне ЗНОВУ (без
+        # нового кліку "Выход") - позначки вже не буде, і наступна
+        # перевірка коректно перезапустить.
+        marker.unlink(missing_ok=True)
+        return
+    subprocess.Popen([str(exe_path)])
+
+
 if __name__ == "__main__":
-    app = ClientApp()
-    app.mainloop()
+    if "--watchdog-check" in sys.argv:
+        _run_watchdog_check()
+    else:
+        app = ClientApp()
+        app.mainloop()

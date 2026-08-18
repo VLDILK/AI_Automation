@@ -29,6 +29,7 @@ from datetime import datetime
 from paths import (
     CLOUDFLARED_TUNNEL_CREDENTIALS_PATH,
     CONFIG_BACKUP_DIR,
+    GITHUB_TOKEN_PATH,
     SETTINGS_PATH,
     TELEGRAM_OFFSET_PATH,
 )
@@ -39,7 +40,12 @@ CONFIG_BACKUP_LIMIT = 100
 # (тунель тримає тільки він) - _collect_files() нижче бере лише те, що
 # реально є на диску, тож знімок gui.py міститиме лише settings.json (і
 # telegram_offset.json, якщо там теж підключений бот).
-_INCLUDE_FILES = (SETTINGS_PATH, CLOUDFLARED_TUNNEL_CREDENTIALS_PATH, TELEGRAM_OFFSET_PATH)
+# github_token.txt (2026-08-18, "на що ще немає бекапів?") - раніше не мав
+# ЖОДНОЇ копії ніде: втрата цього файлу ламала публікацію релізів до
+# видачі нового PAT-токена вручну.
+_INCLUDE_FILES = (
+    SETTINGS_PATH, CLOUDFLARED_TUNNEL_CREDENTIALS_PATH, TELEGRAM_OFFSET_PATH, GITHUB_TOKEN_PATH,
+)
 
 
 def _collect_files():

@@ -38,6 +38,7 @@ import permissions as perm
 import code_backup
 import config_backup
 import remote_control_client
+import standard_menu_cloud
 import update_check
 from i18n import DEFAULT_LANGUAGE, translate
 from paths import BASE_DIR, CLOUDFLARED_EXE, DB_PATH, DISPLAY_SETTINGS_PATH, FILE_PATH, SETTINGS_PATH
@@ -71,7 +72,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.29"
+__version__ = "1.0.38"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -111,6 +112,44 @@ RU_MONTHS = [
     "ноября",
     "декабря",
 ]
+
+
+# Крок "Дії" remote-sync (2026-08-18, аудит "у всього є істина?"): read-only
+# адаптер поверх self.store — делегує ВСЕ (заголовки/рядки складу й далі
+# легітимно локальні, gui.py має власний підключений Excel-файл для інших
+# екранів), окрім рівно цих 6 operations/fields/columns-методів, які тепер
+# читають з РЕМОТНО завантаженого кешу (app._operations_tree_cache), а не з
+# власної мертвої локальної bot_operations-таблиці gui.py. Через app._app
+# (не застигла копія store) — self.store може бути ПЕРЕПІДКЛЮЧЕНИЙ (інший
+# Excel-файл), лукап іде щоразу заново. Потрібен, бо ці самі методи
+# (_income_missing_fields/_sale_missing_prompt/...) з telegram_dialog*.py
+# приймають store як ОБ'ЄКТ-аргумент (не виклик self.store.X() напряму) —
+# лишається ЄДИНИЙ спосіб підмінити джерело саме цих 6 методів, не чіпаючи
+# решту роботи тих самих функцій з рештою store.
+class _RemoteOperationsStoreView:
+    def __init__(self, app):
+        self._app = app
+
+    def __getattr__(self, name):
+        return getattr(self._app.store, name)
+
+    def list_operations(self, parent_action_code=None, include_disabled=False):
+        return self._app._ops_list_operations(parent_action_code, include_disabled)
+
+    def get_operation(self, operation_id):
+        return self._app._ops_get_operation(operation_id)
+
+    def get_operation_by_code(self, code):
+        return self._app._ops_get_operation_by_code(code)
+
+    def list_operation_fields(self, operation_id, include_disabled=False):
+        return self._app._ops_list_operation_fields(operation_id, include_disabled)
+
+    def get_operation_field(self, field_id):
+        return self._app._ops_get_operation_field(field_id)
+
+    def list_operation_field_columns(self, operation_field_id):
+        return self._app._ops_list_operation_field_columns(operation_field_id)
 
 
 class ExcelViewerApp:
@@ -216,6 +255,7 @@ class ExcelViewerApp:
             # режимі. Викликається лише РАЗ на кожен виклик _apply_theme
             # (не в рекурсії нижче - там widget завжди явний, ніколи None).
             self._apply_ttk_theme()
+            self._draw_theme_toggle_switch()
         theme = self._theme()
         widget = widget or self.root
         try:
@@ -330,8 +370,21 @@ class ExcelViewerApp:
             # бо ці кольори не входять до жодного з "смислових" наборів
             # нижче. Непомітно у світлій темі лише тому, що дефолтний
             # button_bg_color збігається з _LIGHT_THEME["button_bg"].
+            # Реальна скарга (2026-08-18, "щоб не скидався темний колір"):
+            # button_bg_color/button_text_color за замовчуванням дорівнюють
+            # РІВНО _LIGHT_THEME["button_bg"]/["fg"] (settings.py) - якщо
+            # адмін НІКОЛИ не міняв "Формат кнопок", ця перевірка раніше
+            # трактувала звичайнісінький світлий дефолт як "навмисний
+            # кастомний колір" і назавжди "заморожувала" кнопки світлими
+            # навіть у темній темі. Тепер кастомним вважається лише колір,
+            # який РЕАЛЬНО відрізняється від світлого дефолту - лише тоді
+            # адмін дійсно щось обирав у "Формат кнопок".
             custom_button_bg = str(self.display_settings.get("button_bg_color") or "").lower()
             custom_button_fg = str(self.display_settings.get("button_text_color") or "").lower()
+            if custom_button_bg == self._LIGHT_THEME["button_bg"].lower():
+                custom_button_bg = ""
+            if custom_button_fg == self._LIGHT_THEME["fg"].lower():
+                custom_button_fg = ""
             current_fg = str(widget.cget("fg") or "")
             is_custom_fg = (
                 isinstance(widget, tk.Button) and bool(custom_button_fg)
@@ -389,11 +442,34 @@ class ExcelViewerApp:
                 widget.configure(bg=theme["bg"], fg=fg)
             return
 
+    # Canvas-повзунок (не tk.Button/ttk-стиль - Windows-рушій "vista"/
+    # "winnative" у світлому режимі однаково ігнорує спроби намалювати
+    # справжній тумблер через ttk.Style). Праворуч (dark_mode=True) -
+    # акцентний колір доріжки + білий повзунок; ліворуч (світла тема) -
+    # нейтральна доріжка theme["border"]. Викликається (1) одразу після
+    # побудови в _build_main_menu, (2) з кожного _on_theme_toggle,
+    # (3) з КОЖНОГО повного проходу _apply_theme() (widget=None) - інакше
+    # колір доріжки застряг би на кольорах теми, що діяла в момент
+    # побудови кнопки.
+    _THEME_TOGGLE_ON_COLOR = "#0969DA"
+
+    def _draw_theme_toggle_switch(self):
+        canvas = getattr(self, "theme_toggle_switch", None)
+        if canvas is None:
+            return
+        theme = self._theme()
+        canvas.configure(bg=theme["bg"])
+        canvas.delete("all")
+        track_color = self._THEME_TOGGLE_ON_COLOR if self._dark_mode else theme["border"]
+        canvas.create_oval(0, 0, 22, 22, fill=track_color, outline=track_color)
+        canvas.create_oval(22, 0, 44, 22, fill=track_color, outline=track_color)
+        canvas.create_rectangle(11, 0, 33, 22, fill=track_color, outline=track_color)
+        thumb_x = 33 if self._dark_mode else 11
+        canvas.create_oval(thumb_x - 9, 2, thumb_x + 9, 20, fill="#FFFFFF", outline="#FFFFFF")
+
     def _on_theme_toggle(self):
         self._dark_mode = not self._dark_mode
         self.display_settings.set("dark_mode", self._dark_mode)
-        if getattr(self, "theme_toggle_button", None) is not None:
-            self.theme_toggle_button.configure(text=self._t("Світла") if self._dark_mode else self._t("Темна"))
         self.root.configure(bg=self._theme()["bg"])
         self._apply_theme()
 
@@ -461,6 +537,7 @@ class ExcelViewerApp:
             self.add_root_button,
             self.add_command_button,
             self.add_payment_method_button,
+            self.save_standard_menu_cloud_button,
         ):
             if button is not None:
                 button.configure(**style)
@@ -619,6 +696,7 @@ class ExcelViewerApp:
         # вдруге, поки перший запит ще в польоті.
         self._remote_command_in_progress = False
         self._remote_role_change_in_progress = False
+        self._standard_menu_cloud_save_in_progress = False
         # Задача користувача (2026-08-12): після виходу з тривалого збою
         # (10+ невдалих спроб поспіль) наступна перевірка йде рідше (раз в
         # 30 хв, не раз в 30с) - "довіра" до щойно відновленого з'єднання
@@ -768,6 +846,7 @@ class ExcelViewerApp:
         self.journals_window = None
         self._action_log_refresh_generation = 0
         self._personnel_refresh_generation = 0
+        self._payment_methods_refresh_generation = 0
         # Задача користувача (2026-08-17): "вирівняй це... ролі не мають
         # їздити... додай сортування за часом та за алфавітом. фільтри
         # мають бути як в данних формі" - кешуємо СИРИЙ (нефільтрований,
@@ -893,6 +972,7 @@ class ExcelViewerApp:
             self.main_menu_frame,
             textvariable=self.update_check_result_text,
             font=("Segoe UI", 9), fg="gray40",
+            wraplength=220, justify="right",
         ).place(relx=1.0, x=-16, y=88, anchor="ne")
 
         # Задача користувача: "додай на головне меню... датчик" статусу
@@ -915,18 +995,23 @@ class ExcelViewerApp:
         )
         self.main_menu_status_label.place(relx=0.0, x=16, y=12, anchor="nw")
 
-        # Задача користувача (2026-08-15): "додай темну тему тумблер на
-        # головний екран" - той самий лівий верхній кут, що й статус вище
-        # (y=40, під ним), симетрично до update_button/check_update_button
-        # у правому куті.
-        self.theme_toggle_button = tk.Button(
-            self.main_menu_frame,
-            text=self._t("Світла") if self._dark_mode else self._t("Темна"),
-            font=("Segoe UI", 9),
-            relief="flat", padx=8, pady=2,
-            command=self._on_theme_toggle,
+        # Задача користувача (2026-08-18): "кнопку зміни теми перенес
+        # праворуч... і перероби на тумблер" - справжній повзунок-перемикач
+        # (Canvas, не tk.Button). Задача користувача (наступного дня):
+        # "тумблер теми змісти нижче на 150 пікселів" - тепер нижче "⟳"
+        # (check_update_button, y=52), а не над ним.
+        theme_toggle_row = tk.Frame(self.main_menu_frame)
+        theme_toggle_row.place(relx=1.0, x=-16, y=162, anchor="ne")
+        self.theme_toggle_label = tk.Label(
+            theme_toggle_row, text=self._t("Тёмная тема"), font=("Segoe UI", 9),
         )
-        self.theme_toggle_button.place(relx=0.0, x=16, y=40, anchor="nw")
+        self.theme_toggle_label.pack(side="left", padx=(0, 6))
+        self.theme_toggle_switch = tk.Canvas(
+            theme_toggle_row, width=44, height=22, highlightthickness=0, bd=0, cursor="hand2",
+        )
+        self.theme_toggle_switch.bind("<Button-1>", lambda _event: self._on_theme_toggle())
+        self.theme_toggle_switch.pack(side="left")
+        self._draw_theme_toggle_switch()
 
         menu_panel = tk.Frame(self.main_menu_frame)
         menu_panel.pack(expand=True)
@@ -1250,8 +1335,12 @@ class ExcelViewerApp:
             # НІКОЛИ не перезапише локальні налаштування цієї машини, хоч
             # би що опинилось у завантаженому пакеті - незалежно від того,
             # чи build_exe.py колись знову помилково підкладе туди чужий
-            # settings.json.
-            f'robocopy "{source}" "{install_dir}" /E /IS /IT /XF settings.json /R:5 /W:1 >NUL',
+            # settings.json. app_data.sqlite3 додано тим самим рубежем
+            # (2026-08-17, живий продакшн - client_app.py постраждав від
+            # ЦЬОГО САМОГО класу бага з тестовою базою даних) - для
+            # симетрії з клієнтом, хоч власна збірка gui.py й захищена
+            # backup_runtime_data вище.
+            f'robocopy "{source}" "{install_dir}" /E /IS /IT /XF settings.json app_data.sqlite3 /R:5 /W:1 >NUL',
             # Реальний баг (аудит коду, 2026-08-15): раніше джерело
             # видалялось безумовно - код виходу robocopy >=8 означає реальну
             # помилку копіювання (0-7 - різні варіанти успіху). Без цієї
@@ -1772,15 +1861,6 @@ class ExcelViewerApp:
         )
         db_snapshot_heartbeat_label.pack(anchor="n", fill="x", pady=(2, 0))
 
-        low_stock_button = tk.Button(
-            side_panel,
-            text=self._t("Низький залишок"),
-            width=20,
-            height=2,
-            command=self.open_low_stock_threshold_dialog,
-        )
-        low_stock_button.pack(anchor="n", fill="x", pady=(12, 0))
-
         # Задача користувача (2026-08-08, реальний баг живого тестування):
         # розбіжність "кількість, шт" vs "фізичний вимір" (м3/м2/мп) для
         # рядка складу вирішується ТІЛЬКИ тут, у GUI — "переходимо загально
@@ -1915,6 +1995,21 @@ class ExcelViewerApp:
     def _build_custom_buttons_view(self):
         self.custom_buttons_frame = tk.Frame(self.root)
         self.custom_buttons_selected_id = None
+        # Задача користувача (2026-08-17): "редактор кнопок зроби
+        # синхронним" - None означає "ще не завантажено/не вдалось
+        # отримати з client_app.py" (той самий контракт, що вже й
+        # self._personnel_users_cache) - НЕ "кнопок немає". Плаский список
+        # 9-елементних рядків list_all_custom_buttons(); _custom_buttons_
+        # children/_custom_button_by_id нижче читають з нього замість
+        # окремого запиту до self.store на кожен вузол дерева.
+        self._custom_buttons_cache = None
+        self._custom_buttons_refresh_generation = 0
+        # Крок "Дії" remote-sync (2026-08-18): той самий None-контракт
+        # ("ще не завантажено/немає зв'язку", НЕ "дій немає") для дерева
+        # operations+fields+columns, що показує сусідня вкладка "Дії".
+        self._operations_tree_cache = None
+        self._actions_view_refresh_generation = 0
+        self._ops_store_view = _RemoteOperationsStoreView(self)
 
         top_bar = tk.Frame(self.custom_buttons_frame)
         top_bar.pack(side="top", fill="x", padx=8, pady=6)
@@ -1924,6 +2019,55 @@ class ExcelViewerApp:
 
         title = tk.Label(top_bar, text=self._t("Редактор кнопок"), font=("Segoe UI", 12, "bold"))
         title.pack(side="left", padx=12)
+
+        # Задача користувача (2026-08-18): "додай кнопку яка буде
+        # перезберігати ці дані у хмарі... лише якщо кнопку натис - хмара
+        # оновилась... точний контроль" - єдиний спосіб записати хмарну
+        # істину "стандартного меню" (11 кореневих мігрованих кнопок).
+        # Автоматичного запису НЕМАЄ ніде більше - client_app.py при старті
+        # лише ЧИТАЄ хмару (_reconcile_standard_menu_with_cloud), ніколи
+        # сам туди не пише.
+        self.save_standard_menu_cloud_button = tk.Button(
+            top_bar,
+            text=self._t("Сохранить стандарт в облако"),
+            command=self._on_save_standard_menu_to_cloud_clicked,
+            **self._chip_button_style(),
+        )
+        self.save_standard_menu_cloud_button.pack(side="right")
+
+        # Задача користувача (2026-08-18): "ця кнопка має бути видима
+        # завжди, щоб кожен раз з програми міг глянути" - ПОСТІЙНИЙ рядок
+        # (не лише одразу після збереження), щоб у будь-який момент можна
+        # було перевірити реальний вміст теки, а не вірити на слово
+        # діалогу успіху.
+        #
+        # Реальна знахідка того самого дня ("поправ там шлях"): домашня
+        # программа (gui.py) й client_app.py можуть працювати на РІЗНИХ
+        # машинах/OneDrive-акаунтах (тут-таки живий випадок: gui.py бачила
+        # СВІЙ особистий, а client_app.py насправді пише в "Vladimir2\
+        # OneDrive - Diverus, UAB") - показувати ЛОКАЛЬНИЙ шлях gui.py тут
+        # означає майже гарантовано брехати користувачу. Тому текст рядка й
+        # сама кнопка тепер питають РЕАЛЬНИЙ шлях у client_app.py через
+        # /control/standard_menu_cloud_path (фон-потік, не блокує вікно).
+        cloud_status_row = tk.Frame(self.custom_buttons_frame)
+        cloud_status_row.pack(side="top", fill="x", padx=8, pady=(0, 6))
+
+        self._standard_menu_cloud_path_var = tk.StringVar(
+            value=self._t("Облако стандартного меню: {value}").format(value=self._t("Проверка пути..."))
+        )
+        tk.Label(
+            cloud_status_row, textvariable=self._standard_menu_cloud_path_var,
+            font=("Segoe UI", 8), fg="#57606a",
+        ).pack(side="left")
+
+        tk.Button(
+            cloud_status_row,
+            text=self._t("Открыть папку"),
+            command=self._open_standard_menu_cloud_folder,
+            **self._chip_button_style(),
+        ).pack(side="right")
+
+        self._refresh_standard_menu_cloud_path_label()
 
         # Дві вкладки (Задача користувача): "Налаштування гілок" — те саме
         # дерево кастомних кнопок, що й раніше; "Дії" — перегляд усіх дій
@@ -1967,6 +2111,94 @@ class ExcelViewerApp:
         tk.Label(preview_side, text=self._t("Прев'ю"), font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
         self.custom_button_preview_frame = tk.Frame(preview_side)
         self.custom_button_preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    # Той самий фон-потік + _run_on_main_thread + guard-прапорець, що вже й
+    # _on_role_menu_selected вище (не блокувати вікно на весь мережевий
+    # timeout, захист від подвійного кліку). На відміну від решти дій
+    # редактора кнопок (кожна - миттєвий push однієї зміни) - ця кнопка
+    # явно й одноразово перезаписує ВЕСЬ хмарний файл станом "стандартного
+    # меню" ПРЯМО ЗАРАЗ, єдиний спосіб змінити хмару (Задача користувача,
+    # 2026-08-18: "точний контроль").
+    def _on_save_standard_menu_to_cloud_clicked(self):
+        if self._standard_menu_cloud_save_in_progress:
+            return
+        self._standard_menu_cloud_save_in_progress = True
+        self.save_standard_menu_cloud_button.configure(state="disabled")
+
+        def worker():
+            error = None
+            try:
+                result = remote_control_client.save_standard_menu_to_cloud()
+                if not result.get("ok"):
+                    error = result.get("error") or self._t("Не удалось сохранить.")
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                try:
+                    detail = json.loads(detail).get("error") or detail
+                except ValueError:
+                    pass
+                error = detail
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                self._standard_menu_cloud_save_in_progress = False
+                self.save_standard_menu_cloud_button.configure(state="normal")
+                if error:
+                    messagebox.showerror(self._t("Редактор кнопок"), error)
+                    return
+                messagebox.showinfo(
+                    self._t("Редактор кнопок"),
+                    self._t("Стандартное меню сохранено в облако."),
+                )
+
+            self._run_on_main_thread(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # Реальна знахідка (2026-08-18, "поправ там шлях"): раніше тут просто
+    # os.startfile()'ився ЛОКАЛЬНИЙ (gui.py-машини) шлях - хибне
+    # припущення, що обидві программи завжди на тому самому OneDrive-
+    # акаунті (спростовано живим випадком: "Vladimir2\OneDrive - Diverus,
+    # UAB" на робочому ПК, зовсім не особистий акаунт тут). Тепер завжди
+    # питає РЕАЛЬНИЙ шлях у client_app.py - і чесно каже, коли ЦЮ теку
+    # неможливо відкрити локально (шлях лежить на ІНШІЙ машині), замість
+    # мовчки відкривати НЕПРАВИЛЬНУ (свою) теку.
+    # Задача користувача (2026-08-18, остаточно підтверджено): "домашня
+    # версія" (gui.py) і client_app.py працюють на ОДНІЙ і тій самій машині
+    # — тож правильний шлях резолвиться ЛОКАЛЬНО, у власному процесі gui.py
+    # (той самий standard_menu_cloud.cloud_folder_path(), що й client_app.py
+    # використовує для запису), а не запитом через тунель до client_app.py.
+    # Попередня "різні машини/акаунти" гіпотеза була хибною.
+    def _refresh_standard_menu_cloud_path_label(self):
+        if not hasattr(self, "_standard_menu_cloud_path_var"):
+            return
+        folder = standard_menu_cloud.cloud_folder_path()
+        if folder is None:
+            text = self._t("OneDrive не найден на этом компьютере")
+        else:
+            text = str(folder / "standard_menu.json")
+        self._standard_menu_cloud_path_var.set(
+            self._t("Облако стандартного меню: {value}").format(value=text)
+        )
+
+    def _open_standard_menu_cloud_folder(self):
+        folder = standard_menu_cloud.cloud_folder_path()
+        if folder is None:
+            messagebox.showerror(
+                self._t("Редактор кнопок"),
+                self._t("OneDrive не найден на этом компьютере."),
+            )
+            return
+        try:
+            os.startfile(folder)
+        except OSError as error:
+            messagebox.showerror(
+                self._t("Редактор кнопок"),
+                self._t("Не удалось открыть папку:\n{value}\n\n{error}").format(
+                    value=folder, error=error
+                ),
+            )
 
     # Яких логічних полів (Задача користувача: "що куди записується")
     # стосується кожна дія з CUSTOM_BUTTON_ACTIONS, і з якого аркуша/якою
@@ -2081,7 +2313,7 @@ class ExcelViewerApp:
     # недосяжний, як і "м3" — обидва приховуються, лишається лише "м2" за
     # замовчуванням.
     def _reachable_measure_groups(self, operation_id):
-        operation = self.store.get_operation(operation_id)
+        operation = self._ops_get_operation(operation_id)
         prefill_json = operation[6] if operation else None
         prefill = json.loads(prefill_json) if prefill_json else {}
         if self._preview_worker()._is_area_based_product(prefill.get("product")):
@@ -2097,6 +2329,57 @@ class ExcelViewerApp:
     # одночасно"). Кожне вікно САМОДОСТАТНЄ (не просто "дивись інше вікно") —
     # навіть категорія, що продовжує той самий потік (ДОСКА AD), показує
     # ПОВНУ таблицю полів У СЕБЕ, а не лише посилання на батьківське вікно.
+    # Крок "Дії" remote-sync (2026-08-18): 6 лукапів над self._operations_
+    # tree_cache (id, code, kind, requires_row_identity, label,
+    # parent_action_code, prefill_json, position, enabled, builtin_key для
+    # operations; id, operation_id, field_key, label, is_identity, position,
+    # enabled, builtin_key для fields; id, operation_field_id, sheet,
+    # column_key, marker, write_mode, position, builtin_key для columns —
+    # ТОЧНО ті самі позиції колонок, що вже повертали self.store.list_
+    # operations/get_operation/list_operation_fields/... — тож решта коду
+    # (розпаковка кортежів на місці виклику) лишається незмінною. Сервер уже
+    # віддає рядки відсортованими (ORDER BY у list_all_operations_tree) —
+    # фільтрація тут зберігає порядок, повторне сортування не потрібне.
+    def _ops_list_operations(self, parent_action_code=None, include_disabled=False):
+        tree = self._operations_tree_cache
+        rows = list(tree["operations"]) if tree else []
+        if parent_action_code is not None:
+            rows = [row for row in rows if row[5] == parent_action_code]
+        if not include_disabled:
+            rows = [row for row in rows if row[8]]
+        return rows
+
+    def _ops_get_operation(self, operation_id):
+        tree = self._operations_tree_cache
+        if not tree:
+            return None
+        return next((row for row in tree["operations"] if row[0] == operation_id), None)
+
+    def _ops_get_operation_by_code(self, code):
+        tree = self._operations_tree_cache
+        if not tree:
+            return None
+        return next((row for row in tree["operations"] if row[1] == code), None)
+
+    def _ops_list_operation_fields(self, operation_id, include_disabled=False):
+        tree = self._operations_tree_cache
+        rows = [row for row in tree["fields"] if row[1] == operation_id] if tree else []
+        if not include_disabled:
+            rows = [row for row in rows if row[6]]
+        return rows
+
+    def _ops_get_operation_field(self, field_id):
+        tree = self._operations_tree_cache
+        if not tree:
+            return None
+        return next((row for row in tree["fields"] if row[0] == field_id), None)
+
+    def _ops_list_operation_field_columns(self, operation_field_id):
+        tree = self._operations_tree_cache
+        if not tree:
+            return []
+        return [row for row in tree["columns"] if row[1] == operation_field_id]
+
     def _build_actions_view(self, parent):
         top_note = tk.Label(
             parent,
@@ -2159,14 +2442,14 @@ class ExcelViewerApp:
         # посилання).
         own_operation_id = row_operation_id
         children = []
-        tree_children = self.store.list_custom_buttons(node_id, include_disabled=True)
+        tree_children = self._custom_buttons_children(node_id)
         if tree_children:
             children = [self._action_view_node(child_row) for child_row in tree_children]
         elif own_operation_id is not None:
             pass
         elif is_navigation_only:
             category_nodes = []
-            for operation in self.store.list_operations(action_code):
+            for operation in self._ops_list_operations(action_code):
                 operation_id, _code, _kind, _requires_identity, op_label, _parent, prefill_json, *_rest = operation
                 prefill_raw = json.loads(prefill_json) if prefill_json else None
                 prefill = (
@@ -2217,7 +2500,7 @@ class ExcelViewerApp:
             else:
                 children = category_nodes
         elif is_report_operation:
-            operations = self.store.list_operations(action_code)
+            operations = self._ops_list_operations(action_code)
             own_operation_id = operations[0][0] if operations else None
         return {
             "title": label,
@@ -2496,15 +2779,15 @@ class ExcelViewerApp:
 
     def _render_operation_fields(self, parent, operation_id, refresh):
         columns_by_source = self._actions_columns_by_source()
-        fields = self.store.list_operation_fields(operation_id)
-        operation_row = self.store.get_operation(operation_id)
+        fields = self._ops_list_operation_fields(operation_id)
+        operation_row = self._ops_get_operation(operation_id)
         operation_kind = operation_row[2] if operation_row else None
         ledger_explanations = self._LEDGER_FIELD_EXPLANATIONS.get(operation_kind, {})
         if not fields:
             tk.Label(parent, text=self._t("(немає полів-запитів)"), anchor="w", fg="#57606a").pack(fill="x")
         for field in fields:
             field_id, _operation_id, field_key, label, is_identity, _position, _enabled, _builtin_key = field
-            bindings = self.store.list_operation_field_columns(field_id)
+            bindings = self._ops_list_operation_field_columns(field_id)
             # Задача користувача: "прибери із виду все, що нічого не
             # робить, а просто перевіряє" — товар/порода/тип/товщина/
             # ширина/довжина без жодної прив'язки (приход/продаж, після
@@ -2681,22 +2964,64 @@ class ExcelViewerApp:
     # не має чек-листа (звіт нічого не питає, лише показує дані) — для
     # нього прев'ю не рендериться взагалі.
     def _compute_operation_request_preview(self, operation_id):
-        operation = self.store.get_operation(operation_id)
+        operation = self._ops_get_operation(operation_id)
         if operation is None:
             return None
         kind = operation[2]
         prefill_json = operation[6]
         payload = json.loads(prefill_json) if prefill_json else {}
         worker = self._preview_worker()
+        # self._ops_store_view — той самий store, лише operations/fields/
+        # columns читає з remote-кешу (Крок "Дії" remote-sync); все інше
+        # (get_headers/fetch_rows/get_message_template тощо, які ці самі
+        # функції теж викликають) лишається легітимно локальним self.store.
         if kind == "income":
-            missing = worker._income_missing_fields(self.store, payload, kind="income")
-            return worker._income_missing_prompt(missing, payload, store=self.store)
+            missing = worker._income_missing_fields(self._ops_store_view, payload, kind="income")
+            return worker._income_missing_prompt(missing, payload, store=self._ops_store_view)
         if kind == "sale":
-            missing = worker._income_missing_fields(self.store, payload, kind="sale")
-            return worker._sale_missing_prompt(missing, payload, store=self.store)
+            missing = worker._income_missing_fields(self._ops_store_view, payload, kind="sale")
+            return worker._sale_missing_prompt(missing, payload, store=self._ops_store_view)
         if kind == "service":
-            return worker._antiseptic_mandatory_fields_prompt(self.store, payload)
+            return worker._antiseptic_mandatory_fields_prompt(self._ops_store_view, payload)
         return None
+
+    # Крок "Дії" remote-sync (2026-08-18): той самий _push_custom_button_
+    # action/_push_payment_method_action патерн (фон-потік, HTTPError->JSON
+    # "error", messagebox при помилці) — з ОДНІЄЮ відмінністю: при успіху
+    # одразу перезавантажує ВЕСЬ operations_tree (не лише кличе on_success),
+    # тільки ПОТІМ кличе on_success — локальні refresh_fields/refresh_
+    # children_block у вже відкритих popup-вікнах читають self._operations_
+    # tree_cache СИНХРОННО (без власного мережевого запиту), тож кеш має
+    # бути вже свіжим до їхнього виклику.
+    def _push_operation_tree_action(self, action, on_success=None):
+        def worker():
+            error = None
+            tree = None
+            try:
+                action()
+                tree = remote_control_client.fetch_remote_operations_tree()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                try:
+                    detail = json.loads(detail).get("error") or detail
+                except ValueError:
+                    pass
+                error = detail
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                if error:
+                    messagebox.showerror(self._t("Дії"), error)
+                    return
+                if tree is not None:
+                    self._operations_tree_cache = tree
+                if on_success:
+                    on_success()
+
+            self._run_on_main_thread(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # Задача користувача: "зроби прям біля кнопок просто квадратики з
     # олівцем всередині... коли її натискатиму — строка ставатиме активною
@@ -2719,8 +3044,12 @@ class ExcelViewerApp:
         def save(entry):
             new_label = entry.get().strip()
             if new_label:
-                self.store.update_operation_field(field_id, label=new_label)
-            refresh()
+                self._push_operation_tree_action(
+                    lambda: remote_control_client.update_remote_operation_field(field_id, new_label),
+                    on_success=refresh,
+                )
+            else:
+                refresh()
 
         def start_edit():
             label_widget.pack_forget()
@@ -2748,10 +3077,10 @@ class ExcelViewerApp:
     def _render_operation_technical_fields(self, parent, operation_id, refresh):
         technical_fields = [
             field
-            for field in self.store.list_operation_fields(operation_id)
+            for field in self._ops_list_operation_fields(operation_id)
             if field[2] in self._IDENTITY_SHAPED_FIELD_KEYS
             and field[2] not in self._HEADER_COVERED_FIELD_KEYS
-            and not self.store.list_operation_field_columns(field[0])
+            and not self._ops_list_operation_field_columns(field[0])
         ]
         if not technical_fields:
             return
@@ -2791,7 +3120,7 @@ class ExcelViewerApp:
         # редагується ОКРЕМО від решти (яка й далі автоматична, лише
         # мітки полів редаговані, як і раніше). Порожній за замовчуванням —
         # доки адмін щось не напише, заголовка просто нема.
-        operation = self.store.get_operation(operation_id)
+        operation = self._ops_get_operation(operation_id)
         header_key = f"operation_header_{operation[1]}"
         header_text = self.store.get_message_template(header_key, "")
         header_row = tk.Frame(parent)
@@ -2837,7 +3166,7 @@ class ExcelViewerApp:
     # неможливо для них, але store.delete_operation_field все одно
     # відмовить програмно, якби хтось викликав це напряму.
     def _delete_operation_field_confirm(self, field_id, label, on_saved):
-        bindings_count = len(self.store.list_operation_field_columns(field_id))
+        bindings_count = len(self._ops_list_operation_field_columns(field_id))
         if bindings_count:
             question = self._t(
                 'Видалити поле-запит "{label}"?\n'
@@ -2847,12 +3176,11 @@ class ExcelViewerApp:
             question = self._t('Видалити поле-запит "{value}"?').format(value=label)
         if not messagebox.askyesno(self._t("Видалити поле-запит"), question):
             return
-        try:
-            self.store.delete_operation_field(field_id)
-        except ValueError as error:
-            messagebox.showerror(self._t("Видалити поле-запит"), str(error))
-            return
-        on_saved()
+        # Перевірка is_identity/втрати обліку залишку тепер лише на сервері
+        # (client_app.py) — помилку 409 показує _push_operation_tree_action.
+        self._push_operation_tree_action(
+            lambda: remote_control_client.delete_remote_operation_field(field_id), on_success=on_saved,
+        )
 
     # Крок 3+ "Дії", Етап 3: модальне (grab_set) віконце додавання НОВОГО
     # поля-запиту до дії. field_key — ЗАКРИТИЙ список (RECOGNIZED_
@@ -2861,7 +3189,7 @@ class ExcelViewerApp:
     # пропонувати завідомо неможливий вибір); adminи не можуть вигадати
     # новий ключ — розпізнавання тексту лишається незмінним.
     def _open_operation_field_add_dialog(self, operation_id, on_saved):
-        used_keys = {field[2] for field in self.store.list_operation_fields(operation_id, include_disabled=True)}
+        used_keys = {field[2] for field in self._ops_list_operation_fields(operation_id, include_disabled=True)}
         available = [(key, label) for key, label in RECOGNIZED_OPERATION_FIELD_KEYS if key not in used_keys]
         if not available:
             messagebox.showinfo(
@@ -2910,9 +3238,11 @@ class ExcelViewerApp:
             if not field_key or not new_label:
                 messagebox.showerror(self._t("Додати поле-запит"), self._t("Оберіть поле й вкажіть назву."))
                 return
-            self.store.add_operation_field(operation_id, field_key, new_label, is_identity=False)
             window.destroy()
-            on_saved()
+            self._push_operation_tree_action(
+                lambda: remote_control_client.add_remote_operation_field(operation_id, field_key, new_label),
+                on_success=on_saved,
+            )
 
         tk.Button(button_row, text=self._t("Відмінити"), command=cancel).pack(side="right", padx=(8, 0))
         tk.Button(button_row, text=self._t("Зберегти"), command=save).pack(side="right")
@@ -2935,7 +3265,7 @@ class ExcelViewerApp:
         existing = None
         if column_id is not None:
             existing = next(
-                (row for row in self.store.list_operation_field_columns(field_id) if row[0] == column_id), None
+                (row for row in self._ops_list_operation_field_columns(field_id) if row[0] == column_id), None
             )
 
         window = tk.Toplevel(self.root)
@@ -3013,43 +3343,28 @@ class ExcelViewerApp:
             # СКЛАД типу "Порода") — лише показ, запис і далі робить
             # sale_sheet_values/antiseptic_sheet_values.
             write_mode = "generic" if sheet_name == "СКЛАД" else "ledger"
-            # Спершу ДОДАЄМО нову (з винятком старої з перевірки дублю —
-            # інакше редагування без зміни колонки хибно "конфліктувало" б
-            # само із собою), і лише при успіху видаляємо стару — щоб
-            # помилка (напр. колонка вже зайнята іншим полем) не залишила
-            # дію взагалі без цієї прив'язки.
-            try:
-                added_column_id = self.store.add_operation_field_column(
+            # "Спершу додати нову (виключивши стару з перевірки дублю), лише
+            # при успіху видалити стару" — тепер відбувається ОДНИМ запитом
+            # на сервері (webapp_server._handle_operation_tree_action_
+            # request, op=add_column), включно з тим самим rollback-ом при
+            # невдалому видаленні старої; помилку 409 показує _push_
+            # operation_tree_action.
+            window.destroy()
+            self._push_operation_tree_action(
+                lambda: remote_control_client.add_remote_operation_field_column(
                     field_id, sheet_name, column_key, marker_var.get(), write_mode,
                     exclude_column_id=column_id if existing is not None else None,
-                )
-            except ValueError as error:
-                messagebox.showerror(self._t("Прив'язка до таблиці"), str(error))
-                return
-            if existing is not None:
-                try:
-                    self.store.delete_operation_field_column(column_id)
-                except ValueError as error:
-                    # Нова прив'язка вже додана рядком вище — відкочуємо її,
-                    # щоб не лишити дію з ДВОМА прив'язками на те саме поле
-                    # замість однієї (стару видалити не можна: вона лишається
-                    # останнім обліком залишку, якщо нова вже не generic/СКЛАД).
-                    self.store.delete_operation_field_column(added_column_id)
-                    messagebox.showerror(self._t("Прив'язка до таблиці"), str(error))
-                    return
-            window.destroy()
-            on_saved()
+                ),
+                on_success=on_saved,
+            )
 
         def delete():
             if not messagebox.askyesno(self._t("Видалити прив'язку"), self._t("Видалити цю прив'язку до таблиці?")):
                 return
-            try:
-                self.store.delete_operation_field_column(column_id)
-            except ValueError as error:
-                messagebox.showerror(self._t("Видалити прив'язку"), str(error))
-                return
             window.destroy()
-            on_saved()
+            self._push_operation_tree_action(
+                lambda: remote_control_client.delete_remote_operation_field_column(column_id), on_success=on_saved,
+            )
 
         if existing is not None:
             tk.Button(button_row, text=self._t("Видалити"), command=delete, fg="#d1242f").pack(side="left")
@@ -3257,7 +3572,7 @@ class ExcelViewerApp:
             def refresh_children_block(container=children_frame):
                 self._clear_frame(container)
                 if category_parent_action_code:
-                    for operation in self.store.list_operations(category_parent_action_code):
+                    for operation in self._ops_list_operations(category_parent_action_code):
                         operation_id, _code, kind, _requires_identity, op_label, *_rest = operation
                         prefill_json = operation[6]
                         prefill_raw = json.loads(prefill_json) if prefill_json else None
@@ -3281,12 +3596,10 @@ class ExcelViewerApp:
                         # якщо видалити — залишається лише як звичайна кнопка.
                         if kind != "service":
                             def rename_and_refresh(oid=operation_id, lbl=op_label, pac=category_parent_action_code):
-                                self.edit_operation_category_dialog(oid, lbl, pac)
-                                refresh_children_block()
+                                self.edit_operation_category_dialog(oid, lbl, pac, refresh_children_block)
 
                             def delete_and_refresh(oid=operation_id, lbl=op_label, pac=category_parent_action_code):
-                                self.delete_operation_category_dialog(oid, lbl, pac)
-                                refresh_children_block()
+                                self.delete_operation_category_dialog(oid, lbl, pac, refresh_children_block)
 
                             self._render_editable_list_row(
                                 container, op_label, on_click=open_child,
@@ -3296,12 +3609,11 @@ class ExcelViewerApp:
                             self._render_editable_list_row(container, op_label, on_click=open_child)
 
                     def add_category_and_refresh(pac=category_parent_action_code):
-                        self.add_operation_category_dialog(pac)
-                        refresh_children_block()
+                        self.add_operation_category_dialog(pac, refresh_children_block)
 
                     self._render_add_row_button(container, "+ Додати категорію", add_category_and_refresh)
                 elif tree_node_id is not None:
-                    for child_row in self.store.list_custom_buttons(tree_node_id, include_disabled=True):
+                    for child_row in self._custom_buttons_children(tree_node_id):
                         child_node = self._action_view_node(child_row)
                         child_id = child_row[0]
 
@@ -3380,15 +3692,12 @@ class ExcelViewerApp:
     # полів-запитів, що й 8 вбудованих (товар/порода/товщина/ширина/
     # довжина + кількість/вимір, і для продажу ще клієнт/ціна/сума/оплата)
     # — add_operation_category (warehouse_data.py) сама їх сіє.
-    def add_operation_category_dialog(self, parent_action_code):
+    def add_operation_category_dialog(self, parent_action_code, on_saved=None):
         label = simpledialog.askstring(self._t("Нова категорія"), self._t("Назва кнопки категорії:"))
         if not label:
             return
         label = label.strip()
         if not label:
-            return
-        if self.store.operation_category_label_collides(parent_action_code, label):
-            messagebox.showerror(self._t("Категорії"), self._t('Категорія "{value}" уже існує.').format(value=label))
             return
         product = simpledialog.askstring(
             self._t("Нова категорія"), self._t("Товар (за яким бот шукатиме рядок складу), напр. Фанера:")
@@ -3404,12 +3713,19 @@ class ExcelViewerApp:
         ) or ""
         condition = condition.strip() or None
         kind = "income" if parent_action_code == "start_income" else "sale"
-        self.store.add_operation_category(parent_action_code, kind, label, product, condition)
+        # Перевірка збігу назви тепер лише на сервері (client_app.py) —
+        # помилку 409 показує _push_operation_tree_action.
+        self._push_operation_tree_action(
+            lambda: remote_control_client.add_remote_operation_category(
+                parent_action_code, kind, label, product, condition,
+            ),
+            on_success=on_saved,
+        )
 
     # Перейменування ЗБЕРІГАЄ стару назву як розпізнаваний синонім
     # назавжди (Крок 4.4, той самий принцип для способів оплати) — клієнт,
     # який звик натискати/писати стару назву кнопки, не "загубиться".
-    def edit_operation_category_dialog(self, operation_id, current_label, parent_action_code):
+    def edit_operation_category_dialog(self, operation_id, current_label, parent_action_code, on_saved=None):
         new_label = simpledialog.askstring(
             self._t("Перейменувати категорію"), self._t("Нова назва:"), initialvalue=current_label
         )
@@ -3418,20 +3734,17 @@ class ExcelViewerApp:
         new_label = new_label.strip()
         if not new_label:
             return
-        if self.store.operation_category_label_collides(parent_action_code, new_label, exclude_id=operation_id):
-            messagebox.showerror(self._t("Категорії"), self._t('Категорія "{value}" уже існує.').format(value=new_label))
-            return
-        self.store.rename_operation_category(operation_id, new_label)
+        self._push_operation_tree_action(
+            lambda: remote_control_client.rename_remote_operation_category(operation_id, new_label),
+            on_success=on_saved,
+        )
 
     # Видалення (на відміну від перейменування) прибирає категорію
     # ПОВНІСТЮ — кнопка й розпізнавання в тексті клієнта зникають назавжди,
-    # разом з усіма її полями-запитами. Захист: має лишитись хоча б одна
-    # дія під цим parent_action_code (інакше кнопка вибору категорії стала
-    # б порожньою).
-    def delete_operation_category_dialog(self, operation_id, label, parent_action_code):
-        if len(self.store.list_operations(parent_action_code)) <= 1:
-            messagebox.showerror(self._t("Категорії"), self._t("Має лишитись хоча б одна категорія."))
-            return
+    # разом з усіма її полями-запитами. Захист "має лишитись хоча б одна
+    # категорія" тепер лише на сервері (той самий 409-принцип, що й "має
+    # лишитись хоча б один спосіб оплати").
+    def delete_operation_category_dialog(self, operation_id, label, parent_action_code, on_saved=None):
         if not messagebox.askyesno(
             self._t("Видалити категорію"),
             self._t(
@@ -3440,7 +3753,9 @@ class ExcelViewerApp:
             ).format(value=label),
         ):
             return
-        self.store.delete_operation_category(operation_id)
+        self._push_operation_tree_action(
+            lambda: remote_control_client.delete_remote_operation_category(operation_id), on_success=on_saved,
+        )
 
     # Крок 4.1: "Дії" тепер показує РЕАЛЬНЕ дерево custom_menu_buttons
     # (Приход/Реализация/Данные/Калькулятор/Помощь — ті самі корені, що й
@@ -3477,11 +3792,50 @@ class ExcelViewerApp:
     def _action_type_icon(self, action_code):
         return self._ACTION_TYPE_ICONS.get(action_code, "•")
 
+    # Крок "Дії" remote-sync (2026-08-18, аудит "у всього є істина?"):
+    # "Дії" досі читала ВЛАСНУ локальну self.store gui.py (і дерево
+    # custom_menu_buttons, і bot_operations/fields/columns) - той самий
+    # мертвий-запис клас багу, що вже виправлено для Редактора кнопок/
+    # Способів оплати. Той самий фон-потік + generation-guard + "Завантаження..."
+    # патерн - НЕЗАЛЕЖНИЙ від _refresh_custom_buttons (окремий, власний
+    # запит; обидва можуть виконуватись одночасно, кожен зі своїм
+    # generation-лічильником, як і Персонал/Способи оплати одне від одного).
     def _refresh_actions_view(self):
         if not hasattr(self, "actions_list_frame"):
             return
         self._clear_frame(self.actions_list_frame)
-        for row in self.store.list_custom_buttons(None, include_disabled=True):
+        tk.Label(self.actions_list_frame, text=self._t("Завантаження..."), anchor="w").pack(
+            anchor="w", fill="x", pady=4
+        )
+        self._apply_theme(self.actions_list_frame)
+
+        self._actions_view_refresh_generation += 1
+        generation = self._actions_view_refresh_generation
+
+        def worker():
+            buttons = remote_control_client.fetch_remote_custom_buttons()
+            tree = remote_control_client.fetch_remote_operations_tree()
+            self._run_on_main_thread(lambda: self._apply_actions_view_data(buttons, tree, generation))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_actions_view_data(self, buttons, tree, generation=None):
+        if not hasattr(self, "actions_list_frame"):
+            return
+        if generation is not None and generation != self._actions_view_refresh_generation:
+            return
+        self._custom_buttons_cache = buttons
+        self._operations_tree_cache = tree
+        self._clear_frame(self.actions_list_frame)
+        if buttons is None or tree is None:
+            tk.Label(
+                self.actions_list_frame,
+                text=self._t("Не удалось получить дерево действий — нет связи с client_app.py."),
+                anchor="w", fg="#d1242f",
+            ).pack(anchor="w", fill="x", pady=4)
+            self._apply_theme(self.actions_list_frame)
+            return
+        for row in self._custom_buttons_children(None):
             node_id, label, action_code = row[0], row[1], row[3]
             node = self._action_view_node(row)
             row_frame = tk.Frame(self.actions_list_frame)
@@ -3517,16 +3871,98 @@ class ExcelViewerApp:
                 command=lambda nid=node_id: self.edit_custom_button_dialog(nid),
                 **self._chip_button_style(),
             ).pack(side="left", padx=(6, 0))
+        self._apply_theme(self.actions_list_frame)
 
+    # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
+    # той самий фон-потік-fetch + generation-guard патерн, що вже й
+    # _refresh_personnel (self.store тут - ВЛАСНА, окрема й порожня локальна
+    # база gui.py, ніяк не пов'язана з реальним ботом; тепер тягнеться живе
+    # дерево напряму з client_app.py через remote_control_client.
+    # fetch_remote_custom_buttons).
     def _refresh_custom_buttons(self):
         self._clear_frame(self.custom_buttons_list_frame)
-        roots = self.store.list_custom_buttons(None, include_disabled=True)
+        tk.Label(self.custom_buttons_list_frame, text=self._t("Завантаження..."), anchor="w").pack(
+            anchor="w", fill="x", pady=4
+        )
+        self._apply_theme(self.custom_buttons_list_frame)
+
+        self._custom_buttons_refresh_generation += 1
+        generation = self._custom_buttons_refresh_generation
+
+        def worker():
+            rows = remote_control_client.fetch_remote_custom_buttons()
+            self._run_on_main_thread(lambda: self._apply_custom_buttons_rows(rows, generation))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_custom_buttons_rows(self, rows, generation=None):
+        if getattr(self, "custom_buttons_list_frame", None) is None:
+            return
+        if generation is not None and generation != self._custom_buttons_refresh_generation:
+            return
+        self._custom_buttons_cache = rows
+        self._render_custom_buttons_tree()
+
+    # rows у кеші - 9-елементні (id, parent_id, label, message_text,
+    # action_code, section, enabled, layout, operation_id), як їх віддає
+    # list_all_custom_buttons(). Рендер-код нижче (_render_custom_button_
+    # row/_half_pair_sides) написаний під СТАРУ 8-елементну форму без
+    # parent_id (та, що раніше повертав self.store.list_custom_buttons(
+    # parent_id, ...)) - _custom_buttons_children конвертує, щоб не
+    # переписувати сам рендер.
+    def _custom_buttons_children(self, parent_id):
+        if not self._custom_buttons_cache:
+            return []
+        return [
+            (row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
+            for row in self._custom_buttons_cache
+            if row[1] == parent_id
+        ]
+
+    def _custom_button_by_id(self, node_id):
+        if not self._custom_buttons_cache:
+            return None
+        for row in self._custom_buttons_cache:
+            if row[0] == node_id:
+                return row
+        return None
+
+    # Той самий обхід у ширину, що раніше й self.store.count_custom_button_
+    # descendants (warehouse_data.py) робив прямо в SQLite - тут над уже
+    # завантаженим кешем, не окремим запитом.
+    def _custom_button_descendant_count(self, node_id):
+        total = 0
+        frontier = [node_id]
+        while frontier:
+            next_frontier = []
+            for current_id in frontier:
+                next_frontier.extend(row[0] for row in self._custom_buttons_children(current_id))
+            total += len(next_frontier)
+            frontier = next_frontier
+        return total
+
+    def _render_custom_buttons_tree(self):
+        self._clear_frame(self.custom_buttons_list_frame)
+        if self._custom_buttons_cache is None:
+            tk.Label(
+                self.custom_buttons_list_frame,
+                text=self._t("Не вдалось отримати кнопки з client_app.py. Перевірте з'єднання."),
+                fg="#d1242f",
+                anchor="w",
+                wraplength=460,
+                justify="left",
+            ).pack(anchor="w", fill="x", pady=4)
+            self._apply_theme(self.custom_buttons_list_frame)
+            self._refresh_custom_button_preview()
+            return
+        roots = self._custom_buttons_children(None)
         if not roots:
             tk.Label(self.custom_buttons_list_frame, text=self._t("Кнопок поки немає.")).pack(anchor="w", pady=4)
         else:
             root_sides = self._half_pair_sides(roots)
             for row in roots:
                 self._render_custom_button_row(row, depth=0, side=root_sides.get(row[0]))
+        self._apply_theme(self.custom_buttons_list_frame)
         self._refresh_custom_button_preview()
 
     # Ліво/Право для layout="half" рядків — та сама пара сусідів за
@@ -3586,14 +4022,18 @@ class ExcelViewerApp:
             **self._chip_button_style(),
         ).pack(side="right")
 
-        child_rows = self.store.list_custom_buttons(node_id, include_disabled=True)
+        child_rows = self._custom_buttons_children(node_id)
         child_sides = self._half_pair_sides(child_rows)
         for child_row in child_rows:
             self._render_custom_button_row(child_row, depth=depth + 1, side=child_sides.get(child_row[0]))
 
     def select_custom_button(self, node_id):
         self.custom_buttons_selected_id = node_id
-        self._refresh_custom_buttons()
+        # Лише перемальовує з уже завантаженого кешу (не мережевий похід
+        # через тунель на кожен клік вибору рядка) - _refresh_custom_buttons
+        # (реальний fetch) викликається лише при відкритті екрана й після
+        # add/edit/delete.
+        self._render_custom_buttons_tree()
 
     # Список позицій для випадаючого списку у формі (Задача користувача:
     # обрати слот номером замість стрілочок ↑/↓). exclude_node_id — при
@@ -3601,7 +4041,7 @@ class ExcelViewerApp:
     # на один більше, ніж реальних вільних слотів). Індекс — 0-based, як і
     # очікує store.set_custom_button_position.
     def _custom_button_position_options(self, parent_id, exclude_node_id=None):
-        siblings = self.store.list_custom_buttons(parent_id, include_disabled=True)
+        siblings = self._custom_buttons_children(parent_id)
         ids_in_order = [row[0] for row in siblings]
         if exclude_node_id in ids_in_order:
             ids_in_order.remove(exclude_node_id)
@@ -3610,7 +4050,7 @@ class ExcelViewerApp:
     def _refresh_custom_button_preview(self):
         self._clear_frame(self.custom_button_preview_frame)
         node_id = self.custom_buttons_selected_id
-        row = self.store.get_custom_button(node_id) if node_id else None
+        row = self._custom_button_by_id(node_id) if node_id else None
         if not row:
             tk.Label(
                 self.custom_button_preview_frame,
@@ -3642,7 +4082,7 @@ class ExcelViewerApp:
         ).pack(anchor="w", pady=(0, 8))
 
         tk.Label(self.custom_button_preview_frame, text=self._t("Далі:"), font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        children = self.store.list_custom_buttons(_id, include_disabled=True)
+        children = self._custom_buttons_children(_id)
         if children:
             for _child_id, child_label, *_rest in children:
                 tk.Label(
@@ -3709,7 +4149,7 @@ class ExcelViewerApp:
 
     def _operation_link_catalog(self):
         catalog = []
-        for operation in self.store.list_operations():
+        for operation in self._ops_list_operations():
             operation_id, _code, _kind, _requires_identity, op_label, parent_action_code, *_rest = operation
             section_label = self._t(self._OPERATION_LINK_SECTION_LABELS.get(parent_action_code, parent_action_code))
             catalog.append((operation_id, f"{op_label} — {section_label}"))
@@ -3878,6 +4318,41 @@ class ExcelViewerApp:
         self.root.wait_window(window)
         return result["value"]
 
+    # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
+    # фон-потік + HTTPError-detail-парсинг, той самий патерн, що вже й
+    # _on_role_menu_selected (webapp_server вже повертає зрозумілий текст
+    # у JSON-тілі помилки - "Название совпадает..." тощо - без цього
+    # str(exc) на HTTPError дав би лише голе "HTTP Error 409: Conflict").
+    # Спільна для add/edit/delete - action() лише виконує саму
+    # remote_control_client-функцію, тут - лише мережа/помилки/оновлення
+    # екрана.
+    def _push_custom_button_action(self, action, on_success=None):
+        def worker():
+            error = None
+            try:
+                action()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                try:
+                    detail = json.loads(detail).get("error") or detail
+                except ValueError:
+                    pass
+                error = detail
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                if error:
+                    messagebox.showerror(self._t("Редактор кнопок"), error)
+                    return
+                if on_success:
+                    on_success()
+                self._refresh_custom_buttons()
+
+            self._run_on_main_thread(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def add_custom_button_dialog(self, parent_id=None):
         position_options = self._custom_button_position_options(parent_id)
         form = self._ask_custom_button_form(
@@ -3885,27 +4360,22 @@ class ExcelViewerApp:
         )
         if not form:
             return
-        if self.store.custom_button_label_collides(form["label"]):
-            messagebox.showerror(
-                self._t("Редактор кнопок"),
-                self._t('Назва "{value}" збігається з уже існуючою командою бота. Оберіть іншу назву.').format(value=form["label"]),
-            )
-            return
-        new_id = self.store.add_custom_button(
-            form["label"], form["message_text"], form["action_code"], parent_id=parent_id, layout=form["layout"],
-            operation_id=form["operation_id"],
-        )
-        self.store.set_custom_button_position(new_id, form["position_index"])
-        self._refresh_custom_buttons()
-        self._refresh_actions_view()
+        # Перевірка збігу назви тепер лише на сервері (client_app.py) -
+        # локальний self.store тут все одно порожній/сторонній, повторювати
+        # перевірку на ньому було б безглуздо; помилку 409 показує
+        # _push_custom_button_action.
+        self._push_custom_button_action(lambda: remote_control_client.add_remote_custom_button(
+            form["label"], form["message_text"], form["action_code"], parent_id=parent_id,
+            layout=form["layout"], operation_id=form["operation_id"], position_index=form["position_index"],
+        ))
 
     def edit_custom_button_dialog(self, node_id):
-        row = self.store.get_custom_button(node_id)
+        row = self._custom_button_by_id(node_id)
         if not row:
             return
         _id, parent_id, label, message_text, action_code, section, enabled, layout, operation_id = row
 
-        siblings = self.store.list_custom_buttons(parent_id, include_disabled=True)
+        siblings = self._custom_buttons_children(parent_id)
         ids_in_order = [sibling_row[0] for sibling_row in siblings]
         current_index = ids_in_order.index(node_id) if node_id in ids_in_order else len(ids_in_order) - 1
         position_options = self._custom_button_position_options(parent_id, exclude_node_id=node_id)
@@ -3922,24 +4392,19 @@ class ExcelViewerApp:
         )
         if not form:
             return
-        if form["label"].lower() != label.lower() and self.store.custom_button_label_collides(form["label"]):
-            messagebox.showerror(
-                self._t("Редактор кнопок"),
-                self._t('Назва "{value}" збігається з уже існуючою командою бота. Оберіть іншу назву.').format(value=form["label"]),
-            )
-            return
-        self.store.update_custom_button(
+        self._push_custom_button_action(lambda: remote_control_client.update_remote_custom_button(
             node_id, form["label"], form["message_text"], form["action_code"], layout=form["layout"],
-            operation_id=form["operation_id"],
-        )
-        self.store.set_custom_button_position(node_id, form["position_index"])
-        self._refresh_custom_buttons()
-        self._refresh_actions_view()
+            operation_id=form["operation_id"], position_index=form["position_index"],
+        ))
 
     # Задача користувача: підтвердження при видаленні — ЗАВЖДИ, і явне
     # попередження, якщо разом з кнопкою видалиться ціла гілка нащадків.
+    # Кількість нащадків тепер рахується з уже завантаженого кешу (BFS у
+    # Python, як і раніше рахував сам self.store.count_custom_button_
+    # descendants) - жодного окремого мережевого запиту заради самого лише
+    # попередження.
     def delete_custom_button_confirm(self, node_id, label):
-        descendant_count = self.store.count_custom_button_descendants(node_id)
+        descendant_count = self._custom_button_descendant_count(node_id)
         if descendant_count > 0:
             confirmed = messagebox.askyesno(
                 self._t("Видалити кнопку"),
@@ -3952,13 +4417,15 @@ class ExcelViewerApp:
             confirmed = messagebox.askyesno(self._t("Видалити кнопку"), self._t('Видалити кнопку "{value}"?').format(value=label))
         if not confirmed:
             return
-        self.store.delete_custom_button(node_id)
-        if self.custom_buttons_selected_id is not None and not self.store.get_custom_button(
-            self.custom_buttons_selected_id
-        ):
-            self.custom_buttons_selected_id = None
-        self._refresh_custom_buttons()
-        self._refresh_actions_view()
+
+        def clear_selection_if_needed():
+            if self.custom_buttons_selected_id == node_id:
+                self.custom_buttons_selected_id = None
+
+        self._push_custom_button_action(
+            lambda: remote_control_client.delete_remote_custom_button(node_id),
+            on_success=clear_selection_if_needed,
+        )
 
     def _build_commands_view(self):
         self.commands_frame = tk.Frame(self.root)
@@ -4059,9 +4526,40 @@ class ExcelViewerApp:
         )
         self.add_payment_method_button.pack(anchor="w", pady=(12, 0))
 
+    # Задача користувача (2026-08-18, аудит "у всього є істина?"): "Способи
+    # оплати" редагувались у ВЛАСНІЙ локальній self.store gui.py - той
+    # самий мертвий-запис клас багу, що вже виправлено для дерева кнопок.
+    # Той самий фон-потік + generation-guard + "Завантаження...", що вже й
+    # _refresh_personnel вище - реальний живий стан client_app.py, не
+    # локальна (і давно нерелевантна) копія.
     def _refresh_payment_methods(self):
         self._clear_frame(self.payment_methods_list_frame)
-        options = self.store.list_payment_method_options()
+        tk.Label(self.payment_methods_list_frame, text=self._t("Завантаження..."), anchor="w").pack(
+            anchor="w", fill="x", pady=4
+        )
+        self._apply_theme(self.payment_methods_list_frame)
+
+        self._payment_methods_refresh_generation += 1
+        generation = self._payment_methods_refresh_generation
+
+        def worker():
+            options = remote_control_client.fetch_remote_payment_methods()
+            self._run_on_main_thread(lambda: self._apply_payment_method_rows(options, generation))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_payment_method_rows(self, options, generation=None):
+        if generation is not None and generation != self._payment_methods_refresh_generation:
+            return
+        self._clear_frame(self.payment_methods_list_frame)
+        if options is None:
+            tk.Label(
+                self.payment_methods_list_frame,
+                text=self._t("Не удалось получить способы оплаты — нет связи с client_app.py."),
+                anchor="w", fg="#d1242f",
+            ).pack(anchor="w", fill="x", pady=4)
+            self._apply_theme(self.payment_methods_list_frame)
+            return
         if not options:
             tk.Label(
                 self.payment_methods_list_frame,
@@ -4108,9 +4606,38 @@ class ExcelViewerApp:
                 **self._chip_button_style(),
             ).pack(side="right", padx=(8, 0))
 
+    # Той самий _push_custom_button_action-патерн (фон-потік, HTTPError->
+    # JSON "error", messagebox при помилці, оновлення списку при успіху) -
+    # лише інший ендпоінт і власний refresh.
+    def _push_payment_method_action(self, action):
+        def worker():
+            error = None
+            try:
+                action()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                try:
+                    detail = json.loads(detail).get("error") or detail
+                except ValueError:
+                    pass
+                error = detail
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                if error:
+                    messagebox.showerror(self._t("Способи оплати"), error)
+                    return
+                self._refresh_payment_methods()
+
+            self._run_on_main_thread(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _toggle_payment_method_bank(self, option_id, was_bank):
-        self.store.set_payment_method_kind(option_id, None if was_bank else "bank")
-        self._refresh_payment_methods()
+        self._push_payment_method_action(
+            lambda: remote_control_client.set_remote_payment_method_kind(option_id, None if was_bank else "bank")
+        )
 
     def add_payment_method_dialog(self):
         label = simpledialog.askstring(self._t("Новий спосіб оплати"), self._t("Назва способу оплати:"))
@@ -4119,11 +4646,9 @@ class ExcelViewerApp:
         label = label.strip()
         if not label:
             return
-        if self.store.payment_method_label_collides(label):
-            messagebox.showerror(self._t("Способи оплати"), self._t('Спосіб оплати "{value}" уже існує.').format(value=label))
-            return
-        self.store.add_payment_method_option(label)
-        self._refresh_payment_methods()
+        # Перевірка збігу назви тепер лише на сервері (client_app.py) -
+        # локальний self.store тут все одно порожній/сторонній.
+        self._push_payment_method_action(lambda: remote_control_client.add_remote_payment_method(label))
 
     def edit_payment_method_dialog(self, option_id, current_label):
         new_label = simpledialog.askstring(
@@ -4134,18 +4659,13 @@ class ExcelViewerApp:
         new_label = new_label.strip()
         if not new_label:
             return
-        if self.store.payment_method_label_collides(new_label, exclude_id=option_id):
-            messagebox.showerror(self._t("Способи оплати"), self._t('Спосіб оплати "{value}" уже існує.').format(value=new_label))
-            return
-        self.store.update_payment_method_option(option_id, new_label)
-        self._refresh_payment_methods()
+        self._push_payment_method_action(
+            lambda: remote_control_client.update_remote_payment_method(option_id, new_label)
+        )
 
     def delete_payment_method_dialog(self, option_id, label):
-        if len(self.store.list_payment_method_options()) <= 1:
-            messagebox.showerror(
-                self._t("Способи оплати"), self._t("Має лишитись хоча б один спосіб оплати.")
-            )
-            return
+        # "Має лишитись хоча б один спосіб" — тепер теж перевіряється на
+        # сервері (409), не окремим попереднім read-запитом звідси.
         if not messagebox.askyesno(
             self._t("Видалити спосіб оплати"),
             self._t(
@@ -4154,8 +4674,7 @@ class ExcelViewerApp:
             ).format(value=label),
         ):
             return
-        self.store.delete_payment_method_option(option_id)
-        self._refresh_payment_methods()
+        self._push_payment_method_action(lambda: remote_control_client.delete_remote_payment_method(option_id))
 
     # Задача користувача: "те віконце що скролиться якось виділи, щоб було
     # оку видно... не видно скільки там взагалі вікон" — bordered=True додає
@@ -5053,61 +5572,6 @@ class ExcelViewerApp:
         window.bind("<Escape>", lambda event: window.destroy())
         self._center_window(window, width=780, height=660)
 
-    # Перший пункт "Високий пріоритет" із загальної перевірки сильних місць
-    # (2026-08-03) — поріг "скільки штук вважати низьким залишком" не можна
-    # вивести з коду (бізнес-рішення користувача), тому конфігурований, а не
-    # хардкод. Замінює давню заглушку "В разработке" (той самий, уже
-    # зарезервований слот на майбутнє в кінці side_panel).
-    def open_low_stock_threshold_dialog(self):
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Низький залишок"))
-        window.transient(self.root)
-        window.grab_set()
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
-        tk.Label(top, text=self._t("Низький залишок"), font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
-        tk.Label(
-            top,
-            text=self._t(
-                'Позиції з залишком "Кількість, шт" не більше цього числа потрапляють '
-                'у звіт бота "Низкий остаток" (ДАННЫЕ).'
-            ),
-            anchor="w", fg="#555555", justify="left", wraplength=420,
-        ).pack(anchor="w", pady=(4, 0))
-
-        body = tk.Frame(window)
-        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
-
-        threshold_row = tk.Frame(body)
-        threshold_row.pack(fill="x")
-        tk.Label(threshold_row, text=self._t("Поріг, шт:"), anchor="w", width=16).pack(side="left")
-        threshold_entry = tk.Entry(threshold_row, width=10)
-        threshold_entry.insert(0, str(self.settings.get("low_stock_threshold")))
-        threshold_entry.pack(side="left")
-
-        bottom = tk.Frame(window)
-        bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
-
-        def save_threshold():
-            raw = threshold_entry.get().strip()
-            try:
-                value = int(raw)
-            except ValueError:
-                value = -1
-            if value < 0:
-                messagebox.showerror(
-                    self._t("Низький залишок"), self._t("Введіть невід'ємне ціле число.")
-                )
-                return
-            self.settings.set("low_stock_threshold", value)
-            window.destroy()
-
-        tk.Button(bottom, text=self._t("Зберегти"), width=14, command=save_threshold).pack(side="right", padx=(8, 0))
-        tk.Button(bottom, text=self._t("Відмінити"), width=14, command=window.destroy).pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy())
-        self._center_window(window, width=420, height=220)
-
     # Задача користувача (2026-08-08, скріншоти реальної продажі, де хінт
     # "На складе: 7428 шт" фактично відповідав лише ~2590 шт за реальною
     # кубатурою): "потрібно щоб в середині програми був у користувача при
@@ -5776,13 +6240,17 @@ class ExcelViewerApp:
                 try:
                     # Той самий рубіж захисту, що й у publish_client_update
                     # нижче (2026-08-17, живий продакшн) - жоден пакет із
-                    # чужим settings.json не публікується.
-                    stray_settings = list(gui_release_dir.rglob("settings.json"))
+                    # чужим settings.json чи тестовою app_data.sqlite3 не
+                    # публікується (друге додано того ж дня - client_app.py
+                    # постраждав саме від тестової бази даних, не settings.json).
+                    stray_settings = list(gui_release_dir.rglob("settings.json")) + list(
+                        gui_release_dir.rglob("app_data.sqlite3")
+                    )
                     if stray_settings:
                         raise RuntimeError(
                             self._t(
-                                "У зібраному пакеті знайдено settings.json ({path}) - публікація скасована, "
-                                "щоб не затерти чиїсь налаштування."
+                                "У зібраному пакеті знайдено сторонній файл ({path}) - публікація скасована, "
+                                "щоб не затерти чиїсь дані чи налаштування."
                             ).format(path=stray_settings[0])
                         )
                     zip_base = tmp_dir / gui_release_dir.name
@@ -5888,13 +6356,26 @@ class ExcelViewerApp:
                     # тепер захищає ВЖЕ ВСТАНОВЛЕНУ версію - але тут, ДО
                     # публікації, найдешевше просто відмовитись публікувати
                     # пакет, що взагалі містить чужий settings.json.
-                    stray_settings = list(client_dist_dir.rglob("settings.json"))
+                    #
+                    # Той самий клас бага, інший файл (2026-08-17, живий
+                    # продакшн): смок-тест зібраного .exe на машині
+                    # розробника (--watchdog-check) створив свіжу, майже
+                    # порожню app_data.sqlite3 у dist/AI_Automation_Client/
+                    # - без цієї перевірки вона потрапила б в опублікований
+                    # пакет і затерла б реальну базу (склад/персонал/
+                    # журнали) робочого ПК при оновленні. Публікація
+                    # client-v0.2.57 з цим файлом уже сталась ДО того, як
+                    # цю перевірку додано - виправлено republish'ом v0.2.58.
+                    stray_settings = list(client_dist_dir.rglob("settings.json")) + list(
+                        client_dist_dir.rglob("app_data.sqlite3")
+                    )
                     if stray_settings:
                         raise RuntimeError(
                             self._t(
-                                "У зібраному пакеті знайдено settings.json ({path}) - публікація скасована, "
-                                "щоб не затерти налаштування робочого ПК. Перезберіть client_app.py через "
-                                "build_exe.py (без ручного копіювання system/) і спробуйте ще раз."
+                                "У зібраному пакеті знайдено сторонній файл ({path}) - публікація скасована, "
+                                "щоб не затерти дані чи налаштування робочого ПК. Перезберіть client_app.py через "
+                                "build_exe.py (без ручного копіювання system/ чи запуску зібраного .exe) і "
+                                "спробуйте ще раз."
                             ).format(path=stray_settings[0])
                         )
                     zip_base = tmp_dir / client_dist_dir.name
@@ -7472,9 +7953,24 @@ class ExcelViewerApp:
     # що були й раніше (той самий UI, новий сенс).
     def _start_remote_control_polling(self):
         self._remote_control_status = None
+        self._remote_control_status_failures = 0
         self._remote_control_tick()
 
     _REMOTE_CONTROL_POLL_INTERVAL_MS = 15000
+    # Задача користувача (2026-08-17): "чому форма не тримається стабільно
+    # та часто відлітає (на секунду-дві)" - реальна причина НЕ в самому
+    # сервері/тунелі (client_app.py вже має багатоступеневий захист від
+    # зайвих перезапусків - _webapp_probe_confirms_down вимагає кілька
+    # невдалих проб поспіль перш ніж узагалі щось робити), а в самому
+    # ІНДИКАТОРІ тут: кожен тік - ОДИН HTTP-запит через публічний тунель
+    # (240 разів/год при 15с інтервалі) - одна випадкова мережева гикавка
+    # на ЦЬОМУ запиті (fetch_remote_status повертає None) миттєво показувала
+    # "Статус сервера невідомий", хоча сервер увесь час працював нормально;
+    # наступний тік за 15с знову показував "Сервер онлайн" - звідси
+    # "відлітає на секунду-дві". Той самий принцип підтвердження, що вже й
+    # _webapp_probe_confirms_down - показуємо "невідомо" лише після
+    # ДЕКІЛЬКОХ поспіль невдалих тіків, не після одного.
+    _REMOTE_CONTROL_STATUS_FAILURE_THRESHOLD = 2
 
     # Задача користувача (2026-08-15): "тепер змінюй це на автоматичне
     # з'єднання між программами" - жодного файлу-посередника більше немає:
@@ -7502,6 +7998,18 @@ class ExcelViewerApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_remote_control_tick_result(self, status):
+        if status is None:
+            self._remote_control_status_failures += 1
+            if self._remote_control_status_failures < self._REMOTE_CONTROL_STATUS_FAILURE_THRESHOLD:
+                # Один випадковий збій - лишаємо попередній (ще актуальний)
+                # напис на екрані, замість блимання "невідомо" на 15с і
+                # назад "онлайн". self._remote_control_status теж НЕ
+                # оновлюємо - решта коду (кнопки дій тощо) і далі бачить
+                # останній справді отриманий статус.
+                self.root.after(self._REMOTE_CONTROL_POLL_INTERVAL_MS, self._remote_control_tick)
+                return
+        else:
+            self._remote_control_status_failures = 0
         self._remote_control_status = status
         self._update_remote_control_labels(status)
         self.root.after(self._REMOTE_CONTROL_POLL_INTERVAL_MS, self._remote_control_tick)

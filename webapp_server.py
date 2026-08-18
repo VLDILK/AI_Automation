@@ -34,6 +34,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import paths
 import permissions as perm
+import standard_menu_cloud
 from settings import SettingsStore
 from utils import measure_classification_data
 from warehouse_data import ExcelSqliteStore, low_stock_report_rows, operation_template_entries
@@ -248,8 +249,20 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         if url_path == "/control/personnel":
             self._handle_remote_personnel(dict(parse_qsl(parsed.query)))
             return
+        if url_path == "/control/custom_buttons":
+            self._handle_remote_custom_buttons(dict(parse_qsl(parsed.query)))
+            return
         if url_path == "/control/action_log":
             self._handle_remote_action_log(dict(parse_qsl(parsed.query)))
+            return
+        if url_path == "/control/standard_menu_cloud_path":
+            self._handle_standard_menu_cloud_path(dict(parse_qsl(parsed.query)))
+            return
+        if url_path == "/control/payment_methods":
+            self._handle_remote_payment_methods(dict(parse_qsl(parsed.query)))
+            return
+        if url_path == "/control/operations_tree":
+            self._handle_remote_operations_tree(dict(parse_qsl(parsed.query)))
             return
         if self.get_form_content_enabled is not None and not self.get_form_content_enabled():
             self._send_form_disabled_page()
@@ -313,7 +326,11 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         ):
             self._send_json(503, {"ok": False, "error": "Форма временно отключена."})
             return
-        if self.path not in ("/api/template", "/control/command", "/control/heartbeat", "/control/set_role"):
+        if self.path not in (
+            "/api/template", "/control/command", "/control/heartbeat", "/control/set_role",
+            "/control/custom_button_action", "/control/save_standard_menu_to_cloud",
+            "/control/payment_method_action", "/control/operation_tree_action",
+        ):
             self._send_json(404, {"ok": False, "error": "Не найдено."})
             return
         try:
@@ -347,6 +364,18 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/control/set_role":
             self._handle_set_role_request(payload)
+            return
+        if self.path == "/control/custom_button_action":
+            self._handle_custom_button_action_request(payload)
+            return
+        if self.path == "/control/save_standard_menu_to_cloud":
+            self._handle_save_standard_menu_to_cloud_request(payload)
+            return
+        if self.path == "/control/payment_method_action":
+            self._handle_payment_method_action_request(payload)
+            return
+        if self.path == "/control/operation_tree_action":
+            self._handle_operation_tree_action_request(payload)
             return
         self._handle_template_action(payload)
 
@@ -383,6 +412,21 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         self._send_json(200, {"ok": True, "status": self.get_remote_status()})
 
+    # Задача користувача (2026-08-18): "поправ там шлях" - "Открыть папку"
+    # в gui.py досі вгадувала шлях зі СВОГО ЛОКАЛЬНОГО OneDrive (домашня
+    # програма могла працювати на зовсім іншому ПК/акаунті, ніж client_app.py -
+    # реальний випадок, знайдений тут-таки: "Vladimir2\OneDrive - Diverus,
+    # UAB", не особистий акаунт gui.py). Read-only, той самий принцип, що й
+    # /control/status - лише повертає РЕАЛЬНИЙ шлях з боку client_app.py,
+    # нічого не пише.
+    def _handle_standard_menu_cloud_path(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        folder = standard_menu_cloud.cloud_folder_path()
+        cloud_path = str(folder / "standard_menu.json") if folder is not None else None
+        self._send_json(200, {"ok": True, "cloud_path": cloud_path})
+
     # Задача користувача (2026-08-15): "синхронізація" - Персонал/Журнали в
     # домашній программі (gui.py) досі читали ВЛАСНУ, окрему й порожню
     # локальну базу (gui.py більше не хостить бота, тож нічого туди й не
@@ -404,6 +448,448 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         finally:
             store.close()
         self._send_json(200, {"ok": True, "users": users})
+
+    # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
+    # той самий read-only принцип, що вже й _handle_remote_personnel вище
+    # (домашня программа лише ТЯГНЕ живе дерево client_app.py, нічого не
+    # кешує локально між сеансами) - store.list_all_custom_buttons() віддає
+    # ВЕСЬ плаский список одним запитом, gui.py сам групує в ієрархію.
+    def _handle_remote_custom_buttons(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            buttons = store.list_all_custom_buttons()
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, "buttons": buttons})
+
+    # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
+    # обраний варіант "push кожної дії відразу" (той самий принцип, що вже
+    # має /control/set_role нижче): кожне add/update/delete в редакторі
+    # gui.py відразу записується в ЖИВУ БД client_app.py, а не в окрему
+    # локальну копію gui.py, яка ніколи не впливає на реального бота.
+    # Одна мультиплексована дія (op=add/update/delete), той самий стиль, що
+    # вже й _handle_template_action - три схожі, невеликі операції над
+    # одним деревом не виправдовують три окремі маршрути.
+    def _handle_custom_button_action_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        op = payload.get("op")
+        if op not in ("add", "update", "delete"):
+            self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            if op == "delete":
+                node_id = payload.get("node_id")
+                if not isinstance(node_id, int) or isinstance(node_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                store.delete_custom_button(node_id)
+                self._send_json(200, {"ok": True})
+                return
+
+            label = payload.get("label")
+            if not isinstance(label, str) or not label.strip():
+                self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                return
+            message_text = payload.get("message_text") or ""
+            action_code = payload.get("action_code")
+            layout = payload.get("layout") or "full"
+            operation_id = payload.get("operation_id")
+            position_index = payload.get("position_index")
+            has_position = isinstance(position_index, int) and not isinstance(position_index, bool)
+
+            if op == "add":
+                parent_id = payload.get("parent_id")
+                if parent_id is not None and (not isinstance(parent_id, int) or isinstance(parent_id, bool)):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if store.custom_button_label_collides(label):
+                    self._send_json(409, {"ok": False, "error": "Название совпадает с уже существующей командой бота."})
+                    return
+                new_id = store.add_custom_button(
+                    label, message_text, action_code, parent_id=parent_id, layout=layout,
+                    operation_id=operation_id,
+                )
+                if has_position:
+                    store.set_custom_button_position(new_id, position_index)
+                self._send_json(200, {"ok": True, "id": new_id})
+                return
+
+            # op == "update"
+            node_id = payload.get("node_id")
+            if not isinstance(node_id, int) or isinstance(node_id, bool):
+                self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                return
+            row = store.get_custom_button(node_id)
+            if not row:
+                self._send_json(404, {"ok": False, "error": "Кнопка не найдена."})
+                return
+            old_label = row[2]
+            if label.lower() != old_label.lower() and store.custom_button_label_collides(label):
+                self._send_json(409, {"ok": False, "error": "Название совпадает с уже существующей командой бота."})
+                return
+            store.update_custom_button(
+                node_id, label, message_text, action_code, layout=layout, operation_id=operation_id,
+            )
+            if has_position:
+                store.set_custom_button_position(node_id, position_index)
+            self._send_json(200, {"ok": True})
+        finally:
+            store.close()
+
+    # Задача користувача (2026-08-18): "додай кнопку яка буде перезберігати
+    # ці дані у хмарі... лише якщо кнопку натис - хмара оновилась... а все
+    # інше оновлення - відключити". На відміну від client_app.py._reconcile_
+    # standard_menu_with_cloud (яка ЛИШЕ читає хмару й підлаштовує локальний
+    # стан під неї при кожному старті, ніколи сама туди не пише) - це
+    # ЄДИНЕ місце, де хмарний файл реально ПЕРЕЗАПИСУЄТЬСЯ, і робить це
+    # виключно за явним запитом адміністратора (кнопка в gui.py), для
+    # повного, передбачуваного контролю над тим, що саме потрапляє в хмару.
+    def _handle_save_standard_menu_to_cloud_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            state = store.get_standard_menu_state()
+        finally:
+            store.close()
+        saved = standard_menu_cloud.write_cloud_state(state)
+        if not saved:
+            self._send_json(503, {"ok": False, "error": "OneDrive не найден на этом компьютере."})
+            return
+        # Задача користувача (2026-08-18): "не зберігає нічого на хмару" -
+        # діагностика РЕАЛЬНОГО шляху й факту існування файлу ОДРАЗУ ПІСЛЯ
+        # запису на боці, де він насправді відбувається (робочий ПК), а не
+        # здогадки з боку gui.py про те, який тут акаунт OneDrive.
+        cloud_file = standard_menu_cloud.cloud_folder_path()
+        cloud_file = str(cloud_file / "standard_menu.json") if cloud_file is not None else None
+        self._send_json(200, {
+            "ok": True,
+            "state": state,
+            "cloud_path": cloud_file,
+            "cloud_path_exists_after_write": bool(cloud_file and os.path.exists(cloud_file)),
+        })
+
+    # Задача користувача (2026-08-18, аудит "у всього є істина?"): "Способи
+    # оплати" в gui.py досі писали у ВЛАСНУ локальну self.store - той самий
+    # мертвий-запис клас багу, що вже виправлено для custom_menu_buttons.
+    # Той самий read-only принцип, що й /control/custom_buttons.
+    def _handle_remote_payment_methods(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            options = store.list_payment_method_options()
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, "options": options})
+
+    # Мультиплексована дія (op=add/update/delete/set_kind), той самий
+    # стиль, що й _handle_custom_button_action_request - перевірки колізії
+    # назви й "має лишитись хоча б один спосіб" тепер на СЕРВЕРІ (той самий
+    # принцип, що й custom_button_label_collides там), а не окремим
+    # попереднім read-запитом з gui.py.
+    def _handle_payment_method_action_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        op = payload.get("op")
+        if op not in ("add", "update", "delete", "set_kind"):
+            self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            if op == "add":
+                label = payload.get("label")
+                if not isinstance(label, str) or not label.strip():
+                    self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                    return
+                if store.payment_method_label_collides(label):
+                    self._send_json(409, {"ok": False, "error": "Способ оплаты с таким названием уже существует."})
+                    return
+                new_id = store.add_payment_method_option(label)
+                self._send_json(200, {"ok": True, "id": new_id})
+                return
+
+            option_id = payload.get("option_id")
+            if not isinstance(option_id, int) or isinstance(option_id, bool):
+                self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                return
+
+            if op == "update":
+                label = payload.get("label")
+                if not isinstance(label, str) or not label.strip():
+                    self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                    return
+                if store.payment_method_label_collides(label, exclude_id=option_id):
+                    self._send_json(409, {"ok": False, "error": "Способ оплаты с таким названием уже существует."})
+                    return
+                store.update_payment_method_option(option_id, label)
+                self._send_json(200, {"ok": True})
+                return
+
+            if op == "set_kind":
+                kind = payload.get("kind")
+                if kind not in (None, "bank"):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                store.set_payment_method_kind(option_id, kind)
+                self._send_json(200, {"ok": True})
+                return
+
+            # op == "delete"
+            if len(store.list_payment_method_options()) <= 1:
+                self._send_json(409, {"ok": False, "error": "Должен остаться хотя бы один способ оплаты."})
+                return
+            store.delete_payment_method_option(option_id)
+            self._send_json(200, {"ok": True})
+        finally:
+            store.close()
+
+    # Крок "Дії" remote-sync (2026-08-18, аудит "у всього є істина?"):
+    # категорії/поля-запити/прив'язки редагувались у ВЛАСНІЙ локальній
+    # self.store gui.py — той самий мертвий-запис клас багу, що вже
+    # виправлено для custom_menu_buttons/способів оплати. Той самий
+    # read-only принцип, що й /control/custom_buttons.
+    def _handle_remote_operations_tree(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            tree = store.list_all_operations_tree()
+        finally:
+            store.close()
+        self._send_json(200, {
+            "ok": True,
+            "operations": tree["operations"],
+            "fields": tree["fields"],
+            "columns": tree["columns"],
+        })
+
+    # Мультиплексована дія (op=add_category/rename_category/delete_category/
+    # add_field/update_field/delete_field/add_column/delete_column), той
+    # самий стиль, що й _handle_custom_button_action_request /
+    # _handle_payment_method_action_request — перевірки колізії назви й усі
+    # ValueError-захисти (is_identity-поле, втрата обліку залишку,
+    # подвійний запис у ту саму колонку) тепер на СЕРВЕРІ, не в gui.py.
+    # add_column повторює ТОЙ САМИЙ "спершу додати нову (виключивши стару з
+    # перевірки дублю), лише при успіху видалити стару" танець, що раніше
+    # виконував сам gui.py у _open_operation_binding_editor.save() —
+    # редагування прив'язки лишається "додати+видалити", просто тепер ОБИДВІ
+    # половини відбуваються тут, за один HTTP-запит.
+    def _handle_operation_tree_action_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        op = payload.get("op")
+        valid_ops = (
+            "add_category", "rename_category", "delete_category",
+            "add_field", "update_field", "delete_field",
+            "add_column", "delete_column",
+        )
+        if op not in valid_ops:
+            self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            if op == "add_category":
+                parent_action_code = payload.get("parent_action_code")
+                kind = payload.get("kind")
+                label = payload.get("label")
+                product = payload.get("product")
+                condition = payload.get("condition")
+                if not isinstance(parent_action_code, str) or not parent_action_code:
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if kind not in ("income", "sale"):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(label, str) or not label.strip():
+                    self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                    return
+                if not isinstance(product, str) or not product.strip():
+                    self._send_json(400, {"ok": False, "error": "Товар не может быть пустым."})
+                    return
+                if condition is not None and not isinstance(condition, str):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if store.operation_category_label_collides(parent_action_code, label):
+                    self._send_json(409, {"ok": False, "error": "Категория с таким названием уже существует."})
+                    return
+                operation_id = store.add_operation_category(parent_action_code, kind, label, product, condition)
+                self._send_json(200, {"ok": True, "id": operation_id})
+                return
+
+            if op == "rename_category":
+                operation_id = payload.get("operation_id")
+                new_label = payload.get("label")
+                if not isinstance(operation_id, int) or isinstance(operation_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(new_label, str) or not new_label.strip():
+                    self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                    return
+                operation_row = store.get_operation(operation_id)
+                if not operation_row:
+                    self._send_json(404, {"ok": False, "error": "Категория не найдена."})
+                    return
+                parent_action_code = operation_row[5]
+                if store.operation_category_label_collides(parent_action_code, new_label, exclude_id=operation_id):
+                    self._send_json(409, {"ok": False, "error": "Категория с таким названием уже существует."})
+                    return
+                store.rename_operation_category(operation_id, new_label)
+                self._send_json(200, {"ok": True})
+                return
+
+            if op == "delete_category":
+                operation_id = payload.get("operation_id")
+                if not isinstance(operation_id, int) or isinstance(operation_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                operation_row = store.get_operation(operation_id)
+                if not operation_row:
+                    self._send_json(404, {"ok": False, "error": "Категория не найдена."})
+                    return
+                parent_action_code = operation_row[5]
+                if len(store.list_operations(parent_action_code)) <= 1:
+                    self._send_json(409, {"ok": False, "error": "Должна остаться хотя бы одна категория."})
+                    return
+                store.delete_operation_category(operation_id)
+                self._send_json(200, {"ok": True})
+                return
+
+            if op == "add_field":
+                operation_id = payload.get("operation_id")
+                field_key = payload.get("field_key")
+                label = payload.get("label")
+                if not isinstance(operation_id, int) or isinstance(operation_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(field_key, str) or not field_key:
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(label, str) or not label.strip():
+                    self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                    return
+                field_id = store.add_operation_field(operation_id, field_key, label, is_identity=False)
+                self._send_json(200, {"ok": True, "id": field_id})
+                return
+
+            if op == "update_field":
+                field_id = payload.get("field_id")
+                label = payload.get("label")
+                if not isinstance(field_id, int) or isinstance(field_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(label, str) or not label.strip():
+                    self._send_json(400, {"ok": False, "error": "Название не может быть пустым."})
+                    return
+                try:
+                    store.update_operation_field(field_id, label)
+                except ValueError as error:
+                    self._send_json(409, {"ok": False, "error": str(error)})
+                    return
+                self._send_json(200, {"ok": True})
+                return
+
+            if op == "delete_field":
+                field_id = payload.get("field_id")
+                if not isinstance(field_id, int) or isinstance(field_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                try:
+                    store.delete_operation_field(field_id)
+                except ValueError as error:
+                    self._send_json(409, {"ok": False, "error": str(error)})
+                    return
+                self._send_json(200, {"ok": True})
+                return
+
+            if op == "add_column":
+                operation_field_id = payload.get("operation_field_id")
+                sheet = payload.get("sheet")
+                column_key = payload.get("column_key")
+                marker = payload.get("marker")
+                write_mode = payload.get("write_mode") or "generic"
+                exclude_column_id = payload.get("exclude_column_id")
+                if not isinstance(operation_field_id, int) or isinstance(operation_field_id, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(sheet, str) or not sheet:
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not isinstance(column_key, str) or not column_key:
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if exclude_column_id is not None and (
+                    not isinstance(exclude_column_id, int) or isinstance(exclude_column_id, bool)
+                ):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                try:
+                    column_id = store.add_operation_field_column(
+                        operation_field_id, sheet, column_key, marker, write_mode,
+                        exclude_column_id=exclude_column_id,
+                    )
+                except ValueError as error:
+                    self._send_json(409, {"ok": False, "error": str(error)})
+                    return
+                if exclude_column_id is not None:
+                    try:
+                        store.delete_operation_field_column(exclude_column_id)
+                    except ValueError as error:
+                        # Нова прив'язка вже додана рядком вище — відкочуємо
+                        # її, щоб не лишити поле з ДВОМА прив'язками на те
+                        # саме замість однієї (той самий rollback, що раніше
+                        # робив сам gui.py у _open_operation_binding_editor).
+                        store.delete_operation_field_column(column_id)
+                        self._send_json(409, {"ok": False, "error": str(error)})
+                        return
+                self._send_json(200, {"ok": True, "id": column_id})
+                return
+
+            # op == "delete_column"
+            column_id = payload.get("column_id")
+            if not isinstance(column_id, int) or isinstance(column_id, bool):
+                self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                return
+            try:
+                store.delete_operation_field_column(column_id)
+            except ValueError as error:
+                self._send_json(409, {"ok": False, "error": str(error)})
+                return
+            self._send_json(200, {"ok": True})
+        finally:
+            store.close()
 
     # Задача користувача (2026-08-16): "додай змогу редагувати ролі тут
     # теж. зміна ролі в мене - зміна ролі в клієнті" - на відміну від

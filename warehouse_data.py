@@ -534,6 +534,11 @@ def create_excel_backup():
     backup_path = BACKUP_DIR / f"{stem}_{timestamp}{suffix}"
     backup_path.write_bytes(excel_source.backup_workbook_bytes())
     _rotate_excel_backups(stem, suffix)
+    # Задача користувача (2026-08-18): "дзеркалити Excel-бекапи в OneDrive
+    # так само, як БД" - client_app.py._schedule_db_backup_tick мірорить
+    # цей шлях у AI_Automation_Backups/excel_backups щогодини, поруч з
+    # db_backups/config_backups.
+    return backup_path
 
 
 def _rotate_excel_backups(stem, suffix, limit=EXCEL_BACKUP_LIMIT):
@@ -1735,7 +1740,7 @@ class ExcelSqliteStore:
             )
         self._seed_builtin_bot_commands()
         self._seed_builtin_migrated_custom_buttons()
-        self._hide_legacy_non_form_operation_buttons_once()
+        self._apply_standard_menu_policy()
         self._backfill_writeoff_root_action_code()
         self._backfill_writeoff_form_root_label()
         self._seed_builtin_operations()
@@ -1858,29 +1863,103 @@ class ExcelSqliteStore:
                     ),
                 )
 
-    # Задача користувача: "працюємо ТІЛЬКИ через форму" — приховати старі
-    # (не-"форма") кнопки ПРИХОД/РЕАЛИЗАЦИЯ/СПИСАНИЕ з меню бота "поки що",
-    # лишивши тільки їхні "(форма)" пари. РІВНО ОДИН РАЗ (app_meta-мітка) —
-    # адміністратор зможе повернути їх назад (enabled=1) пізніше, і повторний
-    # запуск застосунку це рішення більше не перезапише, як і для
-    # _seed_builtin_migrated_custom_buttons вище.
-    _LEGACY_NON_FORM_BUTTON_MIGRATION_KEYS = ("income", "sale", "writeoff")
+    # "Стандартне меню" — Задача користувача (2026-08-18, після повторного
+    # "калькулятор виліз знову, ти ж казав що приберешь"): попередній
+    # механізм (_hide_legacy_non_form_operation_buttons_once, ОДИН
+    # глобальний прапорець 'legacy_non_form_buttons_hidden' в app_meta)
+    # ховав рівно 3 конкретні migration_key РІВНО ОДИН РАЗ — коли пізніше
+    # знадобилось сховати ще й "data_menu"/"calculator"/"help" (просто
+    # забуті в першому списку), дописування їх у той старий список НІЧОГО
+    # не дало б на вже існуючих продакшн-базах: прапорець уже стояв '1',
+    # функція виходила одразу, до нового ключа код не доходив. Це РЕАЛЬНА
+    # причина, чому ДАННЫЕ/Калькулятор/Помощь "поверталися" — вони
+    # ніколи насправді не ховались на живій базі, не "воскресали".
+    #
+    # Фікс — ПЕР-КЛЮЧОВА мітка замість одного спільного прапорця:
+    # app_meta['standard_menu_resolved:<migration_key>'] окремо на кожен
+    # migration_key. Будь-який КОРІННИЙ (parent_migration_key=None) пункт
+    # з BUILTIN_MIGRATED_CUSTOM_BUTTONS, якого немає в
+    # _STANDARD_MENU_ROOT_MIGRATION_KEYS, ховається (enabled=0) РІВНО ОДИН
+    # РАЗ на своєму власному ключі — додавання будь-якого нового пункту в
+    # майбутньому більше ніколи не залежить від того, чи вже "спрацював"
+    # якийсь інший прапорець (той самий клас багу тут просто не повториться).
+    # Дітей схованого батька (СКЛАД/ПРОДАЖИ/... під ДАННЫЕ) не чіпаємо —
+    # вони й так стають недосяжними без кнопки-батька, яка б до них вела.
+    #
+    # Рішення адміністратора ЗАВЖДИ важливіше за цю політику: якщо адмін
+    # пізніше вручну увімкне (enabled=1) приховану кнопку через Редактор
+    # кнопок — мітка 'resolved' вже стоїть, тож жоден майбутній запуск
+    # застосунку більше НІКОЛИ не поверне її назад у enabled=0.
+    _STANDARD_MENU_ROOT_MIGRATION_KEYS = frozenset(
+        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form"}
+    )
 
-    def _hide_legacy_non_form_operation_buttons_once(self):
-        already_applied = self.conn.execute(
-            "SELECT 1 FROM app_meta WHERE key = 'legacy_non_form_buttons_hidden'"
-        ).fetchone()
-        if already_applied:
-            return
+    def _apply_standard_menu_policy(self):
         with self.conn:
-            for migration_key in self._LEGACY_NON_FORM_BUTTON_MIGRATION_KEYS:
+            # Міграція старого стану: якщо старий глобальний прапорець уже
+            # спрацював раніше (income/sale/writeoff вже сховані, можливо
+            # адмін уже й повернув котрийсь назад вручну) — переносимо ці 3
+            # ключі під нові пер-ключові мітки БЕЗ повторного enabled=0,
+            # щоб не затерти можливе ручне рішення адміністратора.
+            legacy_flag_applied = self.conn.execute(
+                "SELECT 1 FROM app_meta WHERE key = 'legacy_non_form_buttons_hidden'"
+            ).fetchone()
+            if legacy_flag_applied:
+                for migration_key in ("income", "sale", "writeoff"):
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, '1')",
+                        (f"standard_menu_resolved:{migration_key}",),
+                    )
+            for entry in BUILTIN_MIGRATED_CUSTOM_BUTTONS:
+                if entry.get("parent_migration_key") is not None:
+                    continue
+                migration_key = entry["migration_key"]
+                if migration_key in self._STANDARD_MENU_ROOT_MIGRATION_KEYS:
+                    continue
+                meta_key = f"standard_menu_resolved:{migration_key}"
+                already_resolved = self.conn.execute(
+                    "SELECT 1 FROM app_meta WHERE key = ?", (meta_key,)
+                ).fetchone()
+                if already_resolved:
+                    continue
                 self.conn.execute(
                     "UPDATE custom_menu_buttons SET enabled = 0 WHERE migration_key = ?",
                     (migration_key,),
                 )
-            self.conn.execute(
-                "INSERT INTO app_meta (key, value) VALUES ('legacy_non_form_buttons_hidden', '1')"
-            )
+                self.conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?, '1')", (meta_key,)
+                )
+
+    # "Хмарна істина" (standard_menu_cloud.py) — Задача користувача
+    # (2026-08-18): звірити локальний enabled-стан 11 кореневих мігрованих
+    # кнопок з хмарою (OneDrive) при старті client_app.py, і оновлювати
+    # хмару при будь-якій локальній зміні. Ці два методи — ЛИШЕ читання/
+    # запис ЛОКАЛЬНОГО стану, самé рішення "коли звіряти з хмарою" (і сама
+    # хмара) навмисно НЕ тут — див. коментар на початку standard_menu_cloud.py
+    # чому це має викликатись виключно з client_app.py, не з __init__ вище.
+    def get_standard_menu_root_keys(self):
+        return [
+            entry["migration_key"]
+            for entry in BUILTIN_MIGRATED_CUSTOM_BUTTONS
+            if entry.get("parent_migration_key") is None
+        ]
+
+    def get_standard_menu_state(self):
+        keys = self.get_standard_menu_root_keys()
+        placeholders = ",".join("?" for _ in keys)
+        rows = self.conn.execute(
+            f"SELECT migration_key, enabled FROM custom_menu_buttons WHERE migration_key IN ({placeholders})",
+            keys,
+        ).fetchall()
+        return {migration_key: bool(enabled) for migration_key, enabled in rows}
+
+    def apply_standard_menu_state(self, state):
+        with self.conn:
+            for migration_key, enabled in state.items():
+                self.conn.execute(
+                    "UPDATE custom_menu_buttons SET enabled = ? WHERE migration_key = ?",
+                    (1 if enabled else 0, migration_key),
+                )
 
     # --- Імпорт з Excel + CRUD над рядками листів (sheet_rows) ---
     def import_workbook(self, workbook, read_only_sheets):
@@ -2374,6 +2453,27 @@ class ExcelSqliteStore:
         cursor = self.conn.execute(query, (parent_id,))
         return cursor.fetchall()
 
+    # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
+    # gui.py.  тепер редагує ЖИВЕ дерево client_app.py через тунель
+    # (webapp_server._handle_remote_custom_buttons), а не власну окрему й
+    # порожню локальну копію (той самий факт, що вже пояснено для Персонал/
+    # Журналів). Один запит за ВЕСЬ пласким деревом одразу (parent_id
+    # включно) - клієнт сам групує в ієрархію в пам'яті, замість N
+    # мережевих походів через тунель на кожен рівень вкладеності (як був би
+    # результат простого повторного виклику list_custom_buttons по кожному
+    # parent_id окремо).
+    def list_all_custom_buttons(self, include_disabled=True):
+        query = """
+            SELECT id, parent_id, label, message_text, action_code, section, enabled,
+                   COALESCE(layout, 'full'), operation_id
+            FROM custom_menu_buttons
+        """
+        if not include_disabled:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY parent_id, position, id"
+        cursor = self.conn.execute(query)
+        return cursor.fetchall()
+
     def get_custom_button(self, node_id):
         cursor = self.conn.execute(
             """
@@ -2652,6 +2752,27 @@ class ExcelSqliteStore:
                 (operation_id,),
             )
             self.conn.execute("DELETE FROM bot_operations WHERE id = ?", (operation_id,))
+
+    # Крок "Дії" remote-sync (2026-08-18): той самий bulk-read принцип, що
+    # вже й list_all_custom_buttons — client_app.py віддає ВЕСЬ дерево
+    # (операції+поля-запити+прив'язки) ОДНИМ запитом, gui.py сам групує в
+    # пам'яті (той самий "домашня программа лише ТЯГНЕ живі дані" принцип,
+    # що вже й у Редакторі кнопок/Способах оплати).
+    def list_all_operations_tree(self):
+        operations = self.conn.execute(
+            "SELECT id, code, kind, requires_row_identity, label, parent_action_code, "
+            "prefill_json, position, enabled, builtin_key FROM bot_operations "
+            "ORDER BY parent_action_code, position, id"
+        ).fetchall()
+        fields = self.conn.execute(
+            "SELECT id, operation_id, field_key, label, is_identity, position, enabled, builtin_key "
+            "FROM bot_operation_fields ORDER BY operation_id, position, id"
+        ).fetchall()
+        columns = self.conn.execute(
+            "SELECT id, operation_field_id, sheet, column_key, marker, write_mode, position, builtin_key "
+            "FROM bot_operation_field_columns ORDER BY operation_field_id, position, id"
+        ).fetchall()
+        return {"operations": operations, "fields": fields, "columns": columns}
 
     # --- Шаблони мега-форм (Приход/Реализация/Списание) ---
 

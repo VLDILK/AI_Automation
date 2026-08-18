@@ -93,6 +93,17 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
             body = response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        # Реальний баг (2026-08-17, живий продакшн, "баг з текстом"): 5xx від
+        # шлюзу GitHub (502/503/504) повертає HTML-сторінку помилки Fastly,
+        # не JSON - сирий <html><body>... дослівно потрапляв у повідомлення
+        # користувачу замість людського тексту. Content-Type - надійніший
+        # сигнал, ніж сам текст (HTML-сторінка не завжди починається рівно
+        # з "<" після урізання), тож перевіряємо обидва.
+        content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
+        if "html" in content_type.lower() or detail.lstrip().startswith("<"):
+            raise RuntimeError(
+                f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже."
+            ) from exc
         raise RuntimeError(f"GitHub API {exc.code}: {detail[:300]}") from exc
     except Exception as exc:
         # Реальний баг (2026-08-16, живий продакшн, "поперше ніякої
