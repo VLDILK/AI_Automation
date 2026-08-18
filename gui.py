@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.40"
+__version__ = "1.0.41"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4662,6 +4662,85 @@ class ExcelViewerApp:
         tmp_path.write_text(token, encoding="utf-8")
         os.replace(tmp_path, paths.GITHUB_TOKEN_PATH)
 
+    # Задача користувача (2026-08-18): "перегляд того що саме оновлюється...
+    # як для ІТ фахівця" - технічний бік перегляду оновлення в діалозі
+    # публікації. У зібраній версії BASE_DIR - це dist/AI_Automation_Home/
+    # (без .git поруч) - тому шукаємо .git або тут, або на 2 рівні вище
+    # (структура репозиторію: <корінь>/dist/AI_Automation_Home/), інакше
+    # git-історія просто недоступна (немає сенсу падати з помилкою - це
+    # лише додатковий, необов'язковий контекст для публікації).
+    def _project_git_root(self):
+        for candidate in (BASE_DIR, BASE_DIR.parent.parent):
+            if (candidate / ".git").exists():
+                return candidate
+        return None
+
+    _PUBLISH_HISTORY_MARKER_NAME = "last_published_sha.txt"
+
+    def _read_last_published_sha(self):
+        root = self._project_git_root()
+        if root is None:
+            return None
+        marker_path = root / "system" / self._PUBLISH_HISTORY_MARKER_NAME
+        if not marker_path.exists():
+            return None
+        try:
+            return marker_path.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+    def _write_last_published_sha(self, sha):
+        root = self._project_git_root()
+        if root is None or not sha:
+            return
+        marker_path = root / "system" / self._PUBLISH_HISTORY_MARKER_NAME
+        try:
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(sha, encoding="utf-8")
+        except OSError:
+            pass
+
+    # Задача користувача: "два додай" (варіанти "автоматично з git-комітів"
+    # + "порівняння файлів (diff)") - повертає (текст_превью, поточний_sha).
+    # since=None (немає збереженої мітки останньої публікації) -> останні 5
+    # комітів, той самий "щось краще за нічого" запасний варіант. Мітка
+    # оновлюється лише ПІСЛЯ успішної публікації (_write_last_published_sha,
+    # у on_gui_publish_finished/on_publish_finished нижче) - невдала спроба
+    # не повинна "з'їдати" історію змін, яку так і не опублікували.
+    def _compute_git_release_preview(self):
+        root = self._project_git_root()
+        if root is None:
+            return self._t("(Немає доступу до git-історії - запущено поза папкою проєкту.)"), None
+        since = self._read_last_published_sha()
+        range_spec = f"{since}..HEAD" if since else None
+
+        def run_git(args):
+            try:
+                result = subprocess.run(
+                    ["git", "-C", str(root)] + args,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                return result.stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                return ""
+
+        commits_raw = run_git(["log", "--format=%s", range_spec] if range_spec else ["log", "--format=%s", "-5"])
+        diff_raw = run_git(["diff", "--stat", range_spec] if range_spec else ["diff", "--stat", "HEAD~5..HEAD"])
+        current_sha = run_git(["rev-parse", "HEAD"]) or None
+
+        lines = []
+        if commits_raw:
+            lines.append(self._t("Коміти:"))
+            lines.extend(f"- {line}" for line in commits_raw.splitlines())
+        if diff_raw:
+            lines.append("")
+            lines.append(self._t("Змінені файли:"))
+            lines.append(diff_raw)
+        if not lines:
+            lines.append(self._t("Немає нових комітів з моменту останньої публікації."))
+        return "\n".join(lines), current_sha
+
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Публікація оновлень"))
@@ -4744,6 +4823,37 @@ class ExcelViewerApp:
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
 
+        # Задача користувача (2026-08-18): "перегляд того що саме
+        # оновлюється, зрозумілою мовою... + як для ІТ фахівця" - "Просто"
+        # заповнюється вручну (жоден автоматичний механізм не вміє
+        # написати людською мовою для нетехнічної людини), "Технічно"
+        # рахується сама (коміти + diff --stat з моменту останньої
+        # успішної публікації - _compute_git_release_preview вище). Один
+        # спільний блок для обох програм (gui.py/client_app.py) - вони
+        # публікуються з тієї самої git-історії, зазвичай близько одна за
+        # одною, тож окремий перегляд на кожну був би дублюванням.
+        tk.Label(body, text=self._t("Що змінилось:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
+            anchor="w", pady=(0, 4)
+        )
+        tk.Label(body, text=self._t("Просто (кілька слів для клієнта):"), anchor="w", fg="#555555").pack(anchor="w")
+        plain_summary_var = tk.StringVar()
+        tk.Entry(body, textvariable=plain_summary_var, width=60).pack(anchor="w", fill="x", pady=(2, 8))
+
+        tk.Label(body, text=self._t("Технічно (автоматично, з git):"), anchor="w", fg="#555555").pack(anchor="w")
+        tech_preview_text, current_git_sha = self._compute_git_release_preview()
+        tech_preview_widget = tk.Text(body, height=6, wrap="word")
+        tech_preview_widget.insert("1.0", tech_preview_text)
+        tech_preview_widget.configure(state="disabled")
+        tech_preview_widget.pack(anchor="w", fill="x", pady=(2, 12))
+
+        def compose_release_notes():
+            plain = plain_summary_var.get().strip()
+            parts = [plain] if plain else []
+            parts.append(self._t("Технічні деталі:\n{value}").format(value=tech_preview_text))
+            return "\n\n".join(parts)
+
+        tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
+
         # Задача користувача (2026-08-16): "стосовно домашньої версії, щоб
         # вона не заважала процесам" - публікація gui.py тепер теж через
         # GitHub Releases (github_releases.GUI_TAG_PREFIX), той самий
@@ -4778,6 +4888,7 @@ class ExcelViewerApp:
                 gui_publish_result_text.set("")
                 messagebox.showerror(self._t("Публікація оновлень"), error)
                 return
+            self._write_last_published_sha(current_git_sha)
             gui_publish_result_text.set(
                 self._t("Версію {value} gui.py опубліковано на GitHub.").format(value=__version__)
             )
@@ -4830,7 +4941,7 @@ class ExcelViewerApp:
                     )
                     github_releases.publish_gui_release(
                         token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, __version__, zip_path,
-                        notes=self._t("Опубліковано з gui.py."),
+                        notes=compose_release_notes(),
                     )
                 except Exception as exc:
                     # Реальна знахідка (аудит коду, 2026-08-16): вузький
@@ -4883,6 +4994,7 @@ class ExcelViewerApp:
                 publish_result_text.set("")
                 messagebox.showerror(self._t("Публікація оновлень"), error)
                 return
+            self._write_last_published_sha(current_git_sha)
             publish_result_text.set(
                 self._t("Версію {value} client_app.py опубліковано на GitHub.").format(value=client_version)
             )
@@ -4955,7 +5067,7 @@ class ExcelViewerApp:
                     )
                     github_releases.publish_client_release(
                         token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, client_version, zip_path,
-                        notes=self._t("Опубліковано з gui.py."),
+                        notes=compose_release_notes(),
                     )
                 except Exception as exc:
                     # Реальна знахідка (аудит коду, 2026-08-16): вузький
@@ -4982,7 +5094,7 @@ class ExcelViewerApp:
         bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
         tk.Button(bottom, text=self._t("Закрити"), width=14, command=window.destroy).pack(side="right")
         window.bind("<Escape>", lambda event: window.destroy())
-        self._center_window(window, width=560, height=560)
+        self._center_window(window, width=560, height=720)
 
     # Задача користувача (2026-08-14): "вирівняти таблицю... де має бути
     # попередження, що нічого видалено не буде, будуть просто зняті всі
