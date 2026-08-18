@@ -192,7 +192,7 @@ def get_latest_release(owner, repo, tag_prefix, timeout=15):
     return max(matching, key=lambda r: r.get("published_at") or "")
 
 
-def list_recent_releases(owner, repo, limit=15, timeout=15):
+def list_recent_releases(owner, repo, limit=15, timeout=15, token=None):
     """Задача користувача (2026-08-19): "журнал оновлень... до кожної
     версії буде прикріплено такий файл з даними. чи просто дані" - окреме
     сховище не потрібне: compose_release_notes() (gui.py) вже пише повні
@@ -206,17 +206,37 @@ def list_recent_releases(owner, repo, limit=15, timeout=15):
     release), обрізка до `limit` найновіших.
 
     Повертає список словників {kind, version, tag_name, published_at,
-    notes}, найновіші перші. Публічний GET, токен не потрібен."""
+    notes}, найновіші перші. Публічний GET, токен НЕ обов'язковий -
+    але реальний баг (2026-08-19, живий продакшн): неавтентифікований
+    GitHub API обмежений 60 запитів/годину на IP (проти 5000 з токеном) -
+    при частому відкритті цієї вкладки (чи кількох тестових прогонах)
+    це реально вичерпується ("API rate limit exceeded", 403). token тут
+    опційний (передається gui.py, якщо користувач уже ввів його для
+    публікації) - якщо є, автентифікує ці самі публічні GET-запити теж,
+    щоб уникнути того самого ліміту без жодної зміни контракту виклику.
+
+    Реальна знахідка (2026-08-19, той самий баг-репорт): застарілий/
+    невалідний токен на диску (401 "Bad credentials") НЕ повинен
+    ламати цю вкладку взагалі - публічне читання списку релізів працює
+    й БЕЗ токена. Якщо перший запит із токеном падає саме на 401,
+    одразу повторюємо БЕЗ токена (анонімно) замість пробросу помилки -
+    гірший (нижчий ліміт), але РЕАЛЬНО робочий шлях, а не гарантований
+    відмов."""
+    use_token = token
     releases = []
     page = 1
     while True:
         try:
             page_releases = _request(
-                f"{API_ROOT}/repos/{owner}/{repo}/releases?per_page=100&page={page}", timeout=timeout,
+                f"{API_ROOT}/repos/{owner}/{repo}/releases?per_page=100&page={page}",
+                token=use_token, timeout=timeout,
             )
         except RuntimeError as exc:
             if "404" in str(exc):
                 return []
+            if use_token and page == 1 and "401" in str(exc):
+                use_token = None
+                continue
             raise
         if not isinstance(page_releases, list) or not page_releases:
             break

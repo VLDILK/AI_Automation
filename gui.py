@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.56"
+__version__ = "1.0.57"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5403,10 +5403,20 @@ class ExcelViewerApp:
             self._apply_theme(history_list)
 
         def load_history():
+            # Реальний баг (2026-08-19, живий продакшн): "Не удалось
+            # загрузить журнал оновлень: GitHub API 403: rate limit
+            # exceeded" - неавтентифіковані запити обмежені 60/годину на
+            # IP (проти 5000 з токеном). Токен, якщо вже введений на
+            # вкладці "Токен" (потрібен для публікації однаково), передає
+            # ці самі публічні GET-запити автентифікованими - читаємо
+            # StringVar тут, на головному потоці (Tk-змінні не для
+            # доступу з фонового), і передаємо вже звичайний рядок у worker.
+            token = github_token_var.get().strip() or None
+
             def worker():
                 try:
                     entries = github_releases.list_recent_releases(
-                        paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, limit=15,
+                        paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, limit=15, token=token,
                     )
                     error = None
                 except Exception as exc:
