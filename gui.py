@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.48"
+__version__ = "1.0.49"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4705,81 +4705,23 @@ class ExcelViewerApp:
         except OSError:
             pass
 
-    # Задача користувача: "два додай" (варіанти "автоматично з git-комітів"
-    # + "порівняння файлів (diff)"), потім "поправ як домовлялись 1 в 1" -
-    # перший варіант змішував коміти й diff в ОДИН суцільний текстовий
-    # блок (жодної візуальної різниці з двома окремими картками мокапу,
-    # які користувач обирав). Тепер повертає ЧОТИРИ окремих значення
-    # (коміти, СПРАВЖНІ рядки diff-у як список, sha), щоб діалог міг
-    # намалювати їх як ДВІ окремі підписані рамки - той самий "field_box"
-    # стиль (highlightbackground/thickness), що вже скрізь у цій программі
-    # позначає одну логічну картку.
-    # Задача користувача (наступний раунд): "1 в 1 чекаю" на картку
-    # "Реальний код-diff" - `git diff` (не `--stat`) повертає САМІ РЯДКИ
-    # коду, не лише "скільки змінилось" - _DIFF_LINE_LIMIT захищає діалог
-    # від нечитабельно довгого виводу при великих сесіях (сотні рядків),
-    # обрізає з чіткою поміткою, скільки ще лишилось поза кадром.
+    # Задача користувача: пройшли через кілька раундів ("два додай" - коміти
+    # + diff --stat, потім повний кольоровий код-diff у двох картках з
+    # detach-кнопкою) - і врешті "купа інформації, очі на лоб лізуть...
+    # спрости до мінімуму, але щоб інформативність була всього". Diff
+    # прибрано повністю (разом з усім кодом його очистки/обрізки/
+    # кольорування, який був тут раніше) - лишається РІВНО список
+    # повідомлень комітів, самі коміти вже написані людською мовою.
     # since=None (немає збереженої мітки останньої публікації) -> останні 5
     # комітів, той самий "щось краще за нічого" запасний варіант. Мітка
     # оновлюється лише ПІСЛЯ успішної публікації (_write_last_published_sha,
     # у on_gui_publish_finished/on_publish_finished нижче) - невдала спроба
     # не повинна "з'їдати" історію змін, яку так і не опублікували.
-    _DIFF_LINE_LIMIT = 300
-    _VERSION_LINE_RE = re.compile(r'^[+-]\s*__version__\s*=')
-
-    # Задача користувача: "зовсім погано" - сирий `git diff` тягне за собою
-    # git-службові рядки (diff --git/index), яких ніхто, крім git, не читає,
-    # а перший видимий рядок часто виявлявся зовсім тривіальним підняттям
-    # версії (__version__ = "X" -> "Y") - цей рядок з'являється в КОЖНОМУ
-    # коміті цієї сесії, тож "з'їдав" верх перегляду, створюючи враження
-    # "оце й усе, що змінилось". Прибирає git-шум і схлопує "hunk"-и, де
-    # ЄДИНА зміна - саме ця версійна константа (не інші однорядкові зміни -
-    # лише точно цей патерн), замінює --- a/X / +++ b/X на компактний
-    # заголовок файлу; другий прохід прибирає заголовки файлів, під якими
-    # після цього не лишилось жодного реального hunk-у.
-    def _clean_diff_lines(self, raw_lines):
-        stage = []
-        i, n = 0, len(raw_lines)
-        while i < n:
-            line = raw_lines[i]
-            if line.startswith("diff --git ") or line.startswith("index ") or line.startswith("--- "):
-                i += 1
-                continue
-            if line.startswith("+++ "):
-                path = line[6:] if line.startswith("+++ b/") else line[4:]
-                stage.append(f"=== {path} ===")
-                i += 1
-                continue
-            if line.startswith("@@ "):
-                hunk = [line]
-                j = i + 1
-                while j < n and not raw_lines[j].startswith(("@@ ", "diff --git ", "--- ", "+++ ")):
-                    hunk.append(raw_lines[j])
-                    j += 1
-                changed = [l for l in hunk[1:] if l.startswith("+") or l.startswith("-")]
-                is_version_only = len(changed) == 2 and all(self._VERSION_LINE_RE.match(l) for l in changed)
-                if not is_version_only:
-                    stage.extend(hunk)
-                i = j
-                continue
-            stage.append(line)
-            i += 1
-
-        cleaned = []
-        n2 = len(stage)
-        for idx, line in enumerate(stage):
-            if line.startswith("=== ") and line.endswith(" ==="):
-                nxt = idx + 1
-                if nxt >= n2 or (stage[nxt].startswith("=== ") and stage[nxt].endswith(" ===")):
-                    continue
-            cleaned.append(line)
-        return cleaned
-
     def _compute_git_release_preview(self):
         root = self._project_git_root()
         if root is None:
             no_git_text = self._t("(Немає доступу до git-історії - запущено поза папкою проєкту.)")
-            return no_git_text, [], None
+            return no_git_text, None
         since = self._read_last_published_sha()
         range_spec = f"{since}..HEAD" if since else None
 
@@ -4795,7 +4737,6 @@ class ExcelViewerApp:
                 return ""
 
         commits_raw = run_git(["log", "--format=%s", range_spec] if range_spec else ["log", "--format=%s", "-5"])
-        diff_raw = run_git(["diff", "--no-color", range_spec] if range_spec else ["diff", "--no-color", "HEAD~5..HEAD"])
         current_sha = run_git(["rev-parse", "HEAD"]) or None
 
         commits_text = (
@@ -4803,18 +4744,23 @@ class ExcelViewerApp:
             if commits_raw
             else self._t("(Немає нових комітів з моменту останньої публікації.)")
         )
-        diff_lines = self._clean_diff_lines(diff_raw.splitlines()) if diff_raw else []
-        if len(diff_lines) > self._DIFF_LINE_LIMIT:
-            hidden = len(diff_lines) - self._DIFF_LINE_LIMIT
-            diff_lines = diff_lines[: self._DIFF_LINE_LIMIT]
-            diff_lines.append(self._t("… ще {value} рядків (лишок сховано, щоб вікно лишалось читабельним)").format(value=hidden))
-        return commits_text, diff_lines, current_sha
+        return commits_text, current_sha
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Публікація оновлень"))
         window.transient(self.root)
-        window.grab_set()
+        # Задача користувача: "вікно падає ззаду і не можна його
+        # розширювати" - grab_set() тут раніше робив вікно МОДАЛЬНИМ на
+        # рівні всього застосунку (той самий патерн, що й у простих
+        # діалогів на кшталт add_operation_field_add_dialog), що заважало
+        # detached-вікнам "⤢" (нижче): будь-яке ІНШЕ вікно, відкрите поки
+        # цей grab активний, не отримувало миші/фокусу нормально - звідси
+        # й "падає ззаду", і "не розширюється" (зміна розміру теж вимагає
+        # взаємодії мишею). Це ЄДИНИЙ діалог у программі, звідки тепер
+        # можна відкрити ДОДАТКОВІ незалежні вікна, тож він свідомо НЕ
+        # модальний (transient лишається - зв'язок із головним вікном для
+        # мінімізації/закриття разом, без блокування інших вікон).
 
         top = tk.Frame(window)
         top.pack(side="top", fill="x", padx=18, pady=(16, 8))
@@ -4900,15 +4846,15 @@ class ExcelViewerApp:
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
 
-        # Задача користувача (2026-08-18): "перегляд того що саме
-        # оновлюється, зрозумілою мовою... + як для ІТ фахівця" - "Просто"
-        # заповнюється вручну (жоден автоматичний механізм не вміє
-        # написати людською мовою для нетехнічної людини), "Технічно"
-        # рахується сама (коміти + diff --stat з моменту останньої
-        # успішної публікації - _compute_git_release_preview вище). Один
-        # спільний блок для обох програм (gui.py/client_app.py) - вони
-        # публікуються з тієї самої git-історії, зазвичай близько одна за
-        # одною, тож окремий перегляд на кожну був би дублюванням.
+        # Задача користувача (2026-08-18): спершу просили детальний
+        # перегляд (коміти + пофарбований diff, у двох картках з кнопкою
+        # "відкрити окремо") - після кількох раундів прийшли до "купа
+        # інформації, очі на лоб лізуть... спрости до мінімуму, але щоб
+        # інформативність була всього". Diff, кольори, окремі detached-
+        # вікна - все прибрано. Лишається РІВНО два прості елементи:
+        # "Просто" (вручну, як і раніше) і короткий список повідомлень
+        # комітів (самі коміти вже написані людською мовою, більше нічого
+        # додавати не треба).
         tk.Label(body, text=self._t("Що змінилось:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
             anchor="w", pady=(0, 4)
         )
@@ -4916,110 +4862,20 @@ class ExcelViewerApp:
         plain_summary_var = tk.StringVar()
         tk.Entry(body, textvariable=plain_summary_var, width=60).pack(anchor="w", fill="x", pady=(2, 8))
 
-        tk.Label(body, text=self._t("Технічно (автоматично, з git):"), anchor="w", fg="#555555").pack(
-            anchor="w", pady=(0, 4)
+        commits_text, current_git_sha = self._compute_git_release_preview()
+
+        tk.Label(body, text=self._t("З git (коміти з моменту останньої публікації):"), anchor="w", fg="#555555").pack(
+            anchor="w", pady=(0, 2)
         )
-        commits_text, diff_lines, current_git_sha = self._compute_git_release_preview()
-        diff_text = "\n".join(diff_lines)
-
-        # Задача користувача: "поправ як домовлялись 1 в 1" - ДВІ окремі
-        # підписані рамки (той самий "field_box" стиль highlightbackground/
-        # highlightthickness, що вже скрізь у цій программі позначає одну
-        # логічну картку), а не один суцільний текстовий блок - точна
-        # відповідність двом карткам мокапу, які користувач обирав
-        # ("Автоматично з git-комітів" + "Порівняння файлів (diff)").
-        # Задача користувача (наступний раунд): "зроби його відокремлюваним.
-        # щоб я міг відокремити, розширити, прочитати" - маленька кнопка
-        # "⤢" у заголовку кожної картки відкриває ТОЙ САМИЙ вміст (через
-        # populate_fn - одна й та сама функція малює і компактний inline-
-        # варіант, і великий, у звичайному (НЕ grab_set) Toplevel, який
-        # можна вільно розтягнути/максимізувати, на відміну від фіксованого
-        # діалогу публікації.
-        def open_detached_preview_window(title, populate_fn):
-            window = tk.Toplevel(self.root)
-            window.title(title)
-            window.geometry("900x600")
-            window.minsize(420, 300)
-            frame = tk.Frame(window)
-            frame.pack(fill="both", expand=True, padx=8, pady=8)
-            scrollbar = ttk.Scrollbar(frame, orient="vertical")
-            text_widget = tk.Text(
-                frame, wrap="none", font=("Consolas", 10), relief="flat", borderwidth=0,
-                yscrollcommand=scrollbar.set,
-            )
-            scrollbar.config(command=text_widget.yview)
-            text_widget.pack(side="left", fill="both", expand=True)
-            scrollbar.pack(side="right", fill="y")
-            populate_fn(text_widget)
-            text_widget.configure(state="disabled")
-            window.bind("<Escape>", lambda event: window.destroy())
-            self._apply_theme(window)
-
-        def build_preview_box(parent, title, populate_fn, height):
-            box = tk.Frame(parent, highlightbackground="#8c959f", highlightthickness=1)
-            box.pack(fill="x", pady=(0, 8))
-            title_row = tk.Frame(box)
-            title_row.pack(fill="x", padx=8, pady=(6, 0))
-            tk.Label(title_row, text=title, font=("Segoe UI", 9, "bold"), anchor="w").pack(
-                side="left", fill="x", expand=True
-            )
-            tk.Button(
-                title_row, text="⤢", width=3,
-                command=lambda: open_detached_preview_window(title, populate_fn),
-            ).pack(side="right")
-            text_frame = tk.Frame(box)
-            text_frame.pack(fill="x", padx=8, pady=(2, 8))
-            scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
-            text_widget = tk.Text(
-                text_frame, height=height, wrap="none", relief="flat", borderwidth=0,
-                font=("Consolas", 9), yscrollcommand=scrollbar.set,
-            )
-            scrollbar.config(command=text_widget.yview)
-            text_widget.pack(side="left", fill="both", expand=True)
-            scrollbar.pack(side="right", fill="y")
-            populate_fn(text_widget)
-            text_widget.configure(state="disabled")
-            return text_widget
-
-        def populate_commits(widget):
-            widget.insert("1.0", commits_text)
-
-        build_preview_box(body, self._t("Автоматично з git-комітів"), populate_commits, height=4)
-
-        # Задача користувача (попередній раунд): "1 в 1 чекаю" на картку
-        # "Реальний код-diff" - тут САМІ РЯДКИ коду (не "скільки рядків"),
-        # пофарбовані по кожному рядку окремо через теги tk.Text (- червоним,
-        # + зеленим, той самий принцип, що GitHub показує diff), моно-
-        # ширинним шрифтом. Кожен виклик populate_diff НАЛАШТОВУЄ ВЛАСНІ
-        # теги на переданому widget (теги живуть на рівні конкретного
-        # tk.Text, не діляться між inline-версією і detached-вікном).
-        def populate_diff(widget):
-            widget.tag_configure("added", foreground="#1a7f37")
-            widget.tag_configure("removed", foreground="#d1242f")
-            widget.tag_configure("meta", foreground="#57606a")
-            widget.tag_configure("file_header", foreground="#0969da", font=("Consolas", 9, "bold"))
-            for line in diff_lines:
-                if line.startswith("=== ") and line.endswith(" ==="):
-                    tag = "file_header"
-                elif line.startswith("@@ "):
-                    tag = "meta"
-                elif line.startswith("+"):
-                    tag = "added"
-                elif line.startswith("-"):
-                    tag = "removed"
-                else:
-                    tag = None
-                widget.insert("end", line + "\n", tag if tag else ())
-            if not diff_lines:
-                widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
-
-        build_preview_box(body, self._t("Порівняння файлів (diff)"), populate_diff, height=10)
+        commits_widget = tk.Text(body, height=5, wrap="word", relief="flat", borderwidth=0)
+        commits_widget.insert("1.0", commits_text)
+        commits_widget.configure(state="disabled")
+        commits_widget.pack(anchor="w", fill="x", pady=(0, 12))
 
         def compose_release_notes():
             plain = plain_summary_var.get().strip()
             parts = [plain] if plain else []
             parts.append(self._t("Коміти:\n{value}").format(value=commits_text))
-            parts.append(self._t("Змінені файли:\n```diff\n{value}\n```").format(value=diff_text))
             return "\n\n".join(parts)
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
