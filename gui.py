@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.39"
+__version__ = "1.0.40"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4705,8 +4705,42 @@ class ExcelViewerApp:
         ).pack(anchor="w", pady=(0, 4))
 
         github_token_var = tk.StringVar(value=self._read_github_publish_token())
-        github_token_entry = tk.Entry(body, textvariable=github_token_var, show="*", width=60)
-        github_token_entry.pack(anchor="w", pady=(0, 12), fill="x")
+        github_token_row = tk.Frame(body)
+        github_token_row.pack(anchor="w", pady=(0, 12), fill="x")
+        github_token_entry = tk.Entry(github_token_row, textvariable=github_token_var, show="*", width=60)
+        github_token_entry.pack(side="left", fill="x", expand=True)
+
+        # Задача користувача (2026-08-18): "додай змогу приєднати ключ
+        # вручну" - довгий випадковий рядок незручно передруковувати чи
+        # вставляти в маленьке поле без помилок. Файл обирається ЛОКАЛЬНО
+        # (стандартний filedialog, той самий принцип, що й вибір Excel-
+        # файлу/OneDrive нижче) - вміст лише читається в цей самий процес і
+        # одразу лягає в github_token_var, як і ручне введення; збереження
+        # на диск (_write_github_publish_token) і далі відбувається лише
+        # при натисканні "Опублікувати", без жодної зміни цього контракту.
+        def attach_github_token_file():
+            selected_file = filedialog.askopenfilename(
+                title=self._t("Прикріпити файл з ключем"),
+                filetypes=[(self._t("Текстові файли"), "*.txt"), (self._t("Усі файли"), "*.*")],
+            )
+            if not selected_file:
+                return
+            try:
+                token_text = Path(selected_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                messagebox.showerror(
+                    self._t("Публікація оновлень"),
+                    self._t("Не удалось прочитать файл:\n{value}\n\n{error}").format(value=selected_file, error=exc),
+                )
+                return
+            if not token_text:
+                messagebox.showerror(self._t("Публікація оновлень"), self._t("Файл порожній."))
+                return
+            github_token_var.set(token_text)
+
+        tk.Button(
+            github_token_row, text=self._t("Прикріпити файл..."), command=attach_github_token_file,
+        ).pack(side="left", padx=(8, 0))
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
 
