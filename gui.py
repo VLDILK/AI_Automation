@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.41"
+__version__ = "1.0.42"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4866,7 +4866,20 @@ class ExcelViewerApp:
         # --windowed --contents-directory . --collect-data certifi
         # --distpath release --workpath build_release_gui
         # --specpath build_specs_release_gui --clean --noconfirm
-        gui_release_dir = BASE_DIR / "release" / "AI_Automation_Home"
+        #
+        # Реальний баг (2026-08-18, знайдено користувачем на живому
+        # зібраному .exe): БЕЗ _project_git_root() тут стояв голий
+        # BASE_DIR - у зібраній версії BASE_DIR = сама dist/AI_Automation_
+        # Home/ (де й лежить запущений .exe), тож "BASE_DIR / release /
+        # AI_Automation_Home" рахував ВКЛАДЕНИЙ шлях dist/AI_Automation_
+        # Home/release/AI_Automation_Home/ (якого не існує) замість
+        # сусіднього release/AI_Automation_Home/ у корені проєкту -
+        # "Зібраної версії не знайдено" ЗАВЖДИ, коли діалог відкритий із
+        # зібраного .exe (єдиний реальний спосіб його використання).
+        # _project_git_root() (вище, вже існує для git-превью) вирішує
+        # той самий "де насправді корінь проєкту" пошук через .git.
+        publish_root = self._project_git_root() or BASE_DIR
+        gui_release_dir = publish_root / "release" / "AI_Automation_Home"
         gui_status_text = (
             self._t("Знайдено зібрану версію {value} ({path}).").format(value=__version__, path=gui_release_dir)
             if gui_release_dir.exists()
@@ -4966,7 +4979,9 @@ class ExcelViewerApp:
 
         tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(12, 12))
 
-        client_dist_dir = BASE_DIR / "dist" / "AI_Automation_Client"
+        # Той самий баг/фікс, що й gui_release_dir вище - client_dist_dir
+        # теж сусід dist/AI_Automation_Home/, не вкладена в неї тека.
+        client_dist_dir = publish_root / "dist" / "AI_Automation_Client"
         client_version = self._read_client_app_version()
         status_text = (
             self._t("Знайдено зібрану версію {value} ({path}).").format(value=client_version, path=client_dist_dir)
