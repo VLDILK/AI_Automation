@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.53"
+__version__ = "1.0.54"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -192,7 +192,11 @@ class ExcelViewerApp:
         "#1D9E75", "#B23B3B", "red", "green", "darkgreen",
         "#8a5a00",  # бейдж "виняток" (одиниця виміру) - лишається впізнаваним у обох темах
     } | {fg for _bg, fg in _ROLE_CHIP_COLORS.values()}
-    _SEMANTIC_BG_COLORS = {bg.lower() for bg, _fg in _ROLE_CHIP_COLORS.values()} | {"#fff3d6"}
+    _SEMANTIC_BG_COLORS = {bg.lower() for bg, _fg in _ROLE_CHIP_COLORS.values()} | {
+        "#fff3d6",
+        "#ddf4ff",  # бейдж "gui" (журнал оновлень)
+        "#dafbe1",  # бейдж "client" (журнал оновлень)
+    }
 
     def _theme(self):
         return self._DARK_THEME if self._dark_mode else self._LIGHT_THEME
@@ -4776,6 +4780,43 @@ class ExcelViewerApp:
             cleaned.append(line)
         return cleaned
 
+    # Задача користувача (2026-08-19): "журнал оновлень" - винесено з
+    # populate_diff (open_publish_updates_dialog) у звичайний метод, бо
+    # тепер його треба ще й у секції "Історія" (розфарбувати ```diff-блок
+    # всередині вже опублікованих нотаток релізу) - той самий класифікатор
+    # рядка, дві різні секції.
+    def _diff_line_tag(self, line):
+        if line.startswith("=== ") and line.endswith(" ==="):
+            return "meta"
+        if line.startswith("@@ "):
+            return "meta"
+        if line.startswith("+"):
+            return "added"
+        if line.startswith("-"):
+            return "removed"
+        return None
+
+    # Розбирає нотатки релізу (compose_release_notes нижче: [Просто?] \n\n
+    # "Коміти:\n- ..." \n\n "Ключові зміни в коді:\n```diff\n...\n```") на
+    # ОДИН короткий рядок для журналу - "Просто", якщо було введено, інакше
+    # перший коміт зі списку.
+    def _release_summary_line(self, notes):
+        text = (notes or "").strip()
+        if not text:
+            return ""
+        commits_marker = self._t("Коміти:")
+        idx = text.find(commits_marker)
+        plain = text[:idx].strip() if idx > 0 else (text if idx == -1 else "")
+        if plain:
+            return plain.splitlines()[0]
+        if idx >= 0:
+            after = text[idx + len(commits_marker):].lstrip("\n")
+            for line in after.splitlines():
+                line = line.strip()
+                if line.startswith("- "):
+                    return line[2:]
+        return text.splitlines()[0]
+
     # since=None (немає збереженої мітки останньої публікації) -> останні 5
     # комітів, той самий "щось краще за нічого" запасний варіант. Мітка
     # оновлюється лише ПІСЛЯ успішної публікації (_write_last_published_sha,
@@ -4854,8 +4895,28 @@ class ExcelViewerApp:
             anchor="w", fg="#555555", justify="left", wraplength=520,
         ).pack(anchor="w", pady=(4, 0))
 
-        body = tk.Frame(window)
-        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
+        # Задача користувача (2026-08-19): "зроби це в вкладках якось.
+        # вкладка токен, вкладка опис змін, вкладка історія, вкладка
+        # публікація" - діалог розрісся (токен + Просто/коміти/код +
+        # тепер ще й журнал оновлень + дві секції публікації) настільки,
+        # що все одним суцільним списком стало важко сканувати - чотири
+        # вкладки групують за призначенням, а не за хронологією побудови.
+        # ttk.Notebook вже теміться через _apply_ttk_theme (TNotebook/
+        # TNotebook.Tab), окремого фіксу не треба.
+        notebook = ttk.Notebook(window)
+        notebook.pack(side="top", fill="both", expand=True, padx=18, pady=8)
+
+        tab_token = tk.Frame(notebook)
+        tab_changes = tk.Frame(notebook)
+        tab_history = tk.Frame(notebook)
+        tab_publish = tk.Frame(notebook)
+        notebook.add(tab_token, text=self._t("Токен"))
+        notebook.add(tab_changes, text=self._t("Опис змін"))
+        notebook.add(tab_history, text=self._t("Історія"))
+        notebook.add(tab_publish, text=self._t("Публікація"))
+
+        body = tk.Frame(tab_token)
+        body.pack(side="top", fill="both", expand=True, padx=4, pady=8)
 
         # Задача користувача (2026-08-16): "щоб не в момент увімкненого
         # серверу це було... клієнт вимкнений, вранці увімкнув - отримав
@@ -4921,15 +4982,17 @@ class ExcelViewerApp:
             github_token_row, text=self._t("Прикріпити файл..."), command=attach_github_token_file,
         ).pack(side="left", padx=(8, 0))
 
-        tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
+        # Задача користувача (2026-08-19): окрема вкладка "Опис змін" -
+        # той самий вміст, що раніше йшов одразу під токеном, тепер має
+        # СВІЙ контент-фрейм у tab_changes замість body (=tab_token).
+        changes_body = tk.Frame(tab_changes)
+        changes_body.pack(side="top", fill="both", expand=True, padx=4, pady=8)
+        body = changes_body
 
         # Задача користувача, підсумок кількох раундів: "хочу бачити і код і
         # пояснення, тільки стисло і влучно" - "Просто" (вручну, пояснення)
         # + короткий список комітів (пояснення з git) + короткий, ОЧИЩЕНИЙ
         # diff (сам код, _DIFF_LINE_LIMIT=15 рядків - "влучно", не "книга").
-        tk.Label(body, text=self._t("Що змінилось:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
-            anchor="w", pady=(0, 4)
-        )
         tk.Label(body, text=self._t("Просто (кілька слів для клієнта):"), anchor="w", fg="#555555").pack(anchor="w")
         plain_summary_var = tk.StringVar()
         tk.Entry(body, textvariable=plain_summary_var, width=60).pack(anchor="w", fill="x", pady=(2, 8))
@@ -5060,17 +5123,6 @@ class ExcelViewerApp:
         def populate_commits(widget):
             widget.insert("1.0", commits_text)
 
-        def diff_line_tag(line):
-            if line.startswith("=== ") and line.endswith(" ==="):
-                return "meta"
-            if line.startswith("@@ "):
-                return "meta"
-            if line.startswith("+"):
-                return "added"
-            if line.startswith("-"):
-                return "removed"
-            return None
-
         # Задача користувача (2026-08-18), обраний варіант 3 з мокапів:
         # "розгорнути на місці (без нового тексту)" - рядки понад
         # _DIFF_LINE_LIMIT ВСТАВЛЕНІ одразу, але приховані тегом "hidden_
@@ -5087,7 +5139,7 @@ class ExcelViewerApp:
             hidden = diff_lines[self._DIFF_LINE_LIMIT :]
 
             for line in visible:
-                tag = diff_line_tag(line)
+                tag = self._diff_line_tag(line)
                 widget.insert("end", line + "\n", tag if tag else ())
 
             if not hidden:
@@ -5107,7 +5159,7 @@ class ExcelViewerApp:
 
             widget.insert("end", toggle_label() + "\n", ("toggle",))
             for line in hidden:
-                tag = diff_line_tag(line)
+                tag = self._diff_line_tag(line)
                 tags = tuple(t for t in (tag, "hidden_extra") if t)
                 widget.insert("end", line + "\n", tags)
 
@@ -5170,6 +5222,128 @@ class ExcelViewerApp:
             ],
         )
 
+        # Задача користувача (2026-08-19): "додай туди зверху журнал
+        # оновлень. де до кожної версії оновлень буде прикріплено такий
+        # файл з даними. чи просто дані" - окреме сховище НЕ потрібне:
+        # compose_release_notes() вище УЖЕ пише повні нотатки (коміти +
+        # очищений diff) у ТІЛО кожного релізу під час публікації - GitHub
+        # Releases сам є архівом. Тут лише читаємо назад (публічний GET,
+        # без токена) через github_releases.list_recent_releases.
+        history_body = tk.Frame(tab_history)
+        history_body.pack(side="top", fill="both", expand=True, padx=4, pady=8)
+
+        history_status_var = tk.StringVar(value=self._t("Завантаження журналу оновлень..."))
+        tk.Label(history_body, textvariable=history_status_var, anchor="w", fg="#555555").pack(
+            anchor="w", pady=(0, 6)
+        )
+
+        history_list = tk.Frame(history_body)
+        history_list.pack(anchor="w", fill="both", expand=True)
+
+        def render_history_notes(parent, notes):
+            lines = (notes or "").splitlines()
+            widget = tk.Text(parent, wrap="word", relief="flat", borderwidth=0, font=("Consolas", 9))
+            widget.tag_configure("added", foreground="#1a7f37")
+            widget.tag_configure("removed", foreground="#d1242f")
+            widget.tag_configure("meta", foreground="#57606a")
+            in_diff = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped == "```diff":
+                    in_diff = True
+                    continue
+                if stripped == "```":
+                    in_diff = False
+                    continue
+                tag = self._diff_line_tag(line) if in_diff else None
+                widget.insert("end", line + "\n", tag if tag else ())
+            line_count = int(widget.index("end-1c").split(".")[0])
+            widget.configure(height=min(max(line_count, 1), 20), state="disabled")
+            widget.pack(fill="x", padx=(26, 0), pady=(0, 8))
+            self._apply_theme(widget)
+            return widget
+
+        def make_history_row(parent, entry):
+            entry_frame = tk.Frame(parent)
+            entry_frame.pack(anchor="w", fill="x")
+
+            header = tk.Frame(entry_frame, cursor="hand2")
+            header.pack(anchor="w", fill="x", pady=2)
+
+            is_gui = entry["kind"] == "gui"
+            badge = tk.Label(
+                header, text=entry["kind"], font=("Segoe UI", 8),
+                bg="#ddf4ff" if is_gui else "#dafbe1", fg="#0969da" if is_gui else "#1a7f37",
+                padx=6, pady=1,
+            )
+            badge.pack(side="left")
+
+            version_label = tk.Label(header, text=entry["version"], font=("Segoe UI", 9, "bold"), width=10, anchor="w")
+            version_label.pack(side="left", padx=(6, 0))
+
+            summary_label = tk.Label(
+                header, text=self._release_summary_line(entry["notes"]), anchor="w", fg="#555555",
+            )
+            summary_label.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+            date_label = tk.Label(header, text=self._format_last_seen(entry["published_at"]), fg="#8c959f")
+            date_label.pack(side="right", padx=(4, 0))
+
+            chevron = tk.Label(header, text="▸", width=2)
+            chevron.pack(side="right")
+
+            content_holder = tk.Frame(entry_frame)
+            content_holder.pack(anchor="w", fill="x")
+
+            state = {"expanded": False}
+
+            def toggle(event=None):
+                state["expanded"] = not state["expanded"]
+                if state["expanded"]:
+                    chevron.configure(text="▾")
+                    render_history_notes(content_holder, entry["notes"])
+                else:
+                    chevron.configure(text="▸")
+                    for child in content_holder.winfo_children():
+                        child.destroy()
+
+            for clickable in (header, badge, version_label, summary_label, date_label, chevron):
+                clickable.bind("<Button-1>", toggle)
+
+            return entry_frame
+
+        def on_history_loaded(entries, error):
+            for child in history_list.winfo_children():
+                child.destroy()
+            if error:
+                history_status_var.set(
+                    self._t("Не удалось загрузить журнал оновлень: {error}").format(error=error)
+                )
+                return
+            if not entries:
+                history_status_var.set(self._t("Ще немає жодного опублікованого релізу."))
+                return
+            history_status_var.set("")
+            for entry in entries:
+                make_history_row(history_list, entry)
+            self._apply_theme(history_list)
+
+        def load_history():
+            def worker():
+                try:
+                    entries = github_releases.list_recent_releases(
+                        paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, limit=15,
+                    )
+                    error = None
+                except Exception as exc:
+                    entries = []
+                    error = str(exc)
+                self._run_on_main_thread(lambda: on_history_loaded(entries, error))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        load_history()
+
         def compose_release_notes():
             plain = plain_summary_var.get().strip()
             parts = [plain] if plain else []
@@ -5177,7 +5351,12 @@ class ExcelViewerApp:
             parts.append(self._t("Ключові зміни в коді:\n```diff\n{value}\n```").format(value=diff_text))
             return "\n\n".join(parts)
 
-        tk.Frame(body, height=1, bg="#dddddd").pack(fill="x", pady=(0, 12))
+        # Задача користувача (2026-08-19): окрема вкладка "Публікація" -
+        # обидві секції (gui.py + client_app.py) нижче тепер у tab_publish
+        # замість tab_token/tab_changes.
+        publish_body = tk.Frame(tab_publish)
+        publish_body.pack(side="top", fill="both", expand=True, padx=4, pady=8)
+        body = publish_body
 
         # Задача користувача (2026-08-16): "стосовно домашньої версії, щоб
         # вона не заважала процесам" - публікація gui.py тепер теж через

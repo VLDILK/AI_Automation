@@ -192,6 +192,61 @@ def get_latest_release(owner, repo, tag_prefix, timeout=15):
     return max(matching, key=lambda r: r.get("published_at") or "")
 
 
+def list_recent_releases(owner, repo, limit=15, timeout=15):
+    """Задача користувача (2026-08-19): "журнал оновлень... до кожної
+    версії буде прикріплено такий файл з даними. чи просто дані" - окреме
+    сховище не потрібне: compose_release_notes() (gui.py) вже пише повні
+    нотатки (коміти + очищений diff) у ТІЛО кожного релізу під час
+    публікації - GitHub Releases сам є архівом. Ця функція лише читає
+    його назад: повна пагінація (та сама причина, що й get_latest_release
+    вище - один per_page=30/100 запит не покриє репозиторій із десятками
+    релізів), фільтр на ОБИДВА відомі префікси (ігнорує чужі/ручні
+    релізи), сортування за published_at (не порядком відповіді GitHub -
+    та сама причина ненадійного сортування, що описана в get_latest_
+    release), обрізка до `limit` найновіших.
+
+    Повертає список словників {kind, version, tag_name, published_at,
+    notes}, найновіші перші. Публічний GET, токен не потрібен."""
+    releases = []
+    page = 1
+    while True:
+        try:
+            page_releases = _request(
+                f"{API_ROOT}/repos/{owner}/{repo}/releases?per_page=100&page={page}", timeout=timeout,
+            )
+        except RuntimeError as exc:
+            if "404" in str(exc):
+                return []
+            raise
+        if not isinstance(page_releases, list) or not page_releases:
+            break
+        releases.extend(page_releases)
+        if len(page_releases) < 100:
+            break
+        page += 1
+
+    entries = []
+    for release in releases:
+        tag = release.get("tag_name", "")
+        if tag.startswith(GUI_TAG_PREFIX):
+            kind, prefix = "gui", GUI_TAG_PREFIX
+        elif tag.startswith(CLIENT_TAG_PREFIX):
+            kind, prefix = "client", CLIENT_TAG_PREFIX
+        else:
+            continue
+        entries.append(
+            {
+                "kind": kind,
+                "version": tag[len(prefix):],
+                "tag_name": tag,
+                "published_at": release.get("published_at") or "",
+                "notes": release.get("body") or "",
+            }
+        )
+    entries.sort(key=lambda e: e["published_at"], reverse=True)
+    return entries[:limit]
+
+
 def release_version(release, tag_prefix):
     """"client-v0.2.10" -> "0.2.10". None, якщо тег не має очікуваного префіксу
     (напр. хтось вручну створив реліз без коду - краще проігнорувати, ніж
