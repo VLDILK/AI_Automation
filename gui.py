@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.50"
+__version__ = "1.0.51"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4813,6 +4813,13 @@ class ExcelViewerApp:
         # модальний (transient лишається - зв'язок із головним вікном для
         # мінімізації/закриття разом, без блокування інших вікон).
 
+        # Задача користувача (2026-08-18): "зроби щоб вікно можна було
+        # від'єднувати, приєднувати назад" - список УСІХ зараз відкритих
+        # detached-вікон (обох секцій), щоб закрити їх разом із головним
+        # діалогом (кнопка "Закрити", Escape, чи "X") - інакше вони б
+        # лишались висіти сиротами після закриття батьківського вікна.
+        detached_windows = []
+
         top = tk.Frame(window)
         top.pack(side="top", fill="x", padx=18, pady=(16, 8))
         tk.Label(
@@ -4901,8 +4908,6 @@ class ExcelViewerApp:
         # пояснення, тільки стисло і влучно" - "Просто" (вручну, пояснення)
         # + короткий список комітів (пояснення з git) + короткий, ОЧИЩЕНИЙ
         # diff (сам код, _DIFF_LINE_LIMIT=15 рядків - "влучно", не "книга").
-        # Без кольорових detached-вікон і зайвого приладдя - просто два
-        # компактних текстових блоки один під одним.
         tk.Label(body, text=self._t("Що змінилось:"), font=("Segoe UI", 10, "bold"), anchor="w").pack(
             anchor="w", pady=(0, 4)
         )
@@ -4913,35 +4918,131 @@ class ExcelViewerApp:
         commits_text, diff_lines, current_git_sha = self._compute_git_release_preview()
         diff_text = "\n".join(diff_lines)
 
-        tk.Label(body, text=self._t("З git (коміти з моменту останньої публікації):"), anchor="w", fg="#555555").pack(
-            anchor="w", pady=(0, 2)
-        )
-        commits_widget = tk.Text(body, height=5, wrap="word", relief="flat", borderwidth=0)
-        commits_widget.insert("1.0", commits_text)
-        commits_widget.configure(state="disabled")
-        commits_widget.pack(anchor="w", fill="x", pady=(0, 8))
+        # Задача користувача (2026-08-18): "зроби щоб вікно можна було
+        # від'єднувати, приєднувати назад одне і друге, а також щоб ті
+        # вікна можна було розширювати та звужувати" - обидві секції
+        # (коміти й diff) отримують кнопку "⤢": відкриває СВІЙ окремий,
+        # вільно змінюваний за розміром (resizable(True, True)) Toplevel
+        # зі скролом і кнопкою "Приєднати назад" (плюс закриття через "X" -
+        # прирівняне до приєднання назад, а не сирітського зникнення).
+        # Секція сама лишається на місці (окремий Frame, що НЕ переставляє
+        # порядок при від'єднанні/приєднанні) - лише її вміст перебудовується
+        # inline<->detached через populate_fn (той самий підхід, що вже
+        # був опрацьований раніше цієї сесії для detached-вікон).
+        def make_detachable_section(label_text, populate_fn, *, is_diff, inline_height):
+            section = tk.Frame(body)
+            section.pack(anchor="w", fill="x", pady=(0, 12 if is_diff else 8))
 
-        tk.Label(body, text=self._t("Ключові зміни в коді:"), anchor="w", fg="#555555").pack(anchor="w", pady=(0, 2))
-        diff_widget = tk.Text(body, height=8, wrap="none", relief="flat", borderwidth=0, font=("Consolas", 9))
-        diff_widget.tag_configure("added", foreground="#1a7f37")
-        diff_widget.tag_configure("removed", foreground="#d1242f")
-        diff_widget.tag_configure("meta", foreground="#57606a")
-        for line in diff_lines:
-            if line.startswith("=== ") and line.endswith(" ==="):
-                tag = "meta"
-            elif line.startswith("@@ "):
-                tag = "meta"
-            elif line.startswith("+"):
-                tag = "added"
-            elif line.startswith("-"):
-                tag = "removed"
+            header = tk.Frame(section)
+            header.pack(anchor="w", fill="x")
+            tk.Label(header, text=label_text, anchor="w", fg="#555555").pack(side="left")
+
+            holder = tk.Frame(section)
+            holder.pack(anchor="w", fill="x", pady=(2, 0))
+
+            state = {"detached": None}
+
+            def configure_tags(widget):
+                if is_diff:
+                    widget.tag_configure("added", foreground="#1a7f37")
+                    widget.tag_configure("removed", foreground="#d1242f")
+                    widget.tag_configure("meta", foreground="#57606a")
+
+            def build_inline():
+                for child in holder.winfo_children():
+                    child.destroy()
+                widget = tk.Text(
+                    holder, height=inline_height, wrap="none" if is_diff else "word",
+                    relief="flat", borderwidth=0, font=("Consolas", 9) if is_diff else None,
+                )
+                configure_tags(widget)
+                populate_fn(widget)
+                widget.configure(state="disabled")
+                widget.pack(fill="x")
+
+            def reattach():
+                win = state["detached"]
+                if win is not None:
+                    state["detached"] = None
+                    if win in detached_windows:
+                        detached_windows.remove(win)
+                    win.destroy()
+                build_inline()
+                detach_button.configure(text="⤢")
+
+            def detach():
+                for child in holder.winfo_children():
+                    child.destroy()
+
+                win = tk.Toplevel(window)
+                win.title(label_text)
+                win.transient(window)
+                win.resizable(True, True)
+                win.minsize(360, 220)
+                win.geometry("560x360")
+
+                win_top = tk.Frame(win)
+                win_top.pack(side="top", fill="x", padx=10, pady=(10, 4))
+                tk.Button(win_top, text=self._t("Приєднати назад"), command=reattach).pack(side="right")
+
+                win_body = tk.Frame(win)
+                win_body.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 10))
+                scrollbar = tk.Scrollbar(win_body, orient="vertical")
+                widget = tk.Text(
+                    win_body, wrap="none" if is_diff else "word", relief="flat", borderwidth=0,
+                    font=("Consolas", 10) if is_diff else None, yscrollcommand=scrollbar.set,
+                )
+                scrollbar.configure(command=widget.yview)
+                scrollbar.pack(side="right", fill="y")
+                widget.pack(side="left", fill="both", expand=True)
+                configure_tags(widget)
+                populate_fn(widget)
+                widget.configure(state="disabled")
+
+                win.protocol("WM_DELETE_WINDOW", reattach)
+                state["detached"] = win
+                detached_windows.append(win)
+                detach_button.configure(text=self._t("Приєднати назад"))
+
+            def toggle_detach():
+                if state["detached"] is not None:
+                    reattach()
+                else:
+                    detach()
+
+            detach_button = tk.Button(header, text="⤢", width=3, command=toggle_detach)
+            detach_button.pack(side="right")
+
+            build_inline()
+            return section
+
+        def populate_commits(widget):
+            widget.insert("1.0", commits_text)
+
+        def populate_diff(widget):
+            if diff_lines:
+                for line in diff_lines:
+                    if line.startswith("=== ") and line.endswith(" ==="):
+                        tag = "meta"
+                    elif line.startswith("@@ "):
+                        tag = "meta"
+                    elif line.startswith("+"):
+                        tag = "added"
+                    elif line.startswith("-"):
+                        tag = "removed"
+                    else:
+                        tag = None
+                    widget.insert("end", line + "\n", tag if tag else ())
             else:
-                tag = None
-            diff_widget.insert("end", line + "\n", tag if tag else ())
-        if not diff_lines:
-            diff_widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
-        diff_widget.configure(state="disabled")
-        diff_widget.pack(anchor="w", fill="x", pady=(0, 12))
+                widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
+
+        make_detachable_section(
+            self._t("З git (коміти з моменту останньої публікації):"), populate_commits,
+            is_diff=False, inline_height=5,
+        )
+        make_detachable_section(
+            self._t("Ключові зміни в коді:"), populate_diff, is_diff=True, inline_height=8,
+        )
 
         def compose_release_notes():
             plain = plain_summary_var.get().strip()
@@ -5203,10 +5304,16 @@ class ExcelViewerApp:
         )
         publish_client_button.pack(anchor="w")
 
+        def close_dialog():
+            for win in list(detached_windows):
+                win.destroy()
+            window.destroy()
+
         bottom = tk.Frame(window)
         bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
-        tk.Button(bottom, text=self._t("Закрити"), width=14, command=window.destroy).pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy())
+        tk.Button(bottom, text=self._t("Закрити"), width=14, command=close_dialog).pack(side="right")
+        window.bind("<Escape>", lambda event: close_dialog())
+        window.protocol("WM_DELETE_WINDOW", close_dialog)
         self._center_window(window, width=560, height=720)
 
     # Задача користувача (2026-08-14): "вирівняти таблицю... де має бути
