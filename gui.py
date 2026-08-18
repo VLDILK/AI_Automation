@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.51"
+__version__ = "1.0.52"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4710,13 +4710,19 @@ class ExcelViewerApp:
     # погано, купа інформації" -> прибрано diff ПОВНІСТЮ, лишились лише
     # коміти -> "гарний мінімум, але я не про такий - хочу бачити і код і
     # пояснення, тільки стисло і влучно". Остаточна форма: коміти
-    # (пояснення, людською мовою) + короткий ОЧИЩЕНИЙ diff (код) під ними,
-    # жорстко обрізаний до _DIFF_LINE_LIMIT (15, не 300, як у "1 в 1"
-    # версії) - досить, щоб побачити РЕАЛЬНІ рядки коду, замало, щоб це
-    # знову стало "книгою". _clean_diff_lines прибирає git-шум (diff --git/
-    # index) і version-bump-hunks (той самий фільтр, що вже довів
-    # корисність у попередньому раунді).
+    # (пояснення, людською мовою) + ОЧИЩЕНИЙ diff (код) під ними.
+    # Задача користувача (2026-08-18): "покажи як приховані рядки, зі
+    # змогою відкрити" - _DIFF_LINE_LIMIT (15) БІЛЬШЕ НЕ обрізає дані -
+    # це лише поріг, скільки рядків ВИДНО одразу в компактному блоці,
+    # доки решту не розгорнуть кліком (elide-тег у open_publish_updates_
+    # dialog, варіант 3 з мокапів). _DIFF_HARD_CAP - окремий, набагато
+    # більший запобіжник ЛИШЕ проти патологічно величезного diff-у (сотні
+    # файлів одразу) - у звичайній роботі цієї программи ніколи не
+    # спрацьовує. _clean_diff_lines прибирає git-шум (diff --git/index) і
+    # version-bump-hunks (той самий фільтр, що вже довів корисність у
+    # попередньому раунді).
     _DIFF_LINE_LIMIT = 15
+    _DIFF_HARD_CAP = 500
     _VERSION_LINE_RE = re.compile(r'^[+-]\s*__version__\s*=')
 
     def _clean_diff_lines(self, raw_lines):
@@ -4791,10 +4797,10 @@ class ExcelViewerApp:
             else self._t("(Немає нових комітів з моменту останньої публікації.)")
         )
         diff_lines = self._clean_diff_lines(diff_raw.splitlines()) if diff_raw else []
-        if len(diff_lines) > self._DIFF_LINE_LIMIT:
-            hidden = len(diff_lines) - self._DIFF_LINE_LIMIT
-            diff_lines = diff_lines[: self._DIFF_LINE_LIMIT]
-            diff_lines.append(self._t("… ще {value} рядків, повний код - на GitHub після публікації").format(value=hidden))
+        if len(diff_lines) > self._DIFF_HARD_CAP:
+            hidden = len(diff_lines) - self._DIFF_HARD_CAP
+            diff_lines = diff_lines[: self._DIFF_HARD_CAP]
+            diff_lines.append(self._t("… ще {value} рядків - diff занадто великий для перегляду тут").format(value=hidden))
         return commits_text, diff_lines, current_sha
 
     def open_publish_updates_dialog(self):
@@ -4929,13 +4935,24 @@ class ExcelViewerApp:
         # порядок при від'єднанні/приєднанні) - лише її вміст перебудовується
         # inline<->detached через populate_fn (той самий підхід, що вже
         # був опрацьований раніше цієї сесії для detached-вікон).
-        def make_detachable_section(label_text, populate_fn, *, is_diff, inline_height):
+        def make_detachable_section(label_text, populate_fn, *, is_diff, inline_height, extra_actions=None):
             section = tk.Frame(body)
             section.pack(anchor="w", fill="x", pady=(0, 12 if is_diff else 8))
 
             header = tk.Frame(section)
             header.pack(anchor="w", fill="x")
             tk.Label(header, text=label_text, anchor="w", fg="#555555").pack(side="left")
+            # Задача користувача (2026-08-18): "дозволити відкрити код в
+            # пайтоні чи в окремому вікні зі змогою копіювати із різною
+            # розкладкою" - кнопки, а НЕ покладання на Ctrl+C (у минулому
+            # вже був окремий баг саме з Ctrl+C/V/X на нерозкладці, gui.py),
+            # тож клік копіює напряму через clipboard_append, незалежно від
+            # розкладки клавіатури. "Відкрити у файлі" - той самий
+            # os.startfile(), що вже використовується в программі (напр.
+            # "Відкрити теку" код-бекапів) - справжнє ЗОВНІШНЄ вікно
+            # текстового редактора, де копіювання завжди працює нативно.
+            for action_text, action_cmd in reversed(extra_actions or []):
+                tk.Button(header, text=action_text, command=action_cmd).pack(side="right", padx=(0, 4))
 
             holder = tk.Frame(section)
             holder.pack(anchor="w", fill="x", pady=(2, 0))
@@ -4984,6 +5001,8 @@ class ExcelViewerApp:
                 win_top = tk.Frame(win)
                 win_top.pack(side="top", fill="x", padx=10, pady=(10, 4))
                 tk.Button(win_top, text=self._t("Приєднати назад"), command=reattach).pack(side="right")
+                for action_text, action_cmd in reversed(extra_actions or []):
+                    tk.Button(win_top, text=action_text, command=action_cmd).pack(side="right", padx=(0, 4))
 
                 win_body = tk.Frame(win)
                 win_body.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 10))
@@ -5003,6 +5022,15 @@ class ExcelViewerApp:
                 state["detached"] = win
                 detached_windows.append(win)
                 detach_button.configure(text=self._t("Приєднати назад"))
+                # Реальний баг (2026-08-18, знайдено на живому скріншоті):
+                # detached-вікно лишалось білим при увімкненій темній темі -
+                # на відміну від головного діалогу (theming якого йде через
+                # спільну точку _center_window -> _apply_theme, 23 місця в
+                # программі), тут ЖОДЕН виклик _apply_theme раніше не робився,
+                # адже вікно будується вже ПІСЛЯ початкового проходу теми при
+                # старті. Той самий фікс, що вже перевірений на 23 інших
+                # діалогах - просто явний виклик тут.
+                self._apply_theme(win)
 
             def toggle_detach():
                 if state["detached"] is not None:
@@ -5019,22 +5047,96 @@ class ExcelViewerApp:
         def populate_commits(widget):
             widget.insert("1.0", commits_text)
 
+        def diff_line_tag(line):
+            if line.startswith("=== ") and line.endswith(" ==="):
+                return "meta"
+            if line.startswith("@@ "):
+                return "meta"
+            if line.startswith("+"):
+                return "added"
+            if line.startswith("-"):
+                return "removed"
+            return None
+
+        # Задача користувача (2026-08-18), обраний варіант 3 з мокапів:
+        # "розгорнути на місці (без нового тексту)" - рядки понад
+        # _DIFF_LINE_LIMIT ВСТАВЛЕНІ одразу, але приховані тегом "hidden_
+        # extra" (elide=True); клік по рядку-перемикачу лише перемикає
+        # elide того самого тегу і переписує СВІЙ ОДИН рядок - решта
+        # вмісту не переставляється, тож розгортання відбувається саме
+        # там, де стоїть перемикач, без прокрутки вниз.
         def populate_diff(widget):
-            if diff_lines:
-                for line in diff_lines:
-                    if line.startswith("=== ") and line.endswith(" ==="):
-                        tag = "meta"
-                    elif line.startswith("@@ "):
-                        tag = "meta"
-                    elif line.startswith("+"):
-                        tag = "added"
-                    elif line.startswith("-"):
-                        tag = "removed"
-                    else:
-                        tag = None
-                    widget.insert("end", line + "\n", tag if tag else ())
-            else:
+            if not diff_lines:
                 widget.insert("end", self._t("(Немає змінених файлів з моменту останньої публікації.)"))
+                return
+
+            visible = diff_lines[: self._DIFF_LINE_LIMIT]
+            hidden = diff_lines[self._DIFF_LINE_LIMIT :]
+
+            for line in visible:
+                tag = diff_line_tag(line)
+                widget.insert("end", line + "\n", tag if tag else ())
+
+            if not hidden:
+                return
+
+            widget.tag_configure("toggle", foreground="#0969da", underline=True)
+            widget.tag_configure("hidden_extra", elide=True)
+            toggle_state = {"expanded": False}
+            toggle_line_no = int(widget.index("end").split(".")[0])
+
+            def toggle_label():
+                arrow = "▾" if toggle_state["expanded"] else "▸"
+                action = self._t("згорнути") if toggle_state["expanded"] else self._t("розгорнути")
+                return self._t("{arrow} ще {count} рядків ({action})").format(
+                    arrow=arrow, count=len(hidden), action=action
+                )
+
+            widget.insert("end", toggle_label() + "\n", ("toggle",))
+            for line in hidden:
+                tag = diff_line_tag(line)
+                tags = tuple(t for t in (tag, "hidden_extra") if t)
+                widget.insert("end", line + "\n", tags)
+
+            def on_toggle(event=None):
+                toggle_state["expanded"] = not toggle_state["expanded"]
+                widget.configure(state="normal")
+                widget.delete(f"{toggle_line_no}.0", f"{toggle_line_no}.end")
+                widget.insert(f"{toggle_line_no}.0", toggle_label(), ("toggle",))
+                widget.tag_configure("hidden_extra", elide=not toggle_state["expanded"])
+                widget.configure(state="disabled")
+
+            widget.tag_bind("toggle", "<Button-1>", on_toggle)
+            widget.tag_bind("toggle", "<Enter>", lambda event: widget.configure(cursor="hand2"))
+            widget.tag_bind("toggle", "<Leave>", lambda event: widget.configure(cursor=""))
+
+        def copy_diff_to_clipboard():
+            # Реальний баг (2026-08-18, знайдено тестом на справжньому
+            # ~18КБ diff-і цієї ж сесії): один clipboard_append() кирилиці
+            # довшої за кілька тисяч символів псує байти РІВНО на межі
+            # внутрішнього Tcl/Tk-буфера конверсії в Windows (символ
+            # приходив назад як "Ð¾" замість "о" - класичний UTF-8-байти-
+            # прочитані-як-Latin-1 артефакт). Реєструємо ОБИДВА формати:
+            # UTF8_STRING (без цього багу, але не всі застосунки-цілі
+            # вставки його розуміють) і звичайний STRING (типовий, розуміє
+            # практично все, страждає від багу лише на дуже великих
+            # diff-ах - для звичайного розміру публікації це не спрацьовує).
+            window.clipboard_clear()
+            window.clipboard_append(diff_text, type="UTF8_STRING")
+            window.clipboard_append(diff_text, type="STRING")
+
+        def open_diff_in_file():
+            try:
+                preview_dir = Path(tempfile.gettempdir()) / "ai_automation_diff_preview"
+                preview_dir.mkdir(parents=True, exist_ok=True)
+                diff_file = preview_dir / "diff_preview.diff"
+                diff_file.write_text(diff_text, encoding="utf-8")
+                os.startfile(str(diff_file))
+            except OSError as exc:
+                messagebox.showerror(
+                    self._t("Публікація оновлень"),
+                    self._t("Не удалось відкрити файл: {error}").format(error=exc),
+                )
 
         make_detachable_section(
             self._t("З git (коміти з моменту останньої публікації):"), populate_commits,
@@ -5042,6 +5144,10 @@ class ExcelViewerApp:
         )
         make_detachable_section(
             self._t("Ключові зміни в коді:"), populate_diff, is_diff=True, inline_height=8,
+            extra_actions=[
+                (self._t("Копіювати"), copy_diff_to_clipboard),
+                (self._t("Відкрити у файлі"), open_diff_in_file),
+            ],
         )
 
         def compose_release_notes():
