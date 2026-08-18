@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.54"
+__version__ = "1.0.55"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4817,6 +4817,39 @@ class ExcelViewerApp:
                     return line[2:]
         return text.splitlines()[0]
 
+    # Задача користувача (2026-08-19): "при відкритті старих оновлень я
+    # маю бачити всю інформацію. повну. як в описі змін" - розгортання в
+    # "Історії" раніше кидало ВЕСЬ raw-текст нотаток в один Text - тепер
+    # розбирає його НАЗАД на ті самі три частини, які compose_release_
+    # notes (нижче) туди поклав (Просто / Коміти / diff-огорожа), щоб
+    # показати структуровано, тим самим виглядом, що й на вкладці "Опис
+    # змін" (окремі підписані секції, кольоровий код).
+    def _parse_release_notes(self, notes):
+        text = (notes or "").strip()
+        commits_marker = self._t("Коміти:")
+        code_marker = self._t("Ключові зміни в коді:")
+        commits_idx = text.find(commits_marker)
+        code_idx = text.find(code_marker)
+
+        plain = text[:commits_idx].strip() if commits_idx > 0 else (text if commits_idx == -1 else "")
+
+        commits_text = ""
+        if commits_idx != -1:
+            end = code_idx if code_idx != -1 else len(text)
+            commits_text = text[commits_idx + len(commits_marker) : end].strip()
+
+        diff_lines = []
+        if code_idx != -1:
+            code_block = text[code_idx + len(code_marker) :]
+            fence_start = code_block.find("```diff")
+            if fence_start != -1:
+                after_fence = code_block[fence_start + len("```diff") :]
+                fence_end = after_fence.rfind("```")
+                diff_text = after_fence[:fence_end] if fence_end != -1 else after_fence
+                diff_lines = diff_text.strip("\n").splitlines()
+
+        return plain, commits_text, diff_lines
+
     # since=None (немає збереженої мітки останньої публікації) -> останні 5
     # комітів, той самий "щось краще за нічого" запасний варіант. Мітка
     # оновлюється лише ПІСЛЯ успішної публікації (_write_last_published_sha,
@@ -5240,28 +5273,57 @@ class ExcelViewerApp:
         history_list = tk.Frame(history_body)
         history_list.pack(anchor="w", fill="both", expand=True)
 
+        # Задача користувача (2026-08-19): "при відкритті старих оновлень я
+        # маю бачити всю інформацію. повну. як в описі змін" - раніше сюди
+        # вивалювався ВЕСЬ raw-текст нотаток одним суцільним Text -
+        # тепер розбирає його (self._parse_release_notes) на ТІ САМІ три
+        # частини, які "Опис змін" показує для НОВОЇ публікації (Просто /
+        # Коміти / кольоровий код), і показує кожну своєю підписаною
+        # секцією - той самий вигляд для старого й нового.
         def render_history_notes(parent, notes):
-            lines = (notes or "").splitlines()
-            widget = tk.Text(parent, wrap="word", relief="flat", borderwidth=0, font=("Consolas", 9))
-            widget.tag_configure("added", foreground="#1a7f37")
-            widget.tag_configure("removed", foreground="#d1242f")
-            widget.tag_configure("meta", foreground="#57606a")
-            in_diff = False
-            for line in lines:
-                stripped = line.strip()
-                if stripped == "```diff":
-                    in_diff = True
-                    continue
-                if stripped == "```":
-                    in_diff = False
-                    continue
-                tag = self._diff_line_tag(line) if in_diff else None
-                widget.insert("end", line + "\n", tag if tag else ())
-            line_count = int(widget.index("end-1c").split(".")[0])
-            widget.configure(height=min(max(line_count, 1), 20), state="disabled")
-            widget.pack(fill="x", padx=(26, 0), pady=(0, 8))
-            self._apply_theme(widget)
-            return widget
+            plain, commits_text, diff_lines = self._parse_release_notes(notes)
+
+            if plain:
+                tk.Label(parent, text=self._t("Просто:"), anchor="w", fg="#8c959f", font=("Segoe UI", 8)).pack(
+                    anchor="w", padx=(26, 0)
+                )
+                tk.Label(parent, text=plain, anchor="w", justify="left", wraplength=460).pack(
+                    anchor="w", padx=(26, 0), pady=(0, 6), fill="x"
+                )
+
+            if commits_text:
+                tk.Label(parent, text=self._t("Коміти:"), anchor="w", fg="#8c959f", font=("Segoe UI", 8)).pack(
+                    anchor="w", padx=(26, 0)
+                )
+                commits_widget = tk.Text(parent, wrap="word", relief="flat", borderwidth=0, height=1)
+                commits_widget.insert("1.0", commits_text)
+                commit_line_count = int(commits_widget.index("end-1c").split(".")[0])
+                commits_widget.configure(height=min(max(commit_line_count, 1), 10), state="disabled")
+                commits_widget.pack(fill="x", padx=(26, 0), pady=(0, 6))
+
+            if diff_lines:
+                tk.Label(parent, text=self._t("Код:"), anchor="w", fg="#8c959f", font=("Segoe UI", 8)).pack(
+                    anchor="w", padx=(26, 0)
+                )
+                diff_widget = tk.Text(
+                    parent, wrap="none", relief="flat", borderwidth=0, font=("Consolas", 9), height=1,
+                )
+                diff_widget.tag_configure("added", foreground="#1a7f37")
+                diff_widget.tag_configure("removed", foreground="#d1242f")
+                diff_widget.tag_configure("meta", foreground="#57606a")
+                for line in diff_lines:
+                    tag = self._diff_line_tag(line)
+                    diff_widget.insert("end", line + "\n", tag if tag else ())
+                diff_line_count = int(diff_widget.index("end-1c").split(".")[0])
+                diff_widget.configure(height=min(max(diff_line_count, 1), 20), state="disabled")
+                diff_widget.pack(fill="x", padx=(26, 0), pady=(0, 8))
+
+            if not (plain or commits_text or diff_lines):
+                tk.Label(parent, text=self._t("(Немає деталей.)"), anchor="w", fg="#8c959f").pack(
+                    anchor="w", padx=(26, 0), pady=(0, 8)
+                )
+
+            self._apply_theme(parent)
 
         def make_history_row(parent, entry):
             entry_frame = tk.Frame(parent)
