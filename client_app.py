@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.91"
+__version__ = "0.2.92"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -399,6 +399,7 @@ class ClientApp(ctk.CTk):
         self.update_channel_window = None
         self.main_title_style_window = None
         self._last_registry_error = "ещё не пытался"
+        self._last_registry_path = None
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
         # ця (client_app.py) мають ОКРЕМІ бази - редактор кнопок у gui.py
         # ніяк не впливає на реального бота, бо gui.py більше не хостить
@@ -1058,6 +1059,7 @@ class ClientApp(ctk.CTk):
         # машини, де це реально стається.
         def worker():
             try:
+                self._last_registry_path = servers_registry.resolved_path_str()
                 ok = servers_registry.register_this_server(
                     name=platform.node() or "Неизвестный ПК",
                     hostname=self._cloudflared_tunnel_hostname(),
@@ -4017,6 +4019,7 @@ class ClientApp(ctk.CTk):
             # чекає, а в Сервери порожньо" - діагностика _register_this_
             # server_tick без потреби локального доступу до цієї машини.
             "registry_last_error": self._last_registry_error,
+            "registry_path": self._last_registry_path,
         }
 
     # Те саме джерело правди, що вже мають кнопки в самому інтерфейсі
