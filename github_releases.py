@@ -121,6 +121,20 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
             raise RuntimeError("GitHub не принял токен. Проверьте его и попробуйте снова.") from exc
         if exc.code == 404:
             raise RuntimeError("Запрошенные данные не найдены на GitHub.") from exc
+        # Реальна скарга (2026-08-19, живе тестування, скріншот): 422 -
+        # GitHub ВІДХИЛИВ сам запит (не тимчасова недоступність сервера) -
+        # "попробуйте позже" тут вводить в оману, повторна спроба з тими
+        # самими даними впаде так само. Найчастіша реальна причина створення
+        # релізу з 422 - тег такої версії вже існує (create_release,
+        # publish_gui_release/publish_client_release) - розпізнаємо саме її
+        # людською мовою; для решти 422 - все ж чіткіше "GitHub відхилив
+        # запит", ніж "недоступен".
+        if exc.code == 422:
+            if "already_exists" in detail or "already exists" in detail.lower():
+                raise RuntimeError(
+                    "Такая версия уже была опубликована ранее. Увеличьте номер версии и попробуйте снова."
+                ) from exc
+            raise RuntimeError("GitHub отклонил запрос — проверьте введённые данные и попробуйте снова.") from exc
         raise RuntimeError(f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже.") from exc
     except Exception as exc:
         # Реальний баг (2026-08-16, живий продакшн, "поперше ніякої
