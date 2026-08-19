@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.57"
+__version__ = "1.0.58"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -3270,6 +3270,16 @@ class ExcelViewerApp:
         # будь-яке знищення canvas незалежно від причини (Escape, WM_
         # DELETE_WINDOW, прямий .destroy()).
         canvas.bind("<Destroy>", unbind_mousewheel)
+        # Задача користувача (2026-08-19, "Історія"): "2й клік - залишає
+        # місце зарезервованим під розгортання, але текст ховається" -
+        # <Configure> на list_frame надійно спрацьовує, коли контент
+        # ЗРОСТАЄ, але не завжди - коли ЗМЕНШУЄТЬСЯ (звичайні
+        # dictdate/idletasks не допомагають, перевірено). Прикріплюємо
+        # update_scroll_region як атрибут на самому list_frame - виклик
+        # напряму (без event, як звичайна функція) для КОДУ, що явно
+        # знищує власні дочірні віджети (напр. згортання рядка), не
+        # чекаючи на Configure, який може не прийти.
+        list_frame.refresh_scroll_region = update_scroll_region
         return list_frame
 
     def _clear_frame(self, frame):
@@ -5380,6 +5390,22 @@ class ExcelViewerApp:
                     chevron.configure(text="▸")
                     for child in content_holder.winfo_children():
                         child.destroy()
+                # Реальний баг (2026-08-19, знайдено користувачем): "2й
+                # клік - залишає місце зарезервованим під розгортання, але
+                # текст ховається" - Canvas-скрол (_create_scrollable_list)
+                # перераховує scrollregion на <Configure> `parent`
+                # (=history_list); те саме подія надійно долітає, коли
+                # контент РОСТЕ, але НЕ гарантовано долітає, коли він
+                # ЗМЕНШУЄТЬСЯ (перевірено окремо - навіть update_idletasks()
+                # не рятує) - лишався "мертвий" зарезервований прямокутник
+                # старого розміру. Викликаємо той самий перерахунок НАПРЯМУ
+                # (refresh_scroll_region, прикріплено на list_frame у
+                # _create_scrollable_list) в ОБОХ напрямках - і розгортання,
+                # і згортання - замість покладання на подію, яка може не
+                # прийти.
+                refresh = getattr(parent, "refresh_scroll_region", None)
+                if refresh:
+                    refresh()
 
             for clickable in (header, badge, version_label, summary_label, date_label, chevron):
                 clickable.bind("<Button-1>", toggle)
