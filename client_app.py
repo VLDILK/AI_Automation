@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.90"
+__version__ = "0.2.91"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1318,7 +1318,13 @@ class ClientApp(ctk.CTk):
             self._build_backup_empty_label("OneDrive не найден на этом компьютере.")
             self.backup_footer_label.configure(text="")
             return
-        online_dir = backups_root / "db_backups"
+        # Задача користувача (2026-08-19, "недайбог затягне бекап із
+        # тестової до користувача"): без окремої підтеки на машину цей
+        # список (і кнопка відновлення поруч із кожним рядком) показував
+        # би ВСІ знімки з усіх серверів упереміш - реальний ризик випадково
+        # відновити тестові дані на робочому ПК. Той самий platform.node(),
+        # що й у _mirror_backup_to_onedrive вище.
+        online_dir = backups_root / "db_backups" / (platform.node() or "unknown")
         online_files = sorted(
             online_dir.glob("app_data_*"), key=lambda path: path.stat().st_mtime, reverse=True,
         ) if online_dir.exists() else []
@@ -4498,11 +4504,23 @@ class ClientApp(ctk.CTk):
     # os.environ.get("OneDrive")) — той самий пошук, що вже виправлений
     # для "Открыть папку": ця машина має ДВІ теки OneDrive під одним
     # акаунтом (особисту й тенантну), голий env var вказував би не на ту.
+    # Задача користувача (2026-08-19): "випустимо оновлення для тестового
+    # серверу, що в нього інші папки зберігання бекап файлів" - усі сервери
+    # (основні й тестові) дзеркалили в ОДНУ спільну db_backups/excel_backups
+    # теку без жодного розрізнення - різні файли (мікросекундна мітка часу
+    # в імені не збігається), тож пряме перезаписування одне одного НЕ
+    # загрожувало, але (1) незрозуміло, чий саме це знімок, і (2) ліміт
+    # ротації (_ONEDRIVE_BACKUP_LIMIT=20) рахувався РАЗОМ на всі машини -
+    # частий тестовий сервер міг би виштовхнути старіші знімки продакшна
+    # швидше, ніж адмін очікує. Ім'я комп'ютера (той самий platform.node(),
+    # що вже й у servers_registry.py) - окрема підтека для кожної машини,
+    # і файли, і ротація тепер повністю ізольовані одна від одної.
     def _mirror_backup_to_onedrive(self, snapshot_path, subfolder, glob_pattern):
         backups_root = standard_menu_cloud.cloud_folder_path()
         if backups_root is None:
             return
-        target_dir = backups_root / subfolder
+        machine_name = platform.node() or "unknown"
+        target_dir = backups_root / subfolder / machine_name
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(snapshot_path, target_dir / Path(snapshot_path).name)
