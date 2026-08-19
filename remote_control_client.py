@@ -284,6 +284,40 @@ def save_standard_menu_to_cloud(timeout=10):
         return json.loads(response.read().decode("utf-8"))
 
 
+# Задача користувача (2026-08-19): "додай кнопку системні команди
+# чат-боту... галочки на ввімкнення... кнопка зберегти" - той самий None-
+# контракт, що вже й fetch_remote_payment_methods (мережа/сервер офлайн,
+# не "команд немає"); збереження - разовий POST усього словника одразу
+# (кнопка "Зберегти" в діалозі), не поштучні add/update/delete дії, як у
+# custom-button/payment-method-функціях вище - тут лише 4 фіксовані
+# перемикачі, множити маршрути не було потреби.
+def fetch_remote_system_commands(timeout=10):
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/system_commands",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    commands = data.get("commands")
+    return commands if isinstance(commands, dict) else None
+
+
+def save_remote_system_commands(commands, timeout=10):
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/system_commands_save",
+        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "commands": commands}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def set_remote_role(user_id, role, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/set_role",

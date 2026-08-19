@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.60"
+__version__ = "1.0.61"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1761,6 +1761,19 @@ class ExcelViewerApp:
         )
         request_mode_button.pack(anchor="n", fill="x", pady=(0, 12))
 
+        # Задача користувача (2026-08-19): "додай кнопку системні команди
+        # чат-боту... галочки на ввімкнення" - /status, /sheets, /first,
+        # /chatid (DEBUG_TOOLS-команди, telegram_dialog_core.py) - можна
+        # вимкнути поштучно, без зміни коду.
+        system_commands_button = tk.Button(
+            side_panel,
+            text=self._t("Системные команды чат-бота"),
+            width=20,
+            height=2,
+            command=self.open_system_commands_dialog,
+        )
+        system_commands_button.pack(anchor="n", fill="x", pady=(0, 12))
+
         # Задача користувача (2026-08-16): "сховай це поки і скрізь це
         # відключи це важливо" - кнопка "Таблиця Excel" (вибір локального/
         # онлайн джерела) прибрана з UI. Єдина точка виклику
@@ -3356,6 +3369,109 @@ class ExcelViewerApp:
         tk.Button(bottom, text=self._t("Отмена"), width=14, command=window.destroy).pack(side="right")
         window.bind("<Escape>", lambda event: window.destroy())
         self._center_window(window, width=820, height=500)
+
+    # Задача користувача (2026-08-19): "додай кнопку системні команди
+    # чат-боту... галочки на ввімкнення... кнопка зберегти яка закриває
+    # вікно і зберігає команди" - той самий read-then-write через
+    # remote_control_client, що вже й "Способи оплати"/редактор кнопок -
+    # домашня программа сама нічого не зберігає локально, лише тягне й
+    # штовхає стан client_app.py.
+    _SYSTEM_COMMANDS_INFO = (
+        ("status", "Статус базы", "Показывает количество листов и строк в кэше."),
+        ("sheets", "Список листов", "Показывает названия всех листов Excel."),
+        ("first", "Первые строки", "Показывает первые строки указанного листа (сырые данные)."),
+        ("chatid", "ID чата", "Показывает ID текущего чата или группы."),
+    )
+
+    def open_system_commands_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Системные команды чат-бота"))
+        window.geometry("620x440")
+        window.transient(self.root)
+        window.grab_set()
+
+        top = tk.Frame(window)
+        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        tk.Label(
+            top,
+            text=self._t("Системные команды чат-бота"),
+            font=("Segoe UI", 13, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            top,
+            text=self._t(
+                "Служебные команды бота (доступны только администратору). "
+                "Выключенную команду бот игнорирует, будто её не существует."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=560,
+            fg="#555555",
+        ).pack(anchor="w", pady=(4, 0))
+
+        body = tk.Frame(window)
+        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
+
+        loading_label = tk.Label(body, text=self._t("Загрузка..."), anchor="w")
+        loading_label.pack(anchor="w", pady=4)
+
+        checkbox_vars = {}
+
+        def build_rows(commands):
+            if not loading_label.winfo_exists():
+                return
+            loading_label.destroy()
+            for name, title, description in self._SYSTEM_COMMANDS_INFO:
+                row = tk.Frame(body, bd=1, relief="groove", padx=14, pady=10)
+                row.pack(fill="x", pady=5)
+                var = tk.BooleanVar(value=bool(commands.get(name, True)))
+                checkbox_vars[name] = var
+                tk.Checkbutton(
+                    row,
+                    variable=var,
+                    text=f"/{name} — {title}",
+                    anchor="w",
+                    font=("Segoe UI", 10, "bold"),
+                    width=22,
+                ).pack(side="left", anchor="n")
+                tk.Label(
+                    row,
+                    text=description,
+                    anchor="w",
+                    justify="left",
+                    wraplength=340,
+                    fg="#555555",
+                ).pack(side="left", fill="x", expand=True, padx=(18, 0))
+
+        def worker():
+            commands = remote_control_client.fetch_remote_system_commands() or {}
+            self._run_on_main_thread(lambda: build_rows(commands))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        bottom = tk.Frame(window)
+        bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
+
+        def save_and_close():
+            if not checkbox_vars:
+                window.destroy()
+                return
+            commands = {name: var.get() for name, var in checkbox_vars.items()}
+            try:
+                remote_control_client.save_remote_system_commands(commands)
+            except Exception as exc:
+                messagebox.showerror(
+                    self._t("Ошибка"),
+                    self._t("Не удалось сохранить: {value}").format(value=exc),
+                )
+                return
+            window.destroy()
+
+        tk.Button(bottom, text=self._t("Сохранить"), width=14, command=save_and_close).pack(side="right", padx=(8, 0))
+        tk.Button(bottom, text=self._t("Отмена"), width=14, command=window.destroy).pack(side="right")
+        window.bind("<Escape>", lambda event: window.destroy())
+        self._center_window(window, width=620, height=440)
 
     def open_display_format_dialog(self):
         window = tk.Toplevel(self.root)

@@ -142,6 +142,25 @@ class TelegramBotWorker(TelegramDialogMixin):
         mode = loaded.get("excel_sync_mode", DEFAULT_SETTINGS["excel_sync_mode"])
         return mode if mode in EXCEL_SYNC_MODES else DEFAULT_SETTINGS["excel_sync_mode"]
 
+    # Задача користувача (2026-08-19): "додай кнопку системні команди
+    # чат-боту... галочки на ввімкнення" - той самий "читай settings.json
+    # напряму щоразу" ідіом, що й _request_processing_mode/_excel_sync_mode
+    # вище (окремий короткочасний SettingsStore пише сюди з боку gui.py/
+    # client_app.py - жодного кешу тут не тримаємо, інакше вимкнення
+    # команди не подіяло б без перезапуску бота). Відсутній ключ/підключ =
+    # True (стара поведінка - усі 4 команди завжди були увімкнені) - вимкнути
+    # можна лише явно.
+    def _system_command_enabled(self, name):
+        try:
+            loaded = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        commands = loaded.get("bot_system_commands")
+        if not isinstance(commands, dict):
+            return True
+        value = commands.get(name)
+        return True if value is None else bool(value)
+
     # Задача користувача: "якщо простій в роботі 5-10 сек - тоді оновлюємо".
     _EXCEL_SYNC_IDLE_SECONDS = 8
     # "якщо немає вікна простою... і з моменту відліку пройшло 30 сек -

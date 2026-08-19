@@ -264,6 +264,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         if url_path == "/control/operations_tree":
             self._handle_remote_operations_tree(dict(parse_qsl(parsed.query)))
             return
+        if url_path == "/control/system_commands":
+            self._handle_remote_system_commands(dict(parse_qsl(parsed.query)))
+            return
         if self.get_form_content_enabled is not None and not self.get_form_content_enabled():
             self._send_form_disabled_page()
             return
@@ -329,7 +332,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         if self.path not in (
             "/api/template", "/control/command", "/control/heartbeat", "/control/set_role",
             "/control/custom_button_action", "/control/save_standard_menu_to_cloud",
-            "/control/payment_method_action",
+            "/control/payment_method_action", "/control/system_commands_save",
         ):
             self._send_json(404, {"ok": False, "error": "Не найдено."})
             return
@@ -373,6 +376,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/control/payment_method_action":
             self._handle_payment_method_action_request(payload)
+            return
+        if self.path == "/control/system_commands_save":
+            self._handle_system_commands_save_request(payload)
             return
         self._handle_template_action(payload)
 
@@ -688,6 +694,39 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             "fields": tree["fields"],
             "columns": tree["columns"],
         })
+
+    # Задача користувача (2026-08-19): "додай кнопку системні команди
+    # чат-боту... галочки на ввімкнення" - на відміну від custom_buttons/
+    # payment_methods (живуть у БД), увімкнено/вимкнено цих 4 службових
+    # команд - проста пара ключ/значення, тож зберігається прямо в
+    # settings.json (той самий короткочасний SettingsStore-на-запит
+    # принцип, що вже й update_low_stock_threshold нижче в цьому файлі) -
+    # main.py._system_command_enabled читає той самий файл наживо, без
+    # кешу, тож зміна діє одразу, без перезапуску бота.
+    _SYSTEM_COMMAND_NAMES = ("status", "sheets", "first", "chatid")
+
+    def _handle_remote_system_commands(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        settings_store = SettingsStore(paths.SETTINGS_PATH)
+        raw = settings_store.get("bot_system_commands")
+        commands = raw if isinstance(raw, dict) else {}
+        enabled = {name: bool(commands.get(name, True)) for name in self._SYSTEM_COMMAND_NAMES}
+        self._send_json(200, {"ok": True, "commands": enabled})
+
+    def _handle_system_commands_save_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        commands = payload.get("commands")
+        if not isinstance(commands, dict):
+            self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+            return
+        cleaned = {name: bool(commands.get(name, True)) for name in self._SYSTEM_COMMAND_NAMES}
+        settings_store = SettingsStore(paths.SETTINGS_PATH)
+        settings_store.set("bot_system_commands", cleaned)
+        self._send_json(200, {"ok": True})
 
     # Задача користувача (2026-08-16): "додай змогу редагувати ролі тут
     # теж. зміна ролі в мене - зміна ролі в клієнті" - на відміну від

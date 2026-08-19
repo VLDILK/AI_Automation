@@ -2323,7 +2323,12 @@ class CoreDialogMixin:
         if placeholder:
             return self._in_development_reply(placeholder, store)
 
-        if command in {"/status", "/sheets", "/first", "/chatid"}:
+        # Задача користувача (2026-08-19): "додай кнопку системні команди
+        # чат-боту... галочки на ввімкнення" - вимкнена команда обходить
+        # ЦЕЙ блок повністю (падає нижче, до звичайного "unknown"), а не
+        # показує відмову в доступі - вимкнення не про права, а про те, що
+        # адмін свідомо прибрав команду з бота.
+        if command in {"/status", "/sheets", "/first", "/chatid"} and self._system_command_enabled(command.lstrip("/")):
             # Реальний баг з аудиту: ці 3 службові команди зовсім не мали
             # перевірки прав, тож будь-який користувач (навіть без
             # призначеної ролі) міг через /first ПРОДАЖА МАТЕРИАЛА чи
@@ -2336,31 +2341,31 @@ class CoreDialogMixin:
             if denied:
                 return denied
 
-        # Задача користувача (2026-08-17): "де дістати chat_id групи?" -
-        # звичайний Telegram-клієнт ніде цей id не показує (свідомо
-        # прибрано з UI Telegram), а сторонні боти-утиліти (RawDataBot
-        # тощо) або не можна додати в групу, або пересилання приховане
-        # налаштуваннями приватності. Найнадійніший шлях - спитати
-        # ВЛАСНОГО бота, який уже сидить у групі: команди починаються з
-        # "/" і завжди доходять до бота незалежно від privacy mode.
-        if command == "/chatid":
-            return f"chat_id этого чата: {context['chat_id']}"
+            # Задача користувача (2026-08-17): "де дістати chat_id групи?" -
+            # звичайний Telegram-клієнт ніде цей id не показує (свідомо
+            # прибрано з UI Telegram), а сторонні боти-утиліти (RawDataBot
+            # тощо) або не можна додати в групу, або пересилання приховане
+            # налаштуваннями приватності. Найнадійніший шлях - спитати
+            # ВЛАСНОГО бота, який уже сидить у групі: команди починаються з
+            # "/" і завжди доходять до бота незалежно від privacy mode.
+            if command == "/chatid":
+                return f"chat_id этого чата: {context['chat_id']}"
 
-        if command == "/status":
-            sheet_names = store.sheet_names()
-            total_rows = sum(store.count_rows(sheet_name) for sheet_name in sheet_names)
-            return (
-                "SQLite-кеш готов.\n"
-                f"Листов: {len(sheet_names)}\n"
-                f"Строк: {total_rows}"
-            )
+            if command == "/status":
+                sheet_names = store.sheet_names()
+                total_rows = sum(store.count_rows(sheet_name) for sheet_name in sheet_names)
+                return (
+                    "SQLite-кеш готов.\n"
+                    f"Листов: {len(sheet_names)}\n"
+                    f"Строк: {total_rows}"
+                )
 
-        if command == "/sheets":
-            sheet_names = store.sheet_names()
-            return "Листы:\n" + "\n".join(f"- {name}" for name in sheet_names)
+            if command == "/sheets":
+                sheet_names = store.sheet_names()
+                return "Листы:\n" + "\n".join(f"- {name}" for name in sheet_names)
 
-        if command == "/first":
-            return self._first_rows_reply(argument, store)
+            if command == "/first":
+                return self._first_rows_reply(argument, store)
 
         command_code = store.find_command_code_in_text(text)
         if command_code == "stock_balance":
