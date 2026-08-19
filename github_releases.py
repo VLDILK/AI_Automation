@@ -104,7 +104,24 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
             raise RuntimeError(
                 f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже."
             ) from exc
-        raise RuntimeError(f"GitHub API {exc.code}: {detail[:300]}") from exc
+        # Реальна скарга (2026-08-19, живе тестування, скріншот): "так не
+        # має писати чіпуху різну при незрозумілій інформації" - сира JSON-
+        # відповідь GitHub (напр. 403 rate-limit: '{"message": "API rate
+        # limit exceeded for ..."}') потрапляла прямо в текст, який бачить
+        # звичайна людина. Розпізнаємо кілька реальних, частих випадків
+        # людською мовою; для решти - той самий чистий "тимчасово
+        # недоступний", а не сирий код+JSON.
+        remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
+        if exc.code == 403 and (remaining == "0" or "rate limit" in detail.lower()):
+            raise RuntimeError(
+                "Слишком много проверок подряд — GitHub временно ограничил запросы. "
+                "Попробуйте через несколько минут."
+            ) from exc
+        if exc.code == 401:
+            raise RuntimeError("GitHub не принял токен. Проверьте его и попробуйте снова.") from exc
+        if exc.code == 404:
+            raise RuntimeError("Запрошенные данные не найдены на GitHub.") from exc
+        raise RuntimeError(f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже.") from exc
     except Exception as exc:
         # Реальний баг (2026-08-16, живий продакшн, "поперше ніякої
         # Української в програмі, там ніхто її не розуміє"): усі
