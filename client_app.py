@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.76"
+__version__ = "0.2.77"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -388,6 +388,12 @@ class ClientApp(ctk.CTk):
         self._personnel_sort_reverse = False
         self._personnel_role_filter = None
         self.table_format_window = None
+        # Задача користувача (2026-08-19, третя редакція): "вона має
+        # спливаюче вікно відкривати з налаштуваннями" - той самий
+        # singleton-Toplevel принцип, що й backup_window/table_format_
+        # window тут же (замінює перший варіант - розгортання на місці
+        # у Настройках, який не відповідав очікуваному вигляду).
+        self.auto_update_window = None
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
         # ця (client_app.py) мають ОКРЕМІ бази - редактор кнопок у gui.py
         # ніяк не впливає на реального бота, бо gui.py більше не хостить
@@ -1415,25 +1421,33 @@ class ClientApp(ctk.CTk):
         )
         card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10)
         card.pack(fill="x", pady=(0, 16))
+        self._build_row_button(card, "refresh", "Автообновления", self._open_auto_update_window, first=True)
 
-        state = {"expanded": False, "panel": None}
+    # Задача користувача (2026-08-19, третя редакція): "не працює на
+    # клієнті кнопка. вона має спливаюче вікно відкривати з
+    # налаштуваннями" - перший варіант (розгортання панелі на місці,
+    # усередині Настроек) не відповідав очікуваному вигляду; замінено на
+    # той самий singleton-Toplevel принцип, що вже й backup_window/
+    # table_format_window/custom_buttons_window у цьому файлі.
+    def _open_auto_update_window(self):
+        if self.auto_update_window is not None and self.auto_update_window.winfo_exists():
+            self.auto_update_window.deiconify()
+            self.auto_update_window.lift()
+            self.auto_update_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Автообновления")
+        window.geometry("380x420")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.auto_update_window = window
 
-        def header_text(expanded):
-            return f"Автообновления  {'▾' if expanded else '▸'}"
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(top, text="Автообновления", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
 
-        def toggle_panel():
-            state["expanded"] = not state["expanded"]
-            header_button.configure(text=header_text(state["expanded"]))
-            if state["panel"] is not None:
-                state["panel"].destroy()
-                state["panel"] = None
-            if state["expanded"]:
-                panel = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10)
-                panel.pack(fill="x", pady=(0, 16))
-                state["panel"] = panel
-                self._render_auto_update_panel(panel)
-
-        header_button = self._build_row_button(card, "refresh", header_text(False), toggle_panel, first=True)
+        body = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(4, 16))
+        self._render_auto_update_panel(body)
 
     def _render_auto_update_panel(self, panel):
         inner = ctk.CTkFrame(panel, fg_color="transparent")
