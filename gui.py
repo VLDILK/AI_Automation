@@ -38,6 +38,7 @@ import permissions as perm
 import code_backup
 import config_backup
 import remote_control_client
+import servers_registry
 import standard_menu_cloud
 import update_check
 from i18n import DEFAULT_LANGUAGE, translate
@@ -70,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.67"
+__version__ = "1.0.68"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -534,6 +535,14 @@ class ExcelViewerApp:
         self.file_path = Path(file_path)
         self.db_path = DB_PATH
         self.settings = SettingsStore(SETTINGS_PATH)
+        # Задача користувача (2026-08-19): "щоб я міг перемикатись між
+        # цими серверами" - відновлює ОСТАННІЙ обраний сервер одразу на
+        # старті, до того, як хтось встигне відкрити Персонал/Редактор
+        # кнопок і випадково піти на дефолтний (основний) сервер замість
+        # того, що реально обирали минулого разу.
+        last_active_hostname = self.settings.get("active_remote_server_hostname")
+        if last_active_hostname:
+            remote_control_client.set_active_server(last_active_hostname)
         # display_settings мусить існувати ДО перших messagebox.showwarning
         # нижче - self._t() читає self.display_settings.get("language").
         self.display_settings = DisplaySettingsStore(DISPLAY_SETTINGS_PATH)
@@ -5032,39 +5041,22 @@ class ExcelViewerApp:
             diff_lines.append(self._t("… ще {value} рядків - diff занадто великий для перегляду тут").format(value=hidden))
         return commits_text, diff_lines, current_sha
 
-    # Задача користувача (2026-08-19): "потрібно бачити всі сервера що
-    # доступні. всі тестові які є, і якщо є, і всі не тестові які є" -
-    # раніше gui.py вмів говорити лише з ОДНИМ, зашитим у paths.py, сервером
-    # (fetch_remote_status). Тепер список серверів - у settings.json
-    # (remote_servers: [{name, hostname, kind}]), кожен опитується окремо
-    # через remote_control_client.fetch_remote_status_from(hostname) - той
-    # самий REMOTE_CONTROL_TOKEN підходить для будь-якого з них (спільний
-    # секрет, зашитий у код усіх зібраних client_app.py).
+    # Задача користувача (2026-08-19, друга редакція): "що за ручне
+    # налаштування? ...щоб автоматом бачив... і щоб я міг перемикатись між
+    # цими серверами, бачучи персонал і налаштування данного клієнта" -
+    # ручне "+ Додати сервер" прибрано повністю: кожен client_app.py сам
+    # вписує себе у спільний OneDrive-реєстр (servers_registry.py), тут
+    # лише читається. Клік по рядку - remote_control_client.set_active_
+    # server(hostname) - усі ІНШІ вкладки/діалоги (Персонал, Редактор
+    # кнопок, Способи оплати, Дії, Стандартне меню) вже автоматично йдуть
+    # на новообраний сервер, бо самі функції remote_control_client читають
+    # _BASE_URL "наживо" на кожен виклик.
     _SERVER_KIND_LABELS = {"main": "Основна", "test": "Тестова"}
-
-    def _read_remote_servers(self):
-        raw = self.settings.get("remote_servers")
-        if not isinstance(raw, list):
-            return []
-        cleaned = []
-        for entry in raw:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name") or "").strip()
-            hostname = str(entry.get("hostname") or "").strip()
-            if not name or not hostname:
-                continue
-            kind = entry.get("kind") if entry.get("kind") in ("main", "test") else "main"
-            cleaned.append({"name": name, "hostname": hostname, "kind": kind})
-        return cleaned
-
-    def _write_remote_servers(self, servers):
-        self.settings.set("remote_servers", servers)
 
     def open_servers_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Сервери"))
-        window.geometry("520x460")
+        window.geometry("520x420")
         window.transient(self.root)
         window.grab_set()
 
@@ -5073,8 +5065,11 @@ class ExcelViewerApp:
         tk.Label(top, text=self._t("Сервери"), font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
         tk.Label(
             top,
-            text=self._t("Усі відомі сервери client_app.py - основні й тестові."),
-            anchor="w", fg="#555555",
+            text=self._t(
+                "Сервери, що вже самі повідомили про себе - основні й тестові. "
+                "Клік по рядку - перемкнутись на нього (Персонал, Редактор кнопок і решта підуть за ним)."
+            ),
+            anchor="w", fg="#555555", justify="left", wraplength=480,
         ).pack(anchor="w", pady=(4, 0))
 
         header_row = tk.Frame(window)
@@ -5095,13 +5090,21 @@ class ExcelViewerApp:
         list_body.pack(side="top", fill="both", expand=True, padx=18, pady=(0, 4))
         servers_list = self._create_scrollable_list(list_body)
 
-        def make_server_row(parent, server, index, dot_var, version_var):
-            row = tk.Frame(parent, bd=1, relief="groove", padx=8, pady=6)
+        def make_server_row(parent, name, server, dot_var, version_var):
+            is_active = server["hostname"] == remote_control_client.active_hostname()
+            row = tk.Frame(
+                parent, bd=2 if is_active else 1, relief="solid" if is_active else "groove",
+                padx=8, pady=6, cursor="hand2",
+            )
             row.pack(fill="x", pady=3)
-            tk.Label(row, text=server["name"], anchor="w").pack(side="left", fill="x", expand=True)
+            name_label = tk.Label(
+                row, text=(f"✓ {name}" if is_active else name), anchor="w",
+                font=("Segoe UI", 10, "bold" if is_active else "normal"),
+            )
+            name_label.pack(side="left", fill="x", expand=True)
             is_test = server["kind"] == "test"
             badge = tk.Label(
-                row, text=self._t(self._SERVER_KIND_LABELS[server["kind"]]), font=("Segoe UI", 8),
+                row, text=self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основна")), font=("Segoe UI", 8),
                 bg="#fff8c5" if is_test else "#ddf4ff", fg="#9a6700" if is_test else "#0969da",
                 padx=6, pady=1,
             )
@@ -5110,11 +5113,20 @@ class ExcelViewerApp:
             dot.pack(side="left")
             tk.Label(row, textvariable=version_var, anchor="w", fg="#555555", width=9).pack(side="left")
 
+            def switch_to_this(event=None):
+                remote_control_client.set_active_server(server["hostname"])
+                self.settings.set("active_remote_server_hostname", server["hostname"])
+                refresh_list()
+
+            for clickable in (row, name_label):
+                clickable.bind("<Button-1>", switch_to_this)
+
             def delete_server():
-                servers = self._read_remote_servers()
-                if 0 <= index < len(servers):
-                    del servers[index]
-                    self._write_remote_servers(servers)
+                if not messagebox.askyesno(
+                    self._t("Сервери"), self._t("Прибрати «{value}» зі спільного списку?").format(value=name),
+                ):
+                    return
+                servers_registry.remove_server(name)
                 refresh_list()
 
             tk.Button(row, text="✕", command=delete_server, width=2).pack(side="left")
@@ -5137,73 +5149,46 @@ class ExcelViewerApp:
 
         def refresh_list():
             self._clear_frame(servers_list)
-            servers = self._read_remote_servers()
-            if not servers:
-                tk.Label(servers_list, text=self._t("Серверів ще немає.")).pack(anchor="w", pady=8)
+
+            def on_loaded(servers, generation):
+                if generation != refresh_list.generation:
+                    return
+                self._clear_frame(servers_list)
+                if not servers:
+                    tk.Label(
+                        servers_list,
+                        text=self._t("Серверів ще не видно. Кожен client_app.py сам зʼявляється тут протягом 2 хв після старту."),
+                        anchor="w", justify="left", wraplength=460,
+                    ).pack(anchor="w", pady=8)
+                    self._apply_theme(servers_list)
+                    return
+                rows_state = []
+                for name, server in sorted(servers.items()):
+                    dot_var = tk.StringVar(value="…")
+                    version_var = tk.StringVar(value="…")
+                    make_server_row(servers_list, name, server, dot_var, version_var)
+                    rows_state.append({"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var})
                 self._apply_theme(servers_list)
-                return
-            rows_state = []
-            for index, server in enumerate(servers):
-                dot_var = tk.StringVar(value="…")
-                version_var = tk.StringVar(value="…")
-                make_server_row(servers_list, server, index, dot_var, version_var)
-                rows_state.append({"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var})
-            self._apply_theme(servers_list)
-            refresh_statuses(rows_state)
+                refresh_statuses(rows_state)
+
+            refresh_list.generation = getattr(refresh_list, "generation", 0) + 1
+            generation = refresh_list.generation
+
+            def worker():
+                servers = servers_registry.read_servers()
+                self._run_on_main_thread(lambda: on_loaded(servers, generation))
+
+            threading.Thread(target=worker, daemon=True).start()
 
         bottom = tk.Frame(window)
         bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 16))
-
-        def open_add_server_dialog():
-            add_window = tk.Toplevel(window)
-            add_window.title(self._t("Додати сервер"))
-            add_window.geometry("360x260")
-            add_window.transient(window)
-            add_window.grab_set()
-
-            body = tk.Frame(add_window)
-            body.pack(fill="both", expand=True, padx=16, pady=16)
-
-            tk.Label(body, text=self._t("Имя:"), anchor="w").pack(anchor="w")
-            name_var = tk.StringVar()
-            tk.Entry(body, textvariable=name_var).pack(fill="x", pady=(2, 10))
-
-            tk.Label(body, text=self._t("Адрес (hostname, без https://):"), anchor="w").pack(anchor="w")
-            hostname_var = tk.StringVar()
-            tk.Entry(body, textvariable=hostname_var).pack(fill="x", pady=(2, 10))
-
-            tk.Label(body, text=self._t("Тип:"), anchor="w").pack(anchor="w")
-            kind_var = tk.StringVar(value="main")
-            kind_row = tk.Frame(body)
-            kind_row.pack(anchor="w", pady=(2, 10))
-            tk.Radiobutton(kind_row, text=self._t("Основна"), variable=kind_var, value="main").pack(side="left")
-            tk.Radiobutton(kind_row, text=self._t("Тестова"), variable=kind_var, value="test").pack(side="left")
-
-            def on_add():
-                name = name_var.get().strip()
-                hostname = hostname_var.get().strip()
-                if not name or not hostname:
-                    messagebox.showerror(self._t("Сервери"), self._t("Вкажіть ім'я і адресу сервера."))
-                    return
-                servers = self._read_remote_servers()
-                servers.append({"name": name, "hostname": hostname, "kind": kind_var.get()})
-                self._write_remote_servers(servers)
-                add_window.destroy()
-                refresh_list()
-
-            add_buttons = tk.Frame(body)
-            add_buttons.pack(side="bottom", fill="x", pady=(8, 0))
-            tk.Button(add_buttons, text=self._t("Додати"), command=on_add).pack(side="right")
-            tk.Button(add_buttons, text=self._t("Скасувати"), command=add_window.destroy).pack(side="right", padx=(0, 8))
-
-        tk.Button(bottom, text=self._t("+ Додати сервер"), command=open_add_server_dialog).pack(side="left")
-        tk.Button(bottom, text=self._t("Оновити"), command=refresh_list).pack(side="left", padx=(8, 0))
+        tk.Button(bottom, text=self._t("Оновити"), command=refresh_list).pack(side="left")
         tk.Button(bottom, text=self._t("Закрити"), command=window.destroy).pack(side="right")
 
         window.bind("<Escape>", lambda event: window.destroy())
         refresh_list()
         self._apply_theme(window)
-        self._center_window(window, width=520, height=460)
+        self._center_window(window, width=520, height=420)
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)

@@ -19,6 +19,15 @@ import urllib.request
 
 import paths
 
+# Задача користувача (2026-08-19): "щоб я міг перемикатись між цими
+# серверами, бачучи персонал і налаштування данного клієнта" - _BASE_URL
+# СВІДОМО модульна змінна, не константа: усі функції нижче (fetch_remote_*/
+# send_remote_command/set_remote_role/...) читають її "наживо" на кожен
+# виклик через звичайний пошук глобального імені в модулі, тож set_active_
+# server() одразу перемикає ВЕСЬ remote_control_client на іншу адресу,
+# без потреби чіпати кожну функцію окремо. За замовчуванням - той самий
+# єдиний, зашитий у paths.py, сервер, що й завжди був (жодної зміни
+# поведінки для тих, хто ще не обирав інший).
 _BASE_URL = f"https://{paths.CLOUDFLARED_TUNNEL_HOSTNAME}"
 # Cloudflare free-tier бот-захист блокує "generic" User-Agent (403) -
 # реальний браузер отримує 200, тож тут теж явно видаємо себе за нього.
@@ -28,6 +37,15 @@ _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # самого з'єднання) - на відміну від тіла POST чи заголовка, який туди не
 # логується. Переносимо в заголовок для всіх трьох GET-маршрутів нижче.
 _TOKEN_HEADER = "X-Remote-Control-Token"
+
+
+def set_active_server(hostname):
+    global _BASE_URL
+    _BASE_URL = f"https://{hostname}"
+
+
+def active_hostname():
+    return _BASE_URL[len("https://"):]
 
 
 def fetch_remote_status(timeout=10):

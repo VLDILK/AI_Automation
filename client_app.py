@@ -28,6 +28,7 @@ _open_personnel_window нижче, не заглушки.
 import atexit
 import json
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -56,6 +57,7 @@ import config_backup
 import excel_source
 import github_releases
 import permissions as perm
+import servers_registry
 import standard_menu_cloud
 import update_check
 from settings import SettingsStore
@@ -89,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.87"
+__version__ = "0.2.88"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -462,6 +464,13 @@ class ClientApp(ctk.CTk):
         # коли _bot_auto_manage увімкнено (перевіряється всередині тіку).
         self._bot_next_auto_check_at = time.monotonic() + self._BOT_AUTO_CHECK_INTERVAL_MS / 1000
         self.after(self._BOT_AUTO_CHECK_INTERVAL_MS, self._bot_auto_check_tick)
+        # Задача користувача (2026-08-19): "щоб автоматом бачив... і щоб я
+        # міг перемикатись між цими серверами" - кожен client_app.py сам
+        # вписує себе в спільний хмарний реєстр (servers_registry.py),
+        # gui.py лише читає його - жодного ручного вводу адреси. Файлові
+        # операції в фоновому потоці (best-effort, OneDrive може бути
+        # тимчасово недоступний - не має гальмувати запуск/головний потік).
+        self.after(2000, self._register_this_server_tick)
 
     # ---------- маршалінг фонових потоків на головний Tk-потік ----------
     def _run_on_main_thread(self, callback):
@@ -1014,6 +1023,26 @@ class ClientApp(ctk.CTk):
             if not bot_alive and not self._bot_stop_in_progress:
                 self._on_start_clicked()
         self.after(self._BOT_AUTO_CHECK_INTERVAL_MS, self._bot_auto_check_tick)
+
+    # Задача користувача (2026-08-19): "що за ручне налаштування?
+    # ...щоб автоматом бачив... і щоб я міг перемикатись між цими
+    # серверами" - раз на 2 хвилини (і одразу на старті) вписує себе у
+    # спільний OneDrive-реєстр (servers_registry.py), не чекаючи ручної
+    # дії. Файлова операція (best-effort, OneDrive може бути тимчасово
+    # недоступний) - фоновий потік, щоб не гальмувати головний Tk-потік.
+    _SERVER_REGISTRY_TICK_MS = 2 * 60 * 1000
+
+    def _register_this_server_tick(self):
+        def worker():
+            servers_registry.register_this_server(
+                name=platform.node() or "Неизвестный ПК",
+                hostname=paths.CLOUDFLARED_TUNNEL_HOSTNAME,
+                kind="test" if self.settings.get("update_channel") == "test" else "main",
+                version=__version__,
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(self._SERVER_REGISTRY_TICK_MS, self._register_this_server_tick)
 
     # Реальний баг (2026-08-15): "форма сама не хоче вмикатись, коли
     # просто галочку на вимкненій формі проставив, без ручного вмикання" -
