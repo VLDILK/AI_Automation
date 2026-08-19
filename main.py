@@ -88,6 +88,17 @@ class TelegramBotWorker(TelegramDialogMixin):
         self._excel_dirty_since = None
         self._excel_last_activity_at = None
         self._excel_sync_lock = threading.Lock()
+        # Реальний ризик (2026-08-19, живий продакшн, "боти взагалі мовчать
+        # на все"): _excel_sync_tick нижче раніше писав у Excel СИНХРОННО,
+        # прямо в цьому потоці, між ітераціями getUpdates - openpyxl.save()
+        # НЕ кидає винятку, якщо OneDrive/Excel тримає файл (просто чекає,
+        # доки звільниться), тож один "невдалий момент" (файл активно
+        # синхронізується чи відкритий) блокував увесь поллінг-цикл на
+        # невизначений час - бот виглядав "живим" (потік не помер,
+        # worker.thread.is_alive() і далі True), але переставав обробляти
+        # ЩОСЬ нове, доки хтось вручну не перезапускав програму. Нижче -
+        # непорожній лише поки триває фоновий запис (див. _excel_sync_tick).
+        self._excel_sync_thread = None
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -167,6 +178,11 @@ class TelegramBotWorker(TelegramDialogMixin):
     # оновлюється автоматично" - жорстка стеля, щоб безперервна робота не
     # відкладала запис нескінченно.
     _EXCEL_SYNC_MAX_WAIT_SECONDS = 30
+    # Реальний ризик (2026-08-19, живий продакшн): скільки поллінг-цикл готовий
+    # ЧЕКАТИ фоновий запис у Excel, перш ніж повернутись до getUpdates - сам
+    # запис (у власному потоці, нижче) може тривати й довше, просто цикл
+    # більше НЕ блокується разом із ним.
+    _EXCEL_SYNC_JOIN_TIMEOUT_SECONDS = 5
 
     # Викликається з apply_sale_operation/apply_income_operation/apply_
     # writeoff_operation/антисептування (warehouse_data.py) замість
@@ -194,12 +210,34 @@ class TelegramBotWorker(TelegramDialogMixin):
             return max(0.0, min(idle_deadline, max_deadline) - now)
 
     # Викликається раз на ітерацію поллінг-циклу (_run, нижче) - той самий
-    # store, що й решта цієї ітерації (той самий потік, тому спільне
-    # з'єднання SQLite безпечне - на відміну від client_app.py, де фонове
-    # оновлення Excel мусило відкривати ОКРЕМЕ з'єднання для свого потоку).
+    # store переданий сюди й ДОСІ використовується рештою _run для звичайних
+    # SQLite-читань/записів у ГОЛОВНОМУ потоці - сам запис у Excel нижче
+    # більше НЕ користується ним напряму (те з'єднання створене на цьому
+    # потоці, чіпати його з фонового - "SQLite objects created in a thread
+    # can only be used in that same thread"), тепер відкриває ВЛАСНЕ, окреме
+    # з'єднання - той самий прийом, що вже давно й у client_app.py
+    # (_on_refresh_excel_clicked).
+    #
+    # Реальний ризик (2026-08-19, живий продакшн, "боти взагалі мовчать на
+    # все"): раніше sync_sheets_to_excel/sync_antiseptic_to_excel виконувались
+    # СИНХРОННО прямо тут - openpyxl.save() НЕ кидає винятку, якщо файл
+    # зараз тримає OneDrive (активна синхронізація) чи сам Excel, а просто
+    # ЧЕКАЄ, доки звільниться - один "невдалий момент" блокував увесь
+    # поллінг-цикл (getUpdates теж) на невизначений час. Бот при цьому
+    # виглядав "живим" (worker.thread.is_alive() і далі True), просто
+    # переставав щось обробляти, доки хтось вручну не перезапускав програму.
+    # Тепер запис відбувається у ФОНОВОМУ потоці, а цей метод чекає щонайбільше
+    # _EXCEL_SYNC_JOIN_TIMEOUT_SECONDS і повертається - getUpdates наступної
+    # ітерації більше НЕ заручник того, скільки триває сам запис.
     def _excel_sync_tick(self, store):
         with self._excel_sync_lock:
             if not self._excel_dirty_sheets:
+                return
+            if self._excel_sync_thread is not None and self._excel_sync_thread.is_alive():
+                # Попередній фоновий запис ще не завершився - НЕ стартуємо
+                # другий паралельний запис у той самий файл (гонка/
+                # пошкодження), просто лишаємо поточні dirty-листи
+                # позначеними й спробуємо знову наступного тіку.
                 return
             now = time.monotonic()
             idle = now - self._excel_last_activity_at
@@ -210,25 +248,39 @@ class TelegramBotWorker(TelegramDialogMixin):
             self._excel_dirty_sheets.clear()
             self._excel_dirty_since = None
             self._excel_last_activity_at = None
-        # sync_antiseptic_to_excel пише ІНШУ логіку (шапка+підсумкові рядки),
-        # ніж загальний sync_sheets_to_excel - маркер веде до окремого шляху.
-        sync_antiseptic = ANTISEPTIC_DIRTY_MARKER in pending
-        sheets = [name for name in pending if name != ANTISEPTIC_DIRTY_MARKER]
-        failed = set()
-        if sheets:
+
+        def write_worker():
+            # sync_antiseptic_to_excel пише ІНШУ логіку (шапка+підсумкові
+            # рядки), ніж загальний sync_sheets_to_excel - маркер веде до
+            # окремого шляху.
+            sync_antiseptic = ANTISEPTIC_DIRTY_MARKER in pending
+            sheets = [name for name in pending if name != ANTISEPTIC_DIRTY_MARKER]
+            failed = set()
+            thread_store = ExcelSqliteStore(self.db_path)
             try:
-                sync_sheets_to_excel(store, sheets)
-            except (PermissionError, OSError, RuntimeError):
-                failed.update(sheets)
-        if sync_antiseptic:
-            try:
-                sync_antiseptic_to_excel(store)
-            except (PermissionError, OSError, RuntimeError):
-                failed.add(ANTISEPTIC_DIRTY_MARKER)
-        if failed:
-            # Не вдалось (файл відкритий тощо) - позначаємо знову брудним,
-            # спробуємо ще раз на наступному тіку (той самий 8с/30с цикл).
-            self.mark_excel_dirty(failed)
+                if sheets:
+                    try:
+                        sync_sheets_to_excel(thread_store, sheets)
+                    except (PermissionError, OSError, RuntimeError):
+                        failed.update(sheets)
+                if sync_antiseptic:
+                    try:
+                        sync_antiseptic_to_excel(thread_store)
+                    except (PermissionError, OSError, RuntimeError):
+                        failed.add(ANTISEPTIC_DIRTY_MARKER)
+            finally:
+                thread_store.close()
+            if failed:
+                # Не вдалось (файл відкритий тощо) - позначаємо знову
+                # брудним, спробуємо ще раз на наступному тіку (той самий
+                # 8с/30с цикл). mark_excel_dirty сам бере _excel_sync_lock -
+                # безпечно викликати з цього фонового потоку.
+                self.mark_excel_dirty(failed)
+
+        thread = threading.Thread(target=write_worker, daemon=True)
+        self._excel_sync_thread = thread
+        thread.start()
+        thread.join(timeout=self._EXCEL_SYNC_JOIN_TIMEOUT_SECONDS)
 
     # "якщо користувач оновив вручну - тоді таймер відліку скидається на
     # початок" - викликається з gui.py.sync_excel_manually після успішного
