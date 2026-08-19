@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.59"
+__version__ = "1.0.60"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5370,33 +5370,33 @@ class ExcelViewerApp:
             chevron = tk.Label(header, text="▸", width=2)
             chevron.pack(side="right")
 
-            content_holder = tk.Frame(entry_frame)
-            content_holder.pack(anchor="w", fill="x")
+            state = {"expanded": False, "holder": tk.Frame(entry_frame)}
+            state["holder"].pack(anchor="w", fill="x")
 
-            state = {"expanded": False}
-
+            # Реальний баг (2026-08-19, знайдено користувачем НАЖИВО, не
+            # лише в моєму пісочному середовищі без екрана): "2й клік -
+            # залишає місце зарезервованим... текст ховається". Перший
+            # фікс (виклик refresh_scroll_region напряму) НЕ спрацював -
+            # проблема глибша: Tk-Frame, який ОДНОГО РАЗУ отримав великих
+            # дітей (winfo_reqheight виріс), НЕ повертає reqheight назад
+            # до малого значення після їхнього destroy(), навіть коли
+            # canvas.bbox("all") перераховується напряму (перевірено
+            # окремо, без event - той самий результат). Тому замість
+            # ЗМЕНШЕННЯ існуючого content_holder - ЩОРАЗУ знищуємо його
+            # ПОВНІСТЮ і створюємо СВІЖИЙ порожній Frame: у нового Frame
+            # просто НЕМАЄ старого "запам'ятованого" розміру, тож
+            # проблема "не зменшується" не виникає в принципі.
             def toggle(event=None):
+                state["holder"].destroy()
                 state["expanded"] = not state["expanded"]
+                new_holder = tk.Frame(entry_frame)
+                new_holder.pack(anchor="w", fill="x")
+                state["holder"] = new_holder
                 if state["expanded"]:
                     chevron.configure(text="▾")
-                    render_history_notes(content_holder, entry["notes"])
+                    render_history_notes(new_holder, entry["notes"])
                 else:
                     chevron.configure(text="▸")
-                    for child in content_holder.winfo_children():
-                        child.destroy()
-                # Реальний баг (2026-08-19, знайдено користувачем): "2й
-                # клік - залишає місце зарезервованим під розгортання, але
-                # текст ховається" - Canvas-скрол (_create_scrollable_list)
-                # перераховує scrollregion на <Configure> `parent`
-                # (=history_list); те саме подія надійно долітає, коли
-                # контент РОСТЕ, але НЕ гарантовано долітає, коли він
-                # ЗМЕНШУЄТЬСЯ (перевірено окремо - навіть update_idletasks()
-                # не рятує) - лишався "мертвий" зарезервований прямокутник
-                # старого розміру. Викликаємо той самий перерахунок НАПРЯМУ
-                # (refresh_scroll_region, прикріплено на list_frame у
-                # _create_scrollable_list) в ОБОХ напрямках - і розгортання,
-                # і згортання - замість покладання на подію, яка може не
-                # прийти.
                 refresh = getattr(parent, "refresh_scroll_region", None)
                 if refresh:
                     refresh()
