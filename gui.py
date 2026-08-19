@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.69"
+__version__ = "1.0.70"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5051,7 +5051,9 @@ class ExcelViewerApp:
     # кнопок, Способи оплати, Дії, Стандартне меню) вже автоматично йдуть
     # на новообраний сервер, бо самі функції remote_control_client читають
     # _BASE_URL "наживо" на кожен виклик.
-    _SERVER_KIND_LABELS = {"main": "Основна", "test": "Тестова"}
+    # "сервер" - чоловічого роду, тому "Основний"/"Тестовий" (не
+    # "Основна"/"Тестова") - узгодження прикметника з іменником.
+    _SERVER_KIND_LABELS = {"main": "Основний", "test": "Тестовий"}
 
     # Реальна скарга (2026-08-19, живий скріншот): "поправ кнопки, не
     # видно... зроби як показував взагалі 1 в 1" - gui.py's тема (світла/
@@ -5141,7 +5143,7 @@ class ExcelViewerApp:
             name_label.pack(side="left", fill="x", expand=True)
             badge_bg, badge_fg = self._SRV_BADGE.get(server["kind"], self._SRV_BADGE["main"])
             badge = tk.Label(
-                row, text=self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основна")), font=("Segoe UI", 8),
+                row, text=self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний")), font=("Segoe UI", 8),
                 bg=badge_bg, fg=badge_fg, padx=6, pady=1,
             )
             badge.pack(side="left", padx=(0, 6))
