@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.85"
+__version__ = "0.2.86"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1817,7 +1817,7 @@ class ClientApp(ctk.CTk):
             return
         window = tk.Toplevel(self)
         window.title("Канал обновлений")
-        window.geometry("380x260")
+        window.geometry("380x420")
         window.configure(bg=self._tk_color(COLOR_BG))
         self.update_channel_window = window
 
@@ -1930,6 +1930,34 @@ class ClientApp(ctk.CTk):
             body, text="Тестовая", variable=channel_var, value="test",
             text_color=COLOR_TEXT, command=on_channel_changed,
         ).pack(anchor="w", padx=14, pady=(0, 14))
+
+        # Задача користувача (2026-08-19, "можливо зареєструватися варто
+        # якось?"): анонімні перевірки оновлень обмежені GitHub 60 запитами
+        # на годину НА IP - при частому тестуванні (кілька ботів + ручні
+        # перевірки + сама публікація підряд) цього не вистачає. Токен тут
+        # - опційний, лише ПІДВИЩУЄ ліміт до 5000/годину, жодних прав
+        # запису не потребує (дані релізів і так публічні) - тому підійде
+        # токен геть без прав ("no scope") чи з "public_repo". НЕ той самий
+        # токен, що й публікація в gui.py (той має право писати - роздавати
+        # його на клієнтські машини небезпечно).
+        ctk.CTkLabel(
+            window,
+            text=(
+                "GitHub-токен для проверок (необязательно) — поднимает лимит "
+                "с 60 до 5000 запросов в час. Без прав записи."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(16, 6))
+
+        token_var = ctk.StringVar(value=self.settings.get("github_read_token") or "")
+
+        def on_token_changed(*_args):
+            self.settings.set("github_read_token", token_var.get().strip())
+
+        token_entry = ctk.CTkEntry(window, textvariable=token_var, placeholder_text="ghp_...", show="•")
+        token_entry.pack(fill="x", padx=16, pady=(0, 16))
+        token_entry.bind("<FocusOut>", on_token_changed)
+        token_entry.bind("<Return>", on_token_changed)
 
     def _build_bot_settings_section(self, parent):
         ctk.CTkLabel(parent, text="Бот", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))
@@ -4229,6 +4257,7 @@ class ClientApp(ctk.CTk):
                 release = github_releases.get_latest_release(
                     paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, github_releases.CLIENT_TAG_PREFIX,
                     include_prerelease=(self.settings.get("update_channel") == "test"),
+                    token=self.settings.get("github_read_token") or None,
                 )
             except RuntimeError as exc:
                 release = None

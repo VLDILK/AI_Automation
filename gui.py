@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.65"
+__version__ = "1.0.66"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1119,6 +1119,7 @@ class ExcelViewerApp:
         if self._update_check_in_progress:
             return
         self._update_check_in_progress = True
+        publish_token = self._read_github_publish_token()
 
         def worker():
             # Задача користувача (2026-08-17): "оновлень не було. нічого не
@@ -1132,8 +1133,17 @@ class ExcelViewerApp:
             # текст помилки передається далі й показується окремо.
             check_error = None
             try:
+                # Задача користувача (2026-08-19, "можливо зареєструватися
+                # варто якось?"): анонімні перевірки обмежені 60/годину на
+                # IP - gui.py вже й так тримає PAT-токен для публікації
+                # (той самий, що вводиться на вкладці "Токен"), той самий
+                # токен підвищує ліміт і для звичайних GET-перевірок теж,
+                # без жодного нового поля вводу. Читається на ГОЛОВНОМУ
+                # потоці (Tk-змінні не для доступу з фонового worker нижче) -
+                # той самий принцип, що вже й token/client_version в "Публікація".
                 release = github_releases.get_latest_release(
                     paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, github_releases.GUI_TAG_PREFIX,
+                    token=publish_token or None,
                 )
             except RuntimeError as exc:
                 release = None

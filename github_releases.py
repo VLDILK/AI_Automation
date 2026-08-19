@@ -30,6 +30,20 @@ import uuid
 import zipfile
 from pathlib import Path
 
+# Реальний баг (2026-08-19, знайдено одразу після додавання людських
+# повідомлень про помилки вище): get_latest_release/list_recent_releases
+# розрізняли "404 - ще нема жодного релізу" і "401 - протухлий токен,
+# спробуй анонімно" через "404" in str(exc)/"401" in str(exc) - працювало,
+# доки текст помилки БУКВАЛЬНО МІСТИВ код (f"GitHub API {code}: {detail}").
+# Переклад цих текстів у людську мову (нижче) прибрав цифри з рядка -
+# перевірки мовчки перестали спрацьовувати. Код статусу тепер - окреме
+# поле винятку, не пошук підрядка у перекладеному для людини тексті.
+class GitHubApiError(RuntimeError):
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 API_ROOT = "https://api.github.com"
 _USER_AGENT = "AI-Automation-Updater"
 # Задача користувача (2026-08-16): "щоб домашня программа не заважала
@@ -101,8 +115,8 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
         # з "<" після урізання), тож перевіряємо обидва.
         content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
         if "html" in content_type.lower() or detail.lstrip().startswith("<"):
-            raise RuntimeError(
-                f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже."
+            raise GitHubApiError(
+                f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже.", status_code=exc.code,
             ) from exc
         # Реальна скарга (2026-08-19, живе тестування, скріншот): "так не
         # має писати чіпуху різну при незрозумілій інформації" - сира JSON-
@@ -113,14 +127,16 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
         # недоступний", а не сирий код+JSON.
         remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
         if exc.code == 403 and (remaining == "0" or "rate limit" in detail.lower()):
-            raise RuntimeError(
+            raise GitHubApiError(
                 "Слишком много проверок подряд — GitHub временно ограничил запросы. "
-                "Попробуйте через несколько минут."
+                "Попробуйте через несколько минут.", status_code=exc.code,
             ) from exc
         if exc.code == 401:
-            raise RuntimeError("GitHub не принял токен. Проверьте его и попробуйте снова.") from exc
+            raise GitHubApiError(
+                "GitHub не принял токен. Проверьте его и попробуйте снова.", status_code=exc.code,
+            ) from exc
         if exc.code == 404:
-            raise RuntimeError("Запрошенные данные не найдены на GitHub.") from exc
+            raise GitHubApiError("Запрошенные данные не найдены на GitHub.", status_code=exc.code) from exc
         # Реальна скарга (2026-08-19, живе тестування, скріншот): 422 -
         # GitHub ВІДХИЛИВ сам запит (не тимчасова недоступність сервера) -
         # "попробуйте позже" тут вводить в оману, повторна спроба з тими
@@ -131,11 +147,16 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
         # запит", ніж "недоступен".
         if exc.code == 422:
             if "already_exists" in detail or "already exists" in detail.lower():
-                raise RuntimeError(
-                    "Такая версия уже была опубликована ранее. Увеличьте номер версии и попробуйте снова."
+                raise GitHubApiError(
+                    "Такая версия уже была опубликована ранее. Увеличьте номер версии и попробуйте снова.",
+                    status_code=exc.code,
                 ) from exc
-            raise RuntimeError("GitHub отклонил запрос — проверьте введённые данные и попробуйте снова.") from exc
-        raise RuntimeError(f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже.") from exc
+            raise GitHubApiError(
+                "GitHub отклонил запрос — проверьте введённые данные и попробуйте снова.", status_code=exc.code,
+            ) from exc
+        raise GitHubApiError(
+            f"GitHub временно недоступен (ошибка {exc.code}), попробуйте позже.", status_code=exc.code,
+        ) from exc
     except Exception as exc:
         # Реальний баг (2026-08-16, живий продакшн, "поперше ніякої
         # Української в програмі, там ніхто її не розуміє"): усі
@@ -165,9 +186,9 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
         raise RuntimeError(f"GitHub вернул повреждённый ответ: {exc}") from exc
 
 
-# ---------- Перевірка/завантаження (публічне, БЕЗ токена - викликає client_app.py) ----------
+# ---------- Перевірка/завантаження (публічне, без токена працює завжди - викликає client_app.py) ----------
 
-def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeout=15):
+def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeout=15, token=None):
     """Список релізів (НЕ /releases/latest - див. коментар над
     CLIENT_TAG_PREFIX вище про чому) - повертає найновіший, чий тег
     підходить під tag_prefix. None, якщо релізів такого типу ще немає
@@ -199,17 +220,29 @@ def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeou
     релізів підряд без жодного нового gui) усі gui-релізи могли б повністю
     "випасти" за межі однієї сторінки - функція мовчки повернула б None
     ("оновлень немає"), хоча вони є. Тепер - повна пагінація (усі сторінки,
-    поки GitHub не поверне порожню) перед фільтрацією/сортуванням."""
+    поки GitHub не поверне порожню) перед фільтрацією/сортуванням.
+
+    token (2026-08-19, "може зареєструватися варто якось?"): опційний,
+    ЛИШЕ підвищує анонімний ліміт 60/годину на IP до 5000/годину - жодних
+    прав запису не потребує (реліз-дані й так публічні). БЕЗ токена
+    працює так само, як і завжди - client_app.py, у якого його немає, не
+    ламається. Протухлий/невалідний токен (401) - той самий "тихо
+    повторити анонімно" запобіжник, що вже й list_recent_releases."""
+    use_token = token
     releases = []
     page = 1
     while True:
         try:
             page_releases = _request(
-                f"{API_ROOT}/repos/{owner}/{repo}/releases?per_page=100&page={page}", timeout=timeout,
+                f"{API_ROOT}/repos/{owner}/{repo}/releases?per_page=100&page={page}",
+                token=use_token, timeout=timeout,
             )
-        except RuntimeError as exc:
-            if "404" in str(exc):
+        except GitHubApiError as exc:
+            if exc.status_code == 404:
                 return None
+            if use_token and page == 1 and exc.status_code == 401:
+                use_token = None
+                continue
             raise
         if not isinstance(page_releases, list) or not page_releases:
             break
@@ -271,10 +304,10 @@ def list_recent_releases(owner, repo, limit=15, timeout=15, token=None):
                 f"{API_ROOT}/repos/{owner}/{repo}/releases?per_page=100&page={page}",
                 token=use_token, timeout=timeout,
             )
-        except RuntimeError as exc:
-            if "404" in str(exc):
+        except GitHubApiError as exc:
+            if exc.status_code == 404:
                 return []
-            if use_token and page == 1 and "401" in str(exc):
+            if use_token and page == 1 and exc.status_code == 401:
                 use_token = None
                 continue
             raise
