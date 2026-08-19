@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.89"
+__version__ = "0.2.90"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1025,6 +1025,19 @@ class ClientApp(ctk.CTk):
                 self._on_start_clicked()
         self.after(self._BOT_AUTO_CHECK_INTERVAL_MS, self._bot_auto_check_tick)
 
+    # Задача користувача (2026-08-19): "дім слухає то одну програму то
+    # іншу" - кілька реальних серверів не можуть ділити ОДИН named tunnel
+    # (Cloudflare веде ім'я лише до останнього, хто підключився). Кожен
+    # окремий сервер тепер може мати ВЛАСНУ адресу - settings.json
+    # (cloudflared_tunnel_hostname), порожньо/відсутнє = стара поведінка
+    # (paths.CLOUDFLARED_TUNNEL_HOSTNAME, той самий спільний тунель, що й
+    # завжди був - нічого не ламається для тих, хто це ніколи не чіпав).
+    # Сам ID тунеля НЕ тут - paths.read_cloudflared_tunnel_id() читає його
+    # напряму з credentials-файлу цієї машини (той самий файл, що
+    # cloudflared і так вимагає).
+    def _cloudflared_tunnel_hostname(self):
+        return self.settings.get("cloudflared_tunnel_hostname") or paths.CLOUDFLARED_TUNNEL_HOSTNAME
+
     # Задача користувача (2026-08-19): "що за ручне налаштування?
     # ...щоб автоматом бачив... і щоб я міг перемикатись між цими
     # серверами" - раз на 2 хвилини (і одразу на старті) вписує себе у
@@ -1047,7 +1060,7 @@ class ClientApp(ctk.CTk):
             try:
                 ok = servers_registry.register_this_server(
                     name=platform.node() or "Неизвестный ПК",
-                    hostname=paths.CLOUDFLARED_TUNNEL_HOSTNAME,
+                    hostname=self._cloudflared_tunnel_hostname(),
                     kind="test" if self.settings.get("update_channel") == "test" else "main",
                     version=__version__,
                 )
@@ -1860,7 +1873,7 @@ class ClientApp(ctk.CTk):
             return
         window = tk.Toplevel(self)
         window.title("Канал обновлений")
-        window.geometry("380x420")
+        window.geometry("380x560")
         window.configure(bg=self._tk_color(COLOR_BG))
         self.update_channel_window = window
 
@@ -1999,6 +2012,33 @@ class ClientApp(ctk.CTk):
 
         token_entry = ctk.CTkEntry(window, textvariable=token_var, placeholder_text="ghp_...", show="•")
         token_entry.pack(fill="x", padx=16, pady=(0, 16))
+
+        # Задача користувача (2026-08-19): "дім слухає то одну програму то
+        # іншу" - кілька серверів не можуть ділити один named tunnel.
+        # Заповнюється РАЗОМ з установкою нового system/cloudflared_tunnel_
+        # credentials.json на цій конкретній машині (той самий одноразовий,
+        # ручний крок налаштування, що вже є для самого файлу credentials) -
+        # порожньо = стара поведінка, спільний тунель за замовчуванням.
+        ctk.CTkLabel(
+            window,
+            text=(
+                "Адрес тунеля этого сервера (необязательно) — заполняется вместе "
+                "с новым cloudflared_tunnel_credentials.json в system/. Пусто — общий адрес по умолчанию."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 6))
+
+        hostname_var = ctk.StringVar(value=self.settings.get("cloudflared_tunnel_hostname") or "")
+
+        def on_hostname_changed(*_args):
+            self.settings.set("cloudflared_tunnel_hostname", hostname_var.get().strip())
+
+        hostname_entry = ctk.CTkEntry(
+            window, textvariable=hostname_var, placeholder_text=paths.CLOUDFLARED_TUNNEL_HOSTNAME,
+        )
+        hostname_entry.pack(fill="x", padx=16, pady=(0, 16))
+        hostname_entry.bind("<FocusOut>", on_hostname_changed)
+        hostname_entry.bind("<Return>", on_hostname_changed)
         token_entry.bind("<FocusOut>", on_token_changed)
         token_entry.bind("<Return>", on_token_changed)
 
@@ -3789,7 +3829,7 @@ class ClientApp(ctk.CTk):
                             str(paths.CLOUDFLARED_EXE), "tunnel", "run",
                             "--credentials-file", str(paths.CLOUDFLARED_TUNNEL_CREDENTIALS_PATH),
                             "--url", f"http://localhost:{self.webapp_server.port}",
-                            paths.CLOUDFLARED_TUNNEL_ID,
+                            paths.read_cloudflared_tunnel_id(),
                         ],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
@@ -3823,7 +3863,7 @@ class ClientApp(ctk.CTk):
                     for line in process.stdout:
                         if "Registered tunnel connection" in line:
                             url_found = True
-                            hostname = paths.CLOUDFLARED_TUNNEL_HOSTNAME
+                            hostname = self._cloudflared_tunnel_hostname()
                             self._run_on_main_thread(
                                 lambda hostname=hostname: self._apply_webapp_public_url(f"https://{hostname}")
                             )

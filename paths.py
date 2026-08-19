@@ -5,6 +5,7 @@ main.py), імпортує потрібну константу звідси, а 
 
 import getpass
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -124,6 +125,26 @@ WEBAPP_LOCAL_PORT = 8765
 CLOUDFLARED_TUNNEL_ID = "85a0ec48-8db0-4e29-965c-232d838d9ea7"
 CLOUDFLARED_TUNNEL_HOSTNAME = "bot.botaiautomationeu.trade"
 CLOUDFLARED_TUNNEL_CREDENTIALS_PATH = SYSTEM_DIR / "cloudflared_tunnel_credentials.json"
+
+
+# Задача користувача (2026-08-19): "дім слухає то одну програму то іншу" -
+# кілька реальних серверів НЕ можуть ділити один тунель (Cloudflare веде
+# ім'я лише до ОДНОГО активного з'єднання, хто останній підключився - той
+# і відповідає). Кожен окремий сервер тепер отримує ВЛАСНИЙ named tunnel
+# (свій credentials-файл у system/, своя адреса) - CLOUDFLARED_TUNNEL_ID
+# вище лишається лише запасним значенням ДЛЯ ЦІЄЇ (розробницької) машини;
+# реальний ID тунеля читається напряму з credentials-файлу, що фізично
+# лежить на кожній конкретній машині - той самий файл, що cloudflared й
+# так вимагає для --credentials-file, тож нового поля вводу для ID не треба.
+def read_cloudflared_tunnel_id():
+    try:
+        data = json.loads(CLOUDFLARED_TUNNEL_CREDENTIALS_PATH.read_text(encoding="utf-8"))
+        tunnel_id = data.get("TunnelID")
+        if tunnel_id:
+            return tunnel_id
+    except (OSError, ValueError):
+        pass
+    return CLOUDFLARED_TUNNEL_ID
 
 # Задача користувача (2026-08-16): "щоб не в момент увімкненого серверу це
 # було... клієнт вимкнений, вранці увімкнув - отримав оновлення" - push через
