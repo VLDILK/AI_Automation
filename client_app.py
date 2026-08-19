@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.74"
+__version__ = "0.2.75"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -917,7 +917,6 @@ class ClientApp(ctk.CTk):
         ])
 
         self._build_settings_section(parent, "Форма", [
-            ("clock", "Дата и время", lambda: self._show_stub_message("Дата и время")),
             ("save", "Резервные копии Excel", self._open_backup_window),
         ])
 
@@ -1676,9 +1675,6 @@ class ClientApp(ctk.CTk):
         self.settings.set("excel_source_mode", "local")
         self.settings.set("excel_local_path", selected_file)
         self._open_settings_screen()
-
-    def _show_stub_message(self, title):
-        messagebox.showinfo("AI Automation", f"«{title}» ещё не перенесено в эту программу.")
 
     # Задача користувача (2026-08-14): "давай зробимо той екран
     # редагування формату" - макет "1. Розділений вигляд" (прев'ю зліва,
