@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.73"
+__version__ = "0.2.74"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -387,7 +387,6 @@ class ClientApp(ctk.CTk):
         self._personnel_sort_field = None
         self._personnel_sort_reverse = False
         self._personnel_role_filter = None
-        self.excel_sync_timer_window = None
         self.table_format_window = None
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
         # ця (client_app.py) мають ОКРЕМІ бази - редактор кнопок у gui.py
@@ -1565,8 +1564,6 @@ class ClientApp(ctk.CTk):
         # _excel_refresh_in_progress все одно захищає від подвійного
         # запуску незалежно від того, яку з двох кнопок натиснули.
         self._build_row_button(card, "refresh", "Обновить эксели", self._on_refresh_excel_clicked)
-        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
-        self._build_row_button(card, "clock", "Просмотр таймеров", self._open_timers_window)
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
 
@@ -1682,125 +1679,6 @@ class ClientApp(ctk.CTk):
 
     def _show_stub_message(self, title):
         messagebox.showinfo("AI Automation", f"«{title}» ещё не перенесено в эту программу.")
-
-    # Задача користувача (2026-08-13): "секунди відліку... реальну цифру
-    # маю бачити вживу"... "не потрібні такі цифри гігантські. просто
-    # назва, біля назви час. назва, статус поруч кольоровий" - два реальних
-    # таймери, що вже є в коді (форма - _webapp_next_check_seconds_
-    # remaining; таблиця Excel - TelegramBotWorker.excel_sync_seconds_
-    # remaining), компактним рядком кожен: кольорова крапка + назва + час,
-    # опитується раз в секунду - живий відлік, не вигаданий.
-    # Реальний баг (2026-08-13): "таймери не бачать реального статусу
-    # форми" - раніше крапка й текст були ОДНИМ джерелом (стан розкладу
-    # автоперевірки), тож форма, яка реально підключена, але з вимкненим
-    # "Автовключение" (немає запланованої перевірки), показувала сіру
-    # крапку - виглядало як "форма вимкнена", хоча насправді вона жива.
-    # Тепер крапка - РЕАЛЬНИЙ поточний стан з'єднання (той самий сигнал,
-    # що й _refresh_webapp_status_text на головному екрані), текст -
-    # ЧЕСНО про розклад (є відлік чи нема, і чому) - обидва правдиві
-    # одночасно, нічого не вигадується про жодне з двох.
-    def _forma_connection_dot(self):
-        tunnel_alive = self.cloudflared_process is not None and self.cloudflared_process.poll() is None
-        if tunnel_alive and self.webapp_public_url:
-            return COLOR_ON
-        if tunnel_alive or self._webapp_tunnel_starting:
-            return COLOR_WARN
-        return COLOR_OFF
-
-    def _forma_timer_state(self):
-        worker = self.telegram_worker
-        if not (worker and worker.thread and worker.thread.is_alive()):
-            return self._forma_connection_dot(), "бот не запущен"
-        if not self._webapp_auto_manage:
-            return self._forma_connection_dot(), "авто выкл."
-        if not self._webapp_should_run:
-            return self._forma_connection_dot(), "форма выкл."
-        remaining = self._webapp_next_check_seconds_remaining()
-        if remaining is None:
-            return self._forma_connection_dot(), "—"
-        return self._forma_connection_dot(), f"{int(remaining) + 1 if remaining > 0 else 0} сек"
-
-    def _excel_timer_state(self):
-        worker = self.telegram_worker
-        if not (worker and worker.thread and worker.thread.is_alive()):
-            return COLOR_OFF, "бот не запущен"
-        remaining = worker.excel_sync_seconds_remaining()
-        if remaining is None:
-            return COLOR_OFF, "нет изменений"
-        return COLOR_WARN, f"{int(remaining) + 1 if remaining > 0 else 0} сек"
-
-    # Задача користувача: "теймер [бота] теж виведи" - новий 60с таймер,
-    # той самий принцип, що й у форми/excel вище (крапка - реальне
-    # з'єднання, текст - чесно про розклад автоперевірки).
-    def _bot_timer_state(self):
-        worker = self.telegram_worker
-        bot_alive = bool(worker and worker.thread and worker.thread.is_alive())
-        dot = COLOR_ON if bot_alive else COLOR_OFF
-        if not self._bot_auto_manage:
-            return dot, "авто выкл."
-        if self._bot_next_auto_check_at is None:
-            return dot, "—"
-        remaining = max(0.0, self._bot_next_auto_check_at - time.monotonic())
-        return dot, f"{int(remaining) + 1 if remaining > 0 else 0} сек"
-
-    def _build_timer_row(self, parent, label_text, first=False):
-        row = tk.Frame(parent, bg=self._tk_color(COLOR_ROW))
-        row.pack(fill="x", pady=(0, 1))
-        left = tk.Frame(row, bg=self._tk_color(COLOR_ROW))
-        left.pack(side="left", padx=12, pady=10)
-        dot = tk.Frame(left, width=7, height=7, bg=self._tk_color(COLOR_OFF))
-        dot.pack(side="left", padx=(0, 7))
-        tk.Label(
-            left, text=label_text, font=("Segoe UI", 10),
-            fg=self._tk_color(COLOR_TEXT), bg=self._tk_color(COLOR_ROW),
-        ).pack(side="left")
-        value = tk.Label(
-            row, text="—", font=("Segoe UI", 10, "bold"),
-            fg=self._tk_color(COLOR_TEXT), bg=self._tk_color(COLOR_ROW),
-        )
-        value.pack(side="right", padx=12, pady=10)
-        return dot, value
-
-    def _open_timers_window(self):
-        if self.excel_sync_timer_window is not None and self.excel_sync_timer_window.winfo_exists():
-            self.excel_sync_timer_window.deiconify()
-            self.excel_sync_timer_window.lift()
-            self.excel_sync_timer_window.focus_force()
-            return
-        window = tk.Toplevel(self)
-        window.title("Просмотр таймеров")
-        window.geometry("400x195")
-        window.configure(bg=self._tk_color(COLOR_BG))
-        window.resizable(False, False)
-        self.excel_sync_timer_window = window
-
-        tk.Label(
-            window, text="Просмотр таймеров", font=("Segoe UI", 12, "bold"),
-            fg=self._tk_color(COLOR_TEXT), bg=self._tk_color(COLOR_BG),
-        ).pack(anchor="w", padx=12, pady=(12, 8))
-
-        bot_dot, bot_value = self._build_timer_row(window, "Телеграм-Бот — следующая проверка")
-        tk.Frame(window, height=1, bg=self._tk_color(COLOR_DIVIDER)).pack(fill="x", padx=12)
-        forma_dot, forma_value = self._build_timer_row(window, "Форма — следующая проверка")
-        tk.Frame(window, height=1, bg=self._tk_color(COLOR_DIVIDER)).pack(fill="x", padx=12)
-        excel_dot, excel_value = self._build_timer_row(window, "Таблица Excel — обновление")
-
-        def tick():
-            if not window.winfo_exists():
-                return
-            bot_color, bot_text = self._bot_timer_state()
-            bot_dot.configure(bg=self._tk_color(bot_color) if isinstance(bot_color, tuple) else bot_color)
-            bot_value.configure(text=bot_text)
-            forma_color, forma_text = self._forma_timer_state()
-            forma_dot.configure(bg=self._tk_color(forma_color) if isinstance(forma_color, tuple) else forma_color)
-            forma_value.configure(text=forma_text)
-            excel_color, excel_text = self._excel_timer_state()
-            excel_dot.configure(bg=self._tk_color(excel_color) if isinstance(excel_color, tuple) else excel_color)
-            excel_value.configure(text=excel_text)
-            window.after(1000, tick)
-
-        tick()
-        window.protocol("WM_DELETE_WINDOW", window.destroy)
 
     # Задача користувача (2026-08-14): "давай зробимо той екран
     # редагування формату" - макет "1. Розділений вигляд" (прев'ю зліва,
@@ -3708,30 +3586,6 @@ class ClientApp(ctk.CTk):
         # Tk-потоку - простий float-присвоєння, той самий рівень безпеки,
         # що вже й cloudflared_process/webapp_public_url тут (без locку).
         self._last_home_heartbeat_at = time.monotonic()
-
-    # None = таймер зараз ні до чого не веде (бот/форма вимкнені, або
-    # автоматика форми вимкнена галочкою) - той самий контракт, що й
-    # TelegramBotWorker.excel_sync_seconds_remaining().
-    def _webapp_next_check_seconds_remaining(self):
-        if not self._webapp_should_run or not self._webapp_auto_manage:
-            return None
-        # Задача користувача (2026-08-15): "таймер перевірки форми
-        # починається ще до того як сама форма запуститься" - реальний
-        # привід: _webapp_next_watchdog_tick_at - це наступний тік
-        # ЗОВСІМ ІНШОГО, періодичного health-check циклу (кожні 30с), що
-        # рахується від моменту запуску програми, а не від моменту, коли
-        # бот підключився. Поки діє явний 5с відклад ПЕРЕД самим
-        # запуском форми (_webapp_not_before, див. _handle_bot_status_
-        # update), таймер має показувати ЙОГО, а не випадковий залишок
-        # до наступного health-check тіку - інакше цифра на екрані ніяк
-        # не пов'язана з тим, коли форма реально стартує.
-        if self._webapp_not_before is not None:
-            not_before_remaining = self._webapp_not_before - time.monotonic()
-            if not_before_remaining > 0:
-                return not_before_remaining
-        if self._webapp_next_watchdog_tick_at is None:
-            return None
-        return max(0.0, self._webapp_next_watchdog_tick_at - time.monotonic())
 
     def _sleep_interruptible(self, seconds):
         deadline = time.monotonic() + seconds
