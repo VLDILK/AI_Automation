@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.66"
+__version__ = "1.0.67"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1044,6 +1044,18 @@ class ExcelViewerApp:
             command=self.open_publish_updates_dialog,
         )
         publish_updates_button.pack(pady=8)
+
+        # Задача користувача (2026-08-19): "потрібно бачити всі сервера що
+        # доступні. всі тестові... і всі не тестові" - той самий "головне
+        # меню, спливаюче вікно" підхід, що й "Публікація оновлень" вище.
+        servers_button = tk.Button(
+            menu_panel,
+            text=self._t("Сервери"),
+            width=28,
+            height=2,
+            command=self.open_servers_dialog,
+        )
+        servers_button.pack(pady=8)
 
         exit_button = tk.Button(
             menu_panel,
@@ -5019,6 +5031,179 @@ class ExcelViewerApp:
             diff_lines = diff_lines[: self._DIFF_HARD_CAP]
             diff_lines.append(self._t("… ще {value} рядків - diff занадто великий для перегляду тут").format(value=hidden))
         return commits_text, diff_lines, current_sha
+
+    # Задача користувача (2026-08-19): "потрібно бачити всі сервера що
+    # доступні. всі тестові які є, і якщо є, і всі не тестові які є" -
+    # раніше gui.py вмів говорити лише з ОДНИМ, зашитим у paths.py, сервером
+    # (fetch_remote_status). Тепер список серверів - у settings.json
+    # (remote_servers: [{name, hostname, kind}]), кожен опитується окремо
+    # через remote_control_client.fetch_remote_status_from(hostname) - той
+    # самий REMOTE_CONTROL_TOKEN підходить для будь-якого з них (спільний
+    # секрет, зашитий у код усіх зібраних client_app.py).
+    _SERVER_KIND_LABELS = {"main": "Основна", "test": "Тестова"}
+
+    def _read_remote_servers(self):
+        raw = self.settings.get("remote_servers")
+        if not isinstance(raw, list):
+            return []
+        cleaned = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            hostname = str(entry.get("hostname") or "").strip()
+            if not name or not hostname:
+                continue
+            kind = entry.get("kind") if entry.get("kind") in ("main", "test") else "main"
+            cleaned.append({"name": name, "hostname": hostname, "kind": kind})
+        return cleaned
+
+    def _write_remote_servers(self, servers):
+        self.settings.set("remote_servers", servers)
+
+    def open_servers_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Сервери"))
+        window.geometry("520x460")
+        window.transient(self.root)
+        window.grab_set()
+
+        top = tk.Frame(window)
+        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        tk.Label(top, text=self._t("Сервери"), font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(
+            top,
+            text=self._t("Усі відомі сервери client_app.py - основні й тестові."),
+            anchor="w", fg="#555555",
+        ).pack(anchor="w", pady=(4, 0))
+
+        header_row = tk.Frame(window)
+        header_row.pack(fill="x", padx=18, pady=(8, 2))
+        tk.Label(header_row, text=self._t("Имя"), anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(
+            side="left", fill="x", expand=True
+        )
+        tk.Label(header_row, text=self._t("Тип"), width=9, anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(
+            side="left"
+        )
+        tk.Label(header_row, text="●", width=2, anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(header_row, text=self._t("Версия"), width=9, anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(
+            side="left"
+        )
+        tk.Label(header_row, text="", width=2).pack(side="left")
+
+        list_body = tk.Frame(window)
+        list_body.pack(side="top", fill="both", expand=True, padx=18, pady=(0, 4))
+        servers_list = self._create_scrollable_list(list_body)
+
+        def make_server_row(parent, server, index, dot_var, version_var):
+            row = tk.Frame(parent, bd=1, relief="groove", padx=8, pady=6)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=server["name"], anchor="w").pack(side="left", fill="x", expand=True)
+            is_test = server["kind"] == "test"
+            badge = tk.Label(
+                row, text=self._t(self._SERVER_KIND_LABELS[server["kind"]]), font=("Segoe UI", 8),
+                bg="#fff8c5" if is_test else "#ddf4ff", fg="#9a6700" if is_test else "#0969da",
+                padx=6, pady=1,
+            )
+            badge.pack(side="left", padx=(0, 4))
+            dot = tk.Label(row, textvariable=dot_var, font=("Segoe UI", 10), fg="#8c959f", width=2)
+            dot.pack(side="left")
+            tk.Label(row, textvariable=version_var, anchor="w", fg="#555555", width=9).pack(side="left")
+
+            def delete_server():
+                servers = self._read_remote_servers()
+                if 0 <= index < len(servers):
+                    del servers[index]
+                    self._write_remote_servers(servers)
+                refresh_list()
+
+            tk.Button(row, text="✕", command=delete_server, width=2).pack(side="left")
+            return row
+
+        def refresh_statuses(rows_state):
+            def worker():
+                for state in rows_state:
+                    status = remote_control_client.fetch_remote_status_from(state["hostname"])
+                    def apply(state=state, status=status):
+                        if status is None:
+                            state["dot_var"].set("○")
+                            state["version_var"].set(self._t("нет связи"))
+                        else:
+                            state["dot_var"].set("●")
+                            state["version_var"].set(status.get("version") or "?")
+                    self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def refresh_list():
+            self._clear_frame(servers_list)
+            servers = self._read_remote_servers()
+            if not servers:
+                tk.Label(servers_list, text=self._t("Серверів ще немає.")).pack(anchor="w", pady=8)
+                self._apply_theme(servers_list)
+                return
+            rows_state = []
+            for index, server in enumerate(servers):
+                dot_var = tk.StringVar(value="…")
+                version_var = tk.StringVar(value="…")
+                make_server_row(servers_list, server, index, dot_var, version_var)
+                rows_state.append({"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var})
+            self._apply_theme(servers_list)
+            refresh_statuses(rows_state)
+
+        bottom = tk.Frame(window)
+        bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 16))
+
+        def open_add_server_dialog():
+            add_window = tk.Toplevel(window)
+            add_window.title(self._t("Додати сервер"))
+            add_window.geometry("360x260")
+            add_window.transient(window)
+            add_window.grab_set()
+
+            body = tk.Frame(add_window)
+            body.pack(fill="both", expand=True, padx=16, pady=16)
+
+            tk.Label(body, text=self._t("Имя:"), anchor="w").pack(anchor="w")
+            name_var = tk.StringVar()
+            tk.Entry(body, textvariable=name_var).pack(fill="x", pady=(2, 10))
+
+            tk.Label(body, text=self._t("Адрес (hostname, без https://):"), anchor="w").pack(anchor="w")
+            hostname_var = tk.StringVar()
+            tk.Entry(body, textvariable=hostname_var).pack(fill="x", pady=(2, 10))
+
+            tk.Label(body, text=self._t("Тип:"), anchor="w").pack(anchor="w")
+            kind_var = tk.StringVar(value="main")
+            kind_row = tk.Frame(body)
+            kind_row.pack(anchor="w", pady=(2, 10))
+            tk.Radiobutton(kind_row, text=self._t("Основна"), variable=kind_var, value="main").pack(side="left")
+            tk.Radiobutton(kind_row, text=self._t("Тестова"), variable=kind_var, value="test").pack(side="left")
+
+            def on_add():
+                name = name_var.get().strip()
+                hostname = hostname_var.get().strip()
+                if not name or not hostname:
+                    messagebox.showerror(self._t("Сервери"), self._t("Вкажіть ім'я і адресу сервера."))
+                    return
+                servers = self._read_remote_servers()
+                servers.append({"name": name, "hostname": hostname, "kind": kind_var.get()})
+                self._write_remote_servers(servers)
+                add_window.destroy()
+                refresh_list()
+
+            add_buttons = tk.Frame(body)
+            add_buttons.pack(side="bottom", fill="x", pady=(8, 0))
+            tk.Button(add_buttons, text=self._t("Додати"), command=on_add).pack(side="right")
+            tk.Button(add_buttons, text=self._t("Скасувати"), command=add_window.destroy).pack(side="right", padx=(0, 8))
+
+        tk.Button(bottom, text=self._t("+ Додати сервер"), command=open_add_server_dialog).pack(side="left")
+        tk.Button(bottom, text=self._t("Оновити"), command=refresh_list).pack(side="left", padx=(8, 0))
+        tk.Button(bottom, text=self._t("Закрити"), command=window.destroy).pack(side="right")
+
+        window.bind("<Escape>", lambda event: window.destroy())
+        refresh_list()
+        self._apply_theme(window)
+        self._center_window(window, width=520, height=460)
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)

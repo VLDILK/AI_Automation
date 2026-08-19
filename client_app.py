@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.86"
+__version__ = "0.2.87"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -3919,6 +3919,11 @@ class ClientApp(ctk.CTk):
             "bot_alive": bot_alive,
             "webapp_alive": bool(tunnel_alive and self.webapp_public_url and self._webapp_content_enabled),
             "webapp_public_url": self.webapp_public_url,
+            # Задача користувача (2026-08-19): "потрібно бачити всі сервера
+            # що доступні" - попап "Сервери" (gui.py) показує версію й канал
+            # оновлень КОЖНОГО сервера, не лише того єдиного, що був раніше.
+            "version": __version__,
+            "update_channel": "test" if self.settings.get("update_channel") == "test" else "stable",
         }
 
     # Те саме джерело правди, що вже мають кнопки в самому інтерфейсі

@@ -50,6 +50,31 @@ def fetch_remote_status(timeout=10):
     return status if isinstance(status, dict) else None
 
 
+# Задача користувача (2026-08-19): "потрібно бачити всі сервера що
+# доступні... всі тестові... і всі не тестові" - раніше gui.py вмів
+# говорити лише з ОДНИМ, зашитим у paths.py, сервером. Кожен реальний
+# сервер (окремий ПК, окремий client_app.py + cloudflared) має ВЛАСНУ
+# адресу тунелю, але ВСІ вони зібрані з цього самого репозиторію - той
+# самий paths.REMOTE_CONTROL_TOKEN (спільний секрет, зашитий у код) працює
+# з будь-яким із них, окремий токен на сервер не потрібен. Той самий
+# None-контракт, що й fetch_remote_status - лише інший hostname замість
+# фіксованого paths.CLOUDFLARED_TUNNEL_HOSTNAME.
+def fetch_remote_status_from(hostname, timeout=10):
+    request = urllib.request.Request(
+        f"https://{hostname}/control/status",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    status = data.get("status")
+    return status if isinstance(status, dict) else None
+
+
 def fetch_remote_personnel(timeout=10):
     """None означає "не вдалось отримати" (мережевий збій, сервер офлайн) -
     той самий контракт, що й fetch_remote_status: викликач (gui.py) сам
