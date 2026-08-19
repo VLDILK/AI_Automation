@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.88"
+__version__ = "0.2.89"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -398,6 +398,7 @@ class ClientApp(ctk.CTk):
         self.auto_update_window = None
         self.update_channel_window = None
         self.main_title_style_window = None
+        self._last_registry_error = "ещё не пытался"
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
         # ця (client_app.py) мають ОКРЕМІ бази - редактор кнопок у gui.py
         # ніяк не впливає на реального бота, бо gui.py більше не хостить
@@ -1033,13 +1034,26 @@ class ClientApp(ctk.CTk):
     _SERVER_REGISTRY_TICK_MS = 2 * 60 * 1000
 
     def _register_this_server_tick(self):
+        # Реальний баг (2026-08-19, живий продакшн): "0.2.88 давно чекає,
+        # а в Сервери порожньо" - register_this_server() підтверджено
+        # працює правильно в ізоляції (ручний тест на тій самій спільній
+        # теці OneDrive), тож щось падає САМЕ тут, у живому процесі, і
+        # мовчки губиться - --windowed збірка (build_exe.py) не має
+        # консолі, куди міг би піти traceback фонового потоку. Тепер
+        # результат (успіх чи текст помилки) видно через /control/status
+        # (self._last_registry_error), без потреби локального доступу до
+        # машини, де це реально стається.
         def worker():
-            servers_registry.register_this_server(
-                name=platform.node() or "Неизвестный ПК",
-                hostname=paths.CLOUDFLARED_TUNNEL_HOSTNAME,
-                kind="test" if self.settings.get("update_channel") == "test" else "main",
-                version=__version__,
-            )
+            try:
+                ok = servers_registry.register_this_server(
+                    name=platform.node() or "Неизвестный ПК",
+                    hostname=paths.CLOUDFLARED_TUNNEL_HOSTNAME,
+                    kind="test" if self.settings.get("update_channel") == "test" else "main",
+                    version=__version__,
+                )
+                self._last_registry_error = None if ok else "register_this_server вернул False"
+            except Exception as exc:
+                self._last_registry_error = f"{type(exc).__name__}: {exc}"
 
         threading.Thread(target=worker, daemon=True).start()
         self.after(self._SERVER_REGISTRY_TICK_MS, self._register_this_server_tick)
@@ -3953,6 +3967,10 @@ class ClientApp(ctk.CTk):
             # оновлень КОЖНОГО сервера, не лише того єдиного, що був раніше.
             "version": __version__,
             "update_channel": "test" if self.settings.get("update_channel") == "test" else "stable",
+            # Задача користувача (2026-08-19, живий продакшн): "0.2.88 давно
+            # чекає, а в Сервери порожньо" - діагностика _register_this_
+            # server_tick без потреби локального доступу до цієї машини.
+            "registry_last_error": self._last_registry_error,
         }
 
     # Те саме джерело правди, що вже мають кнопки в самому інтерфейсі
