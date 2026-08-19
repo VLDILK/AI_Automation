@@ -43,7 +43,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox
 
 import customtkinter as ctk
 from PIL import Image
@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.82"
+__version__ = "0.2.83"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -395,6 +395,7 @@ class ClientApp(ctk.CTk):
         # у Настройках, який не відповідав очікуваному вигляду).
         self.auto_update_window = None
         self.update_channel_window = None
+        self.main_title_style_window = None
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
         # ця (client_app.py) мають ОКРЕМІ бази - редактор кнопок у gui.py
         # ніяк не впливає на реального бота, бо gui.py більше не хостить
@@ -579,7 +580,9 @@ class ClientApp(ctk.CTk):
 
         title_col = ctk.CTkFrame(header, fg_color="transparent")
         title_col.pack(side="left")
-        ctk.CTkLabel(title_col, text="AI Automation", font=("", 19, "bold"), text_color=COLOR_TEXT).pack(anchor="w")
+        self.main_title_label = ctk.CTkLabel(title_col, text="AI Automation", font=("", 19, "bold"), text_color=COLOR_TEXT)
+        self.main_title_label.pack(anchor="w")
+        self._apply_main_title_style()
 
         self.theme_toggle_button = ctk.CTkButton(
             header, text="Светлая" if self._dark_mode else "Тёмная", width=64, height=26, font=("", 11),
@@ -588,6 +591,213 @@ class ClientApp(ctk.CTk):
             command=self._on_theme_toggle,
         )
         self.theme_toggle_button.pack(side="right")
+
+    # Задача користувача (2026-08-19): "можливість змінювати напис на
+    # головному екрані... положення по х вправо/вліво... розмір тексту...
+    # шрифт... колір" - той самий "читай з self.settings щоразу" ідіом, що
+    # й решта прапорців тут. Порожні/відсутні поля - старий вигляд
+    # ("AI Automation", розмір 19, стандартний шрифт/колір), нічого не
+    # ламається для тих, хто це ніколи не чіпав.
+    _MAIN_TITLE_FONT_CHOICES = (
+        "Segoe UI", "Arial", "Calibri", "Tahoma", "Verdana", "Georgia", "Consolas", "Times New Roman",
+    )
+    _MAIN_TITLE_COLOR_CHOICES = ("#20242A", "#2F7BD9", "#3EA96E", "#B23B3B", "#D9A441", "#8452D5")
+
+    def _main_title_style(self):
+        raw = self.settings.get("main_title_style")
+        style = raw if isinstance(raw, dict) else {}
+        try:
+            x_offset = int(style.get("x_offset") or 0)
+        except (TypeError, ValueError):
+            x_offset = 0
+        try:
+            font_size = int(style.get("font_size") or 19)
+        except (TypeError, ValueError):
+            font_size = 19
+        return {
+            "text": style.get("text") or "AI Automation",
+            "x_offset": max(0, x_offset),
+            "font_size": max(8, font_size),
+            "font_family": style.get("font_family") or "",
+            "color": style.get("color") or "",
+        }
+
+    # "положення по х вправо/вліво" - заголовок і так уже сидить у самому
+    # лівому краю (title_col.pack(side="left") вище) - рухати ЛІВІШЕ
+    # структурно нікуди, тож повзунок лише зсуває ПРАВОРУЧ від цієї точки
+    # (padx), 0 = поточний вигляд без жодних змін.
+    def _apply_main_title_style(self):
+        label = getattr(self, "main_title_label", None)
+        if label is None or not label.winfo_exists():
+            return
+        style = self._main_title_style()
+        label.configure(
+            text=style["text"],
+            font=(style["font_family"], style["font_size"], "bold"),
+            text_color=style["color"] or COLOR_TEXT,
+        )
+        label.pack_forget()
+        label.pack(anchor="w", padx=(style["x_offset"], 0))
+
+    def _open_main_title_style_window(self):
+        if self.main_title_style_window is not None and self.main_title_style_window.winfo_exists():
+            self.main_title_style_window.deiconify()
+            self.main_title_style_window.lift()
+            self.main_title_style_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Заголовок программы")
+        window.geometry("380x600")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.main_title_style_window = window
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(top, text="Заголовок программы", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
+
+        body = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+
+        saved = self._main_title_style()
+        state = dict(saved)
+
+        preview_card = ctk.CTkFrame(body, fg_color=COLOR_CARD, corner_radius=10)
+        preview_card.pack(fill="x", pady=(0, 16))
+        preview_label = ctk.CTkLabel(preview_card, text=state["text"], font=("", state["font_size"], "bold"))
+        preview_label.pack(anchor="w", padx=(14, 14), pady=16)
+
+        def refresh_preview():
+            preview_label.configure(
+                text=state["text"] or "AI Automation",
+                font=(state["font_family"], state["font_size"], "bold"),
+                text_color=state["color"] or COLOR_TEXT,
+            )
+            preview_label.pack_forget()
+            preview_label.pack(anchor="w", padx=(14 + state["x_offset"], 14), pady=16)
+
+        refresh_preview()
+
+        ctk.CTkLabel(body, text="Текст", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        text_var = ctk.StringVar(value=state["text"])
+
+        def on_text_changed(*_args):
+            state["text"] = text_var.get()
+            refresh_preview()
+
+        text_var.trace_add("write", on_text_changed)
+        ctk.CTkEntry(body, textvariable=text_var).pack(fill="x", pady=(0, 14))
+
+        ctk.CTkLabel(body, text="Сдвиг вправо (px)", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(
+            anchor="w", pady=(0, 4)
+        )
+        x_value_label = ctk.CTkLabel(body, text=str(state["x_offset"]), font=("", 11), text_color=COLOR_TEXT_MUTED)
+
+        def on_x_changed(value):
+            state["x_offset"] = int(float(value))
+            x_value_label.configure(text=str(state["x_offset"]))
+            refresh_preview()
+
+        x_slider = ctk.CTkSlider(body, from_=0, to=250, number_of_steps=250, command=on_x_changed)
+        x_slider.set(state["x_offset"])
+        x_slider.pack(fill="x", pady=(0, 2))
+        x_value_label.pack(anchor="e", pady=(0, 14))
+
+        ctk.CTkLabel(body, text="Размер шрифта", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(
+            anchor="w", pady=(0, 4)
+        )
+        size_value_label = ctk.CTkLabel(body, text=str(state["font_size"]), font=("", 11), text_color=COLOR_TEXT_MUTED)
+
+        def on_size_changed(value):
+            state["font_size"] = int(float(value))
+            size_value_label.configure(text=str(state["font_size"]))
+            refresh_preview()
+
+        size_slider = ctk.CTkSlider(body, from_=10, to=40, number_of_steps=30, command=on_size_changed)
+        size_slider.set(state["font_size"])
+        size_slider.pack(fill="x", pady=(0, 2))
+        size_value_label.pack(anchor="e", pady=(0, 14))
+
+        ctk.CTkLabel(body, text="Шрифт", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        is_custom_font = bool(state["font_family"]) and state["font_family"] not in self._MAIN_TITLE_FONT_CHOICES
+        font_option_var = ctk.StringVar(
+            value="Свой шрифт..." if is_custom_font else (state["font_family"] or "По умолчанию")
+        )
+        custom_font_var = ctk.StringVar(value=state["font_family"] if is_custom_font else "")
+        custom_font_entry = ctk.CTkEntry(body, textvariable=custom_font_var, placeholder_text="Название шрифта")
+
+        def on_custom_font_changed(*_args):
+            state["font_family"] = custom_font_var.get()
+            refresh_preview()
+
+        custom_font_var.trace_add("write", on_custom_font_changed)
+
+        def on_font_option_changed(choice):
+            if choice == "Свой шрифт...":
+                custom_font_entry.pack(fill="x", pady=(0, 14))
+                state["font_family"] = custom_font_var.get()
+            else:
+                custom_font_entry.pack_forget()
+                state["font_family"] = "" if choice == "По умолчанию" else choice
+            refresh_preview()
+
+        ctk.CTkOptionMenu(
+            body, variable=font_option_var,
+            values=["По умолчанию", *self._MAIN_TITLE_FONT_CHOICES, "Свой шрифт..."],
+            command=on_font_option_changed,
+        ).pack(fill="x")
+        if is_custom_font:
+            custom_font_entry.pack(fill="x", pady=(0, 14))
+        else:
+            ctk.CTkFrame(body, height=14, fg_color="transparent").pack()
+
+        ctk.CTkLabel(body, text="Цвет", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 4))
+        swatch_row = ctk.CTkFrame(body, fg_color="transparent")
+        swatch_row.pack(fill="x", pady=(0, 14))
+
+        def set_color(new_color):
+            state["color"] = new_color
+            refresh_preview()
+
+        for swatch_color in self._MAIN_TITLE_COLOR_CHOICES:
+            ctk.CTkButton(
+                swatch_row, text="", width=28, height=28, corner_radius=14,
+                fg_color=swatch_color, hover_color=swatch_color,
+                border_width=1, border_color=COLOR_BORDER,
+                command=lambda c=swatch_color: set_color(c),
+            ).pack(side="left", padx=(0, 6))
+
+        def pick_custom_color():
+            initial = state["color"] or self._tk_color(COLOR_TEXT)
+            chosen = colorchooser.askcolor(color=initial, title="Цвет заголовка")
+            if chosen and chosen[1]:
+                set_color(chosen[1])
+
+        ctk.CTkButton(
+            swatch_row, text="Свой...", width=64, height=28, fg_color="transparent",
+            border_width=1, border_color=COLOR_BORDER, text_color=COLOR_TEXT_MUTED, hover_color=COLOR_HOVER,
+            command=pick_custom_color,
+        ).pack(side="left")
+
+        bottom = ctk.CTkFrame(window, fg_color="transparent")
+        bottom.pack(fill="x", padx=16, pady=(8, 16))
+
+        def on_save():
+            self.settings.set("main_title_style", dict(state))
+            self._apply_main_title_style()
+            window.destroy()
+
+        def on_reset():
+            self.settings.set("main_title_style", {})
+            self._apply_main_title_style()
+            window.destroy()
+
+        ctk.CTkButton(
+            bottom, text="Сохранить", fg_color=COLOR_UPDATE_BLUE, hover_color=COLOR_UPDATE_BLUE, command=on_save,
+        ).pack(side="right")
+        ctk.CTkButton(
+            bottom, text="Сбросить", fg_color="transparent", border_width=1, border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED, hover_color=COLOR_HOVER, command=on_reset,
+        ).pack(side="right", padx=(0, 8))
 
     # Задача користувача: "опусти [статусні рядки] до низу. зверху буде
     # вільне місце... додай кнопку оновлення із кнопкою завантажування його.
@@ -918,6 +1128,10 @@ class ClientApp(ctk.CTk):
         self._build_bot_settings_section(parent)
 
         self._build_data_settings_section(parent)
+
+        self._build_settings_section(parent, "Интерфейс", [
+            ("settings", "Заголовок программы", self._open_main_title_style_window),
+        ])
 
         self._build_settings_section(parent, "Кнопки", [
             ("document", "Редактор кнопок", self._open_custom_buttons_window),
