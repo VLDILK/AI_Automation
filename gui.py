@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.62"
+__version__ = "1.0.63"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5781,9 +5781,25 @@ class ExcelViewerApp:
         # (за замовчуванням) - лише не-тестові. "Просунути в стабільну" (у
         # "Історія" вище) перемикає prerelease заднім числом, без нового
         # білда.
-        is_test_release_var = tk.BooleanVar(value=False)
+        # Реальна скарга (2026-08-19, живе тестування): "не закріплюється
+        # тут вибір" - дві окремі причини одразу. (1) Дефолтний Tk selectcolor
+        # ("SystemWindow", майже білий) занадто близький до theme["bg"]
+        # світлої теми (#F2F3F5) - галочка технічно ставилась, але візуально
+        # це майже не було видно. (2) Вибір ніде не зберігався - кожне
+        # відкриття діалогу заново скидало його на невідмічений, тож
+        # повторне тестування (кілька сесій діалогу поспіль) щоразу
+        # вимагало знову ставити галочку вручну. Обидва фікси тут: явний
+        # selectcolor (той самий принцип, що вже й у _open_role_menu/
+        # _open_personnel_role_filter_menu вище) + збереження в settings.json.
+        is_test_release_var = tk.BooleanVar(value=bool(self.settings.get("client_publish_as_test")))
+
+        def on_test_release_toggled():
+            self.settings.set("client_publish_as_test", bool(is_test_release_var.get()))
+
+        theme = self._theme()
         tk.Checkbutton(
             body, text=self._t("Тестовий реліз (не піде на стабільний канал)"), variable=is_test_release_var,
+            selectcolor=theme["select_bg"], command=on_test_release_toggled,
         ).pack(anchor="w", pady=(0, 6))
 
         publish_result_text = tk.StringVar()
