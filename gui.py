@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.58"
+__version__ = "1.0.59"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1031,14 +1031,19 @@ class ExcelViewerApp:
         )
         sync_excel_button.pack(pady=8)
 
-        in_development_button = tk.Button(
+        # Задача користувача (2026-08-19): "винеси кнопку публікації
+        # оновлень на головний екран, замість зарезервованої кнопки" -
+        # той самий "В разработке"-слот, що вже колись зайняла "Персонал"
+        # (коментар вище), тепер займає ця кнопка - перенесена сюди з
+        # side_panel (нижче), не продубльована.
+        publish_updates_button = tk.Button(
             menu_panel,
-            text=self._t("В разработке"),
+            text=self._t("Публікація оновлень"),
             width=28,
             height=2,
-            state="disabled",
+            command=self.open_publish_updates_dialog,
         )
-        in_development_button.pack(pady=8)
+        publish_updates_button.pack(pady=8)
 
         exit_button = tk.Button(
             menu_panel,
@@ -1791,20 +1796,9 @@ class ExcelViewerApp:
         # ключ - фіксовані константи (paths.py), налаштовувати вже нічого -
         # кнопку прибрано разом з усім діалогом.
 
-        # Задача користувача: "давай налаштуємо публікацію 'client'
-        # оновлень через gui.py" - update_manifest_path раніше НЕ мав
-        # жодної UI для налаштування (лише читався - і тут, і в
-        # client_app.py) - той самий ґанж, що вже був у remote_control_
-        # status_path до попереднього кроку.
-        publish_updates_button = tk.Button(
-            side_panel,
-            text=self._t("Публікація оновлень"),
-            width=20,
-            height=2,
-            command=self.open_publish_updates_dialog,
-        )
-        publish_updates_button.pack(anchor="n", fill="x", pady=(0, 12))
-
+        # Задача користувача (2026-08-19): "Публікація оновлень" перенесена
+        # на головний екран (menu_panel вище, замість "В разработке") -
+        # тут більше не дублюється.
         db_backups_button = tk.Button(
             side_panel,
             text=self._t("Резервные копии"),
