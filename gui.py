@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.70"
+__version__ = "1.0.71"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5073,58 +5073,56 @@ class ExcelViewerApp:
     _SRV_ONLINE = "#3EA96E"
     _SRV_BADGE = {"main": ("#B5D4F4", "#0C447C"), "test": ("#FAC775", "#633806")}
 
+    # Реальна скарга (2026-08-19, вдруге): "срам, давай як хотів я 1 в 1" -
+    # перший фікс поправив лише кольори/контраст, але сама ПРОПОРЦІЯ
+    # лишалась чужою мокапу: великий (520x420) майже порожній діалог із
+    # довгим абзацом пояснення замість тісної, компактної картки з мокапу
+    # (варіант 3 з 5 показаних - коротка підпис, одразу таблиця). Тепер:
+    # вузьке фіксоване вікно (360px, як і сама картка мокапу), КОРОТКИЙ
+    # підпис в один рядок, і висота підганяється під РЕАЛЬНИЙ вміст
+    # (winfo_reqheight) замість здогадки - порожній список більше не
+    # лишає екран порожнього простору внизу.
     def open_servers_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Сервери"))
-        window.geometry("520x420")
         window.configure(bg=self._SRV_BG)
         window.transient(self.root)
         window.grab_set()
 
-        top = tk.Frame(window, bg=self._SRV_BG)
-        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=14)
+        card.pack(fill="both", expand=True)
+
+        top = tk.Frame(card, bg=self._SRV_BG)
+        top.pack(side="top", fill="x")
         tk.Label(
             top, text=self._t("Сервери"), font=("Segoe UI", 13, "bold"), anchor="w",
             bg=self._SRV_BG, fg=self._SRV_TEXT,
         ).pack(anchor="w")
         tk.Label(
-            top,
-            text=self._t(
-                "Сервери, що вже самі повідомили про себе - основні й тестові. "
-                "Клік по рядку - перемкнутись на нього (Персонал, Редактор кнопок і решта підуть за ним)."
-            ),
-            anchor="w", justify="left", wraplength=480, bg=self._SRV_BG, fg=self._SRV_MUTED,
-        ).pack(anchor="w", pady=(4, 0))
+            top, text=self._t("Клік по рядку - перемкнутись"), anchor="w", font=("Segoe UI", 9),
+            bg=self._SRV_BG, fg=self._SRV_MUTED,
+        ).pack(anchor="w", pady=(1, 8))
 
-        header_row = tk.Frame(window, bg=self._SRV_BG)
-        header_row.pack(fill="x", padx=18, pady=(8, 2))
+        header_row = tk.Frame(card, bg=self._SRV_BG)
+        header_row.pack(fill="x", pady=(0, 2))
         tk.Label(
             header_row, text=self._t("Имя"), anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9),
         ).pack(side="left", fill="x", expand=True)
         tk.Label(
-            header_row, text=self._t("Тип"), width=9, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED,
+            header_row, text=self._t("Тип"), width=8, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED,
             font=("Segoe UI", 9),
         ).pack(side="left")
         tk.Label(
             header_row, text="●", width=2, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9),
         ).pack(side="left")
         tk.Label(
-            header_row, text=self._t("Версия"), width=9, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED,
+            header_row, text=self._t("Версия"), width=7, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED,
             font=("Segoe UI", 9),
         ).pack(side="left")
         tk.Label(header_row, text="", width=2, bg=self._SRV_BG).pack(side="left")
 
-        list_body = tk.Frame(window, bg=self._SRV_BG)
-        list_body.pack(side="top", fill="both", expand=True, padx=18, pady=(0, 4))
-        servers_list = self._create_scrollable_list(list_body)
-        # _create_scrollable_list повертає лише внутрішній list_frame -
-        # видимий фон навколо/між рядками малює CANVAS (list_frame.master)
-        # і його контейнер (canvas.master), інакше темні рядки "плавали" б
-        # на світлому тлі полотна цього конкретного (фіксовано темного)
-        # діалогу.
-        servers_list.configure(bg=self._SRV_BG)
-        servers_list.master.configure(bg=self._SRV_BG, highlightthickness=0)
-        servers_list.master.master.configure(bg=self._SRV_BG)
+        servers_list = tk.Frame(card, bg=self._SRV_BG)
+        servers_list.pack(fill="x")
 
         def make_server_row(parent, name, server, dot_var, version_var):
             is_active = server["hostname"] == remote_control_client.active_hostname()
@@ -5133,9 +5131,9 @@ class ExcelViewerApp:
                 parent, bg=row_bg, highlightthickness=1,
                 highlightbackground=self._SRV_ACCENT if is_active else self._SRV_BORDER,
                 highlightcolor=self._SRV_ACCENT if is_active else self._SRV_BORDER,
-                padx=10, pady=8, cursor="hand2",
+                padx=8, pady=6, cursor="hand2",
             )
-            row.pack(fill="x", pady=3)
+            row.pack(fill="x", pady=2)
             name_label = tk.Label(
                 row, text=(f"✓ {name}" if is_active else name), anchor="w",
                 font=("Segoe UI", 10, "bold" if is_active else "normal"), bg=row_bg, fg=self._SRV_TEXT,
@@ -5150,7 +5148,7 @@ class ExcelViewerApp:
             dot = tk.Label(row, textvariable=dot_var, font=("Segoe UI", 10), bg=row_bg, fg=self._SRV_MUTED, width=2)
             dot.pack(side="left")
             tk.Label(
-                row, textvariable=version_var, anchor="w", bg=row_bg, fg=self._SRV_MUTED, width=9,
+                row, textvariable=version_var, anchor="w", bg=row_bg, fg=self._SRV_MUTED, width=7,
             ).pack(side="left")
 
             def switch_to_this(event=None):
@@ -5191,6 +5189,16 @@ class ExcelViewerApp:
 
             threading.Thread(target=worker, daemon=True).start()
 
+        def resize_to_content():
+            window.update_idletasks()
+            width = 360
+            height = min(window.winfo_reqheight(), 520)
+            root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            root_width, root_height = self.root.winfo_width(), self.root.winfo_height()
+            x = root_x + max((root_width - width) // 2, 0)
+            y = root_y + max((root_height - height) // 2, 0)
+            window.geometry(f"{width}x{height}+{x}+{y}")
+
         def refresh_list():
             self._clear_frame(servers_list)
 
@@ -5201,17 +5209,20 @@ class ExcelViewerApp:
                 if not servers:
                     tk.Label(
                         servers_list,
-                        text=self._t("Серверів ще не видно. Кожен client_app.py сам зʼявляється тут протягом 2 хв після старту."),
-                        anchor="w", justify="left", wraplength=460, bg=self._SRV_BG, fg=self._SRV_MUTED,
+                        text=self._t("Серверів ще не видно.\nКожен client_app.py сам з'являється тут протягом 2 хв після старту."),
+                        anchor="w", justify="left", wraplength=330, bg=self._SRV_BG, fg=self._SRV_MUTED,
                     ).pack(anchor="w", pady=8)
-                    return
-                rows_state = []
-                for name, server in sorted(servers.items()):
-                    dot_var = tk.StringVar(value="…")
-                    version_var = tk.StringVar(value="…")
-                    make_server_row(servers_list, name, server, dot_var, version_var)
-                    rows_state.append({"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var})
-                refresh_statuses(rows_state)
+                else:
+                    rows_state = []
+                    for name, server in sorted(servers.items()):
+                        dot_var = tk.StringVar(value="…")
+                        version_var = tk.StringVar(value="…")
+                        make_server_row(servers_list, name, server, dot_var, version_var)
+                        rows_state.append(
+                            {"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var}
+                        )
+                    refresh_statuses(rows_state)
+                resize_to_content()
 
             refresh_list.generation = getattr(refresh_list, "generation", 0) + 1
             generation = refresh_list.generation
@@ -5222,8 +5233,8 @@ class ExcelViewerApp:
 
             threading.Thread(target=worker, daemon=True).start()
 
-        bottom = tk.Frame(window, bg=self._SRV_BG)
-        bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 16))
+        bottom = tk.Frame(card, bg=self._SRV_BG)
+        bottom.pack(side="top", fill="x", pady=(10, 0))
         tk.Button(
             bottom, text=self._t("Оновити"), command=refresh_list,
             bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
@@ -5238,21 +5249,13 @@ class ExcelViewerApp:
         ).pack(side="right")
 
         window.bind("<Escape>", lambda event: window.destroy())
-        refresh_list()
         # НЕ self._center_window(...) - той метод завжди викликає
         # _apply_theme(window) як частину свого контракту (спільний для
         # 23 інших діалогів, які САМЕ цього й хочуть) - для ЦЬОГО діалогу
         # це якраз стирало б фіксовані темні кольори назад у поточну
-        # світлу/темну тему програми. Той самий розрахунок позиції, без
-        # виклику теми.
-        self.root.update_idletasks()
-        window.update_idletasks()
-        width, height = 520, 420
-        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
-        root_width, root_height = self.root.winfo_width(), self.root.winfo_height()
-        x = root_x + max((root_width - width) // 2, 0)
-        y = root_y + max((root_height - height) // 2, 0)
-        window.geometry(f"{width}x{height}+{x}+{y}")
+        # світлу/темну тему програми.
+        resize_to_content()
+        refresh_list()
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
