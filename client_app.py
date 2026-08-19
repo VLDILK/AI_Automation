@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.72"
+__version__ = "0.2.73"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -907,6 +907,8 @@ class ClientApp(ctk.CTk):
 
         self._build_autostart_settings_section(parent)
 
+        self._build_auto_update_settings_section(parent)
+
         self._build_bot_settings_section(parent)
 
         self._build_data_settings_section(parent)
@@ -1364,6 +1366,121 @@ class ClientApp(ctk.CTk):
         except OSError as exc:
             self._watchdog_switch_var.set(0 if enabled else 1)
             messagebox.showerror("Перезапуск", f"Не удалось изменить перезапуск: {exc}")
+
+    # Задача користувача (2026-08-19): "потрібно зробити і завантаження і
+    # встановлення автоматичним, але у визначений час" - той самий стиль
+    # картки+CTkSwitch, що й "Автозапуск" вище. Завантаження вмикається
+    # ОДРАЗУ, як тільки увімкнено (незалежно від часу доби - "накопичити");
+    # встановлення+перезапуск - лише всередині вікна [after, before)
+    # (див. _auto_update_window_open) - щоб не зривати роботу бота
+    # посеред дня. Секція завжди Російською (feedback_chat_language) -
+    # решта програми теж, попри те, що назву користувач сформулював в
+    # чаті Українською ("Налаштування автооновлень") - тут "Автообновления",
+    # той самий короткий іменник-стиль, що й "Автозапуск"/"Бот"/"Кнопки".
+    _AUTO_UPDATE_TIME_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
+    _AUTO_UPDATE_DEFAULT_AFTER = "19:00"
+    _AUTO_UPDATE_DEFAULT_BEFORE = "08:00"
+
+    def _build_auto_update_settings_section(self, parent):
+        ctk.CTkLabel(parent, text="Автообновления", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(
+            anchor="w", pady=(0, 6)
+        )
+        card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10)
+        card.pack(fill="x", pady=(0, 16))
+
+        row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        row.pack(fill="x", padx=1, pady=1)
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        icon_row = ctk.CTkFrame(left, fg_color="transparent")
+        icon_row.pack(anchor="w")
+        ctk.CTkLabel(icon_row, text="", image=_load_icon("refresh")).pack(side="left")
+        ctk.CTkLabel(
+            icon_row, text="Устанавливать обновления автоматически", font=("", 13), text_color=COLOR_TEXT,
+        ).pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            left,
+            text="Скачивается сразу. Устанавливается и перезапускает программу только в разрешённое время ниже.",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+
+        self._auto_update_switch_var = ctk.IntVar(value=1 if self.settings.get("auto_update_enabled") else 0)
+        ctk.CTkSwitch(
+            row, text="", variable=self._auto_update_switch_var, onvalue=1, offvalue=0,
+            command=self._on_auto_update_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+
+        time_row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        time_row.pack(fill="x", padx=1, pady=(0, 1))
+        time_inner = ctk.CTkFrame(time_row, fg_color="transparent")
+        time_inner.pack(fill="x", padx=14, pady=10)
+        ctk.CTkLabel(time_inner, text="Разрешено с", font=("", 12), text_color=COLOR_TEXT).pack(side="left")
+
+        self._auto_update_after_var = ctk.StringVar(
+            value=self.settings.get("auto_update_after") or self._AUTO_UPDATE_DEFAULT_AFTER
+        )
+        after_entry = ctk.CTkEntry(time_inner, textvariable=self._auto_update_after_var, width=56, justify="center")
+        after_entry.pack(side="left", padx=(8, 4))
+        after_entry.bind(
+            "<FocusOut>",
+            lambda event: self._on_auto_update_time_changed(
+                "auto_update_after", self._auto_update_after_var, self._AUTO_UPDATE_DEFAULT_AFTER,
+            ),
+        )
+
+        ctk.CTkLabel(time_inner, text="до", font=("", 12), text_color=COLOR_TEXT).pack(side="left", padx=(6, 0))
+
+        self._auto_update_before_var = ctk.StringVar(
+            value=self.settings.get("auto_update_before") or self._AUTO_UPDATE_DEFAULT_BEFORE
+        )
+        before_entry = ctk.CTkEntry(time_inner, textvariable=self._auto_update_before_var, width=56, justify="center")
+        before_entry.pack(side="left", padx=(8, 0))
+        before_entry.bind(
+            "<FocusOut>",
+            lambda event: self._on_auto_update_time_changed(
+                "auto_update_before", self._auto_update_before_var, self._AUTO_UPDATE_DEFAULT_BEFORE,
+            ),
+        )
+
+    def _on_auto_update_toggle_clicked(self):
+        # Задача користувача (2026-08-19): persist-all-state - жодної
+        # кнопки "Зберегти", збереження одразу при зміні (той самий
+        # принцип, що вже й у інших тумблерах цього ж екрана).
+        self.settings.set("auto_update_enabled", bool(self._auto_update_switch_var.get()))
+
+    def _on_auto_update_time_changed(self, key, var, default_value):
+        value = var.get().strip()
+        if not self._AUTO_UPDATE_TIME_RE.match(value):
+            # Невалідний ввід (не ЧЧ:ХХ 24-годинний формат) - тихо
+            # повертаємо останнє збережене значення, без спливаючого
+            # вікна-помилки (той самий "не турбувати дрібницею" принцип,
+            # що й решта фонових налаштувань цього екрана).
+            var.set(self.settings.get(key) or default_value)
+            return
+        self.settings.set(key, value)
+
+    # Задача користувача: "після і до робочого часу" - вікно може
+    # переходити через північ (напр. 19:00 -> 08:00, типовий випадок) або
+    # лежати в межах однієї доби (напр. 09:00 -> 17:00) - обидва варіанти
+    # підтримані тим самим порівнянням, лише різна гілка.
+    def _auto_update_window_open(self):
+        if not self.settings.get("auto_update_enabled"):
+            return False
+        after_str = self.settings.get("auto_update_after") or self._AUTO_UPDATE_DEFAULT_AFTER
+        before_str = self.settings.get("auto_update_before") or self._AUTO_UPDATE_DEFAULT_BEFORE
+        if not (self._AUTO_UPDATE_TIME_RE.match(after_str) and self._AUTO_UPDATE_TIME_RE.match(before_str)):
+            return False
+        now = datetime.now()
+        after_h, after_m = (int(x) for x in after_str.split(":"))
+        before_h, before_m = (int(x) for x in before_str.split(":"))
+        after_t = now.replace(hour=after_h, minute=after_m, second=0, microsecond=0)
+        before_t = now.replace(hour=before_h, minute=before_m, second=0, microsecond=0)
+        if after_t <= before_t:
+            return after_t <= now < before_t
+        return now >= after_t or now < before_t
 
     def _build_bot_settings_section(self, parent):
         ctk.CTkLabel(parent, text="Бот", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))
@@ -3756,7 +3873,21 @@ class ClientApp(ctk.CTk):
         # періодичного ланцюжка все одно відбувається нижче, незалежно від
         # цього guard'а - інакше він назавжди зупинився б після першого ж
         # тіку, що застав завантаження в процесі.
-        if self._update_ready_to_install or self._update_download_in_progress:
+        # Задача користувача (2026-08-19): "давай зробимо і завантаження і
+        # встановлення автоматичним, але у визначений час" - готове до
+        # встановлення оновлення чекало б тут БЕЗКІНЕЧНО (guard одразу
+        # виходить), поки хтось не натисне кнопку вручну. Той самий
+        # 5-хвилинний тік, що вже й так перевіряє нові версії, тепер
+        # ЗАОДНО перевіряє "чи відкрилось дозволене вікно" для вже
+        # ЗАВАНТАЖЕНОГО оновлення - окремий таймер не потрібен.
+        if self._update_ready_to_install:
+            if self._auto_update_window_open():
+                self._install_downloaded_update()
+                return
+            if not manual:
+                self.after(UPDATE_CHECK_INTERVAL_MS, self._poll_for_update)
+            return
+        if self._update_download_in_progress:
             if not manual:
                 self.after(UPDATE_CHECK_INTERVAL_MS, self._poll_for_update)
             return
@@ -3805,6 +3936,15 @@ class ClientApp(ctk.CTk):
                 self.update_button.pack(side="top")
             elif self.update_button.winfo_ismapped():
                 self.update_button.pack_forget()
+            # Задача користувача (2026-08-19): "давай зробимо і завантаження
+            # і встановлення автоматичним" - завантаження стартує ОДРАЗУ,
+            # як тільки знайдено новішу версію, незалежно від часу доби
+            # ("накопичити"); лише ВСТАНОВЛЕННЯ (нижче, _on_update_download_
+            # finished/_check_for_update_now) чекає на дозволене вікно.
+            # Frozen-guard - той самий принцип, що й скрізь у цьому файлі
+            # (dev-режим не має власної теки .exe, яку можна замінити).
+            if entry and self.settings.get("auto_update_enabled") and getattr(sys, "frozen", False):
+                self._on_update_button_clicked()
             # Задача користувача (2026-08-15): "не має видвати спливаюче
             # вікно-повідомлення... просто тихесенько під кнопкою" - текст
             # замість messagebox; коли оновлення Є, сама кнопка "Обновление
@@ -4081,6 +4221,12 @@ class ClientApp(ctk.CTk):
         self._update_ready_to_install = True
         self.update_check_result_label.configure(text="")
         self.update_button.configure(text="Установить и\nперезапустить", state="normal", fg_color=COLOR_ON)
+        # Задача користувача (2026-08-19): якщо дозволене вікно вже
+        # ВІДКРИТЕ саме в момент завершення завантаження - встановлюємо
+        # одразу, не чекаючи наступного 5-хвилинного тіку
+        # (_check_for_update_now, той самий _auto_update_window_open).
+        if self._auto_update_window_open():
+            self._install_downloaded_update()
 
     # Заміна файлів РЕАЛЬНО ЗАПУЩЕНОГО .exe напряму неможлива на Windows
     # (файл заблокований, поки процес живий) - стандартний прийом:
