@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.68"
+__version__ = "1.0.69"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5053,65 +5053,103 @@ class ExcelViewerApp:
     # _BASE_URL "наживо" на кожен виклик.
     _SERVER_KIND_LABELS = {"main": "Основна", "test": "Тестова"}
 
+    # Реальна скарга (2026-08-19, живий скріншот): "поправ кнопки, не
+    # видно... зроби як показував взагалі 1 в 1" - gui.py's тема (світла/
+    # темна перемикачка, _apply_theme) не дала того самого вигляду, що й у
+    # мокапі, і кнопки "Оновити"/"Закрити" загубились на темному тлі. Цей
+    # діалог тепер НАВМИСНО не йде через _apply_theme - фіксований темний
+    # вигляд 1 в 1 з мокапом (варіант 3 з 5 показаних), незалежно від
+    # світлої/темної теми решти программи, ті самі кольори, що вже й у
+    # client_app.py (COLOR_BG/COLOR_ROW/COLOR_TEXT).
+    _SRV_BG = "#1A1D21"
+    _SRV_ROW_BG = "#25282D"
+    _SRV_ROW_ACTIVE_BG = "#2C3036"
+    _SRV_TEXT = "#E5E7EA"
+    _SRV_MUTED = "#9AA1AB"
+    _SRV_BORDER = "#3A3F46"
+    _SRV_ACCENT = "#2F7BD9"
+    _SRV_ONLINE = "#3EA96E"
+    _SRV_BADGE = {"main": ("#B5D4F4", "#0C447C"), "test": ("#FAC775", "#633806")}
+
     def open_servers_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Сервери"))
         window.geometry("520x420")
+        window.configure(bg=self._SRV_BG)
         window.transient(self.root)
         window.grab_set()
 
-        top = tk.Frame(window)
+        top = tk.Frame(window, bg=self._SRV_BG)
         top.pack(side="top", fill="x", padx=18, pady=(16, 8))
-        tk.Label(top, text=self._t("Сервери"), font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(
+            top, text=self._t("Сервери"), font=("Segoe UI", 13, "bold"), anchor="w",
+            bg=self._SRV_BG, fg=self._SRV_TEXT,
+        ).pack(anchor="w")
         tk.Label(
             top,
             text=self._t(
                 "Сервери, що вже самі повідомили про себе - основні й тестові. "
                 "Клік по рядку - перемкнутись на нього (Персонал, Редактор кнопок і решта підуть за ним)."
             ),
-            anchor="w", fg="#555555", justify="left", wraplength=480,
+            anchor="w", justify="left", wraplength=480, bg=self._SRV_BG, fg=self._SRV_MUTED,
         ).pack(anchor="w", pady=(4, 0))
 
-        header_row = tk.Frame(window)
+        header_row = tk.Frame(window, bg=self._SRV_BG)
         header_row.pack(fill="x", padx=18, pady=(8, 2))
-        tk.Label(header_row, text=self._t("Имя"), anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(
-            side="left", fill="x", expand=True
-        )
-        tk.Label(header_row, text=self._t("Тип"), width=9, anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(
-            side="left"
-        )
-        tk.Label(header_row, text="●", width=2, anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(side="left")
-        tk.Label(header_row, text=self._t("Версия"), width=9, anchor="w", fg="#8c959f", font=("Segoe UI", 9)).pack(
-            side="left"
-        )
-        tk.Label(header_row, text="", width=2).pack(side="left")
+        tk.Label(
+            header_row, text=self._t("Имя"), anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9),
+        ).pack(side="left", fill="x", expand=True)
+        tk.Label(
+            header_row, text=self._t("Тип"), width=9, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        tk.Label(
+            header_row, text="●", width=2, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9),
+        ).pack(side="left")
+        tk.Label(
+            header_row, text=self._t("Версия"), width=9, anchor="w", bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        tk.Label(header_row, text="", width=2, bg=self._SRV_BG).pack(side="left")
 
-        list_body = tk.Frame(window)
+        list_body = tk.Frame(window, bg=self._SRV_BG)
         list_body.pack(side="top", fill="both", expand=True, padx=18, pady=(0, 4))
         servers_list = self._create_scrollable_list(list_body)
+        # _create_scrollable_list повертає лише внутрішній list_frame -
+        # видимий фон навколо/між рядками малює CANVAS (list_frame.master)
+        # і його контейнер (canvas.master), інакше темні рядки "плавали" б
+        # на світлому тлі полотна цього конкретного (фіксовано темного)
+        # діалогу.
+        servers_list.configure(bg=self._SRV_BG)
+        servers_list.master.configure(bg=self._SRV_BG, highlightthickness=0)
+        servers_list.master.master.configure(bg=self._SRV_BG)
 
         def make_server_row(parent, name, server, dot_var, version_var):
             is_active = server["hostname"] == remote_control_client.active_hostname()
+            row_bg = self._SRV_ROW_ACTIVE_BG if is_active else self._SRV_ROW_BG
             row = tk.Frame(
-                parent, bd=2 if is_active else 1, relief="solid" if is_active else "groove",
-                padx=8, pady=6, cursor="hand2",
+                parent, bg=row_bg, highlightthickness=1,
+                highlightbackground=self._SRV_ACCENT if is_active else self._SRV_BORDER,
+                highlightcolor=self._SRV_ACCENT if is_active else self._SRV_BORDER,
+                padx=10, pady=8, cursor="hand2",
             )
             row.pack(fill="x", pady=3)
             name_label = tk.Label(
                 row, text=(f"✓ {name}" if is_active else name), anchor="w",
-                font=("Segoe UI", 10, "bold" if is_active else "normal"),
+                font=("Segoe UI", 10, "bold" if is_active else "normal"), bg=row_bg, fg=self._SRV_TEXT,
             )
             name_label.pack(side="left", fill="x", expand=True)
-            is_test = server["kind"] == "test"
+            badge_bg, badge_fg = self._SRV_BADGE.get(server["kind"], self._SRV_BADGE["main"])
             badge = tk.Label(
                 row, text=self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основна")), font=("Segoe UI", 8),
-                bg="#fff8c5" if is_test else "#ddf4ff", fg="#9a6700" if is_test else "#0969da",
-                padx=6, pady=1,
+                bg=badge_bg, fg=badge_fg, padx=6, pady=1,
             )
-            badge.pack(side="left", padx=(0, 4))
-            dot = tk.Label(row, textvariable=dot_var, font=("Segoe UI", 10), fg="#8c959f", width=2)
+            badge.pack(side="left", padx=(0, 6))
+            dot = tk.Label(row, textvariable=dot_var, font=("Segoe UI", 10), bg=row_bg, fg=self._SRV_MUTED, width=2)
             dot.pack(side="left")
-            tk.Label(row, textvariable=version_var, anchor="w", fg="#555555", width=9).pack(side="left")
+            tk.Label(
+                row, textvariable=version_var, anchor="w", bg=row_bg, fg=self._SRV_MUTED, width=9,
+            ).pack(side="left")
 
             def switch_to_this(event=None):
                 remote_control_client.set_active_server(server["hostname"])
@@ -5129,7 +5167,11 @@ class ExcelViewerApp:
                 servers_registry.remove_server(name)
                 refresh_list()
 
-            tk.Button(row, text="✕", command=delete_server, width=2).pack(side="left")
+            tk.Button(
+                row, text="✕", command=delete_server, width=2, bg=row_bg, fg=self._SRV_MUTED, relief="flat",
+                activebackground=self._SRV_ROW_ACTIVE_BG, activeforeground=self._SRV_TEXT,
+                highlightthickness=0, bd=0,
+            ).pack(side="left")
             return row
 
         def refresh_statuses(rows_state):
@@ -5158,9 +5200,8 @@ class ExcelViewerApp:
                     tk.Label(
                         servers_list,
                         text=self._t("Серверів ще не видно. Кожен client_app.py сам зʼявляється тут протягом 2 хв після старту."),
-                        anchor="w", justify="left", wraplength=460,
+                        anchor="w", justify="left", wraplength=460, bg=self._SRV_BG, fg=self._SRV_MUTED,
                     ).pack(anchor="w", pady=8)
-                    self._apply_theme(servers_list)
                     return
                 rows_state = []
                 for name, server in sorted(servers.items()):
@@ -5168,7 +5209,6 @@ class ExcelViewerApp:
                     version_var = tk.StringVar(value="…")
                     make_server_row(servers_list, name, server, dot_var, version_var)
                     rows_state.append({"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var})
-                self._apply_theme(servers_list)
                 refresh_statuses(rows_state)
 
             refresh_list.generation = getattr(refresh_list, "generation", 0) + 1
@@ -5180,15 +5220,37 @@ class ExcelViewerApp:
 
             threading.Thread(target=worker, daemon=True).start()
 
-        bottom = tk.Frame(window)
+        bottom = tk.Frame(window, bg=self._SRV_BG)
         bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 16))
-        tk.Button(bottom, text=self._t("Оновити"), command=refresh_list).pack(side="left")
-        tk.Button(bottom, text=self._t("Закрити"), command=window.destroy).pack(side="right")
+        tk.Button(
+            bottom, text=self._t("Оновити"), command=refresh_list,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
+        ).pack(side="left")
+        tk.Button(
+            bottom, text=self._t("Закрити"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
+        ).pack(side="right")
 
         window.bind("<Escape>", lambda event: window.destroy())
         refresh_list()
-        self._apply_theme(window)
-        self._center_window(window, width=520, height=420)
+        # НЕ self._center_window(...) - той метод завжди викликає
+        # _apply_theme(window) як частину свого контракту (спільний для
+        # 23 інших діалогів, які САМЕ цього й хочуть) - для ЦЬОГО діалогу
+        # це якраз стирало б фіксовані темні кольори назад у поточну
+        # світлу/темну тему програми. Той самий розрахунок позиції, без
+        # виклику теми.
+        self.root.update_idletasks()
+        window.update_idletasks()
+        width, height = 520, 420
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        root_width, root_height = self.root.winfo_width(), self.root.winfo_height()
+        x = root_x + max((root_width - width) // 2, 0)
+        y = root_y + max((root_height - height) // 2, 0)
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
