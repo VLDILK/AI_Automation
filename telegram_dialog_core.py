@@ -56,12 +56,25 @@ class CoreDialogMixin:
     # повідомлень. тільки звіт, без панелей, без нічого." Тобто ГРУПОВИЙ
     # чат отримує ЛИШЕ проактивний push через _notify_report_broadcast
     # (окремий шлях, не через цей pipeline) - жодної відповіді на
-    # ВХІДНЕ повідомлення, включно з діагностичними командами. /chatid
-    # і решта лишаються робочими лише в ПРИВАТНОМУ чаті з ботом.
+    # ВХІДНЕ повідомлення, включно з діагностичними командами.
+    #
+    # Задача користувача (2026-08-19): "хай відповідає у своєму чаті. не в
+    # загальному. а в свому" - /chatid спершу й був зроблений САМЕ для
+    # групи ("де дістати chat_id групи?" - Telegram сам це ніде не показує),
+    # а правило вище (мовчати в групах на все) той сценарій зламало.
+    # Єдиний виняток: /chatid відповідає у ТІЙ САМІЙ групі, звідки прийшов
+    # (context["chat_id"] нижче, у своїй логіці - не в REPORT_BROADCAST_
+    # CHAT_ID чи будь-якому іншому "загальному" чаті), і далі йде тим самим
+    # шляхом (_build_reply_by_mode -> _build_reply), тож і DEBUG_TOOLS-
+    # перевірка прав, і галочка "Системні команди" (_system_command_enabled)
+    # діють так само, як і в приватному чаті. Решта команд у групах і далі
+    # мовчать, як і задумано.
     def _build_reply_pipeline(self, text, store, message=None):
         context = self._message_context(message)
         if context.get("chat_type") in ("group", "supergroup"):
-            return None
+            command_word = text.strip().split(maxsplit=1)[0].split("@", 1)[0].lower() if text.strip() else ""
+            if command_word != "/chatid":
+                return None
         started_at = datetime.now()
         mode = self._request_processing_mode()
         user_preference = None
