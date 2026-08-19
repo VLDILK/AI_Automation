@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.80"
+__version__ = "0.2.81"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -394,6 +394,7 @@ class ClientApp(ctk.CTk):
         # window тут же (замінює перший варіант - розгортання на місці
         # у Настройках, який не відповідав очікуваному вигляду).
         self.auto_update_window = None
+        self.update_channel_window = None
         # Задача користувача (2026-08-15): "домашня программа" (gui.py) і
         # ця (client_app.py) мають ОКРЕМІ бази - редактор кнопок у gui.py
         # ніяк не впливає на реального бота, бо gui.py більше не хостить
@@ -1422,6 +1423,11 @@ class ClientApp(ctk.CTk):
         card = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=10)
         card.pack(fill="x", pady=(0, 16))
         self._build_row_button(card, "refresh", "Автообновления", self._open_auto_update_window, first=True)
+        # Задача користувача (2026-08-19): "тестова версія програми, де ми
+        # будемо тестувати все спершу, а далі вже випускати оновлення" -
+        # той самий singleton-Toplevel принцип, окрема кнопка в тій самій
+        # картці ("Обновления"), бо семантично поруч з "Автообновления".
+        self._build_row_button(card, "refresh", "Канал обновлений", self._open_update_channel_window)
 
     # Задача користувача (2026-08-19, третя редакція): "не працює на
     # клієнті кнопка. вона має спливаюче вікно відкривати з
@@ -1581,6 +1587,57 @@ class ClientApp(ctk.CTk):
             elif now >= after_t or now < before_t:
                 return True
         return False
+
+    # Задача користувача (2026-08-19): "тестова версія програми, де ми
+    # будемо тестувати все спершу, а далі вже випускати оновлення" - канал
+    # "Тестова" бачить УСІ релізи (тестові й стабільні, завжди справді
+    # найновіший), "Стабільна" (за замовчуванням) - лише не-тестові.
+    # Прочитується щоразу свіжо з self.settings (той самий підхід, що й
+    # решта прапорців тут) - _check_for_update_now читає це напряму, без
+    # кешування, тож зміна діє з наступної ж перевірки оновлень.
+    def _open_update_channel_window(self):
+        if self.update_channel_window is not None and self.update_channel_window.winfo_exists():
+            self.update_channel_window.deiconify()
+            self.update_channel_window.lift()
+            self.update_channel_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Канал обновлений")
+        window.geometry("380x260")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.update_channel_window = window
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(top, text="Канал обновлений", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
+
+        ctk.CTkLabel(
+            window,
+            text=(
+                "«Тестовая» — устанавливает и тестовые, и обычные обновления "
+                "(всегда самое новое). «Стабильная» — только проверенные."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 12))
+
+        body = ctk.CTkFrame(window, fg_color=COLOR_CARD, corner_radius=10)
+        body.pack(fill="x", padx=16)
+
+        channel_var = ctk.StringVar(
+            value="test" if self.settings.get("update_channel") == "test" else "stable"
+        )
+
+        def on_channel_changed():
+            self.settings.set("update_channel", channel_var.get())
+
+        ctk.CTkRadioButton(
+            body, text="Стабильная", variable=channel_var, value="stable",
+            text_color=COLOR_TEXT, command=on_channel_changed,
+        ).pack(anchor="w", padx=14, pady=(14, 6))
+        ctk.CTkRadioButton(
+            body, text="Тестовая", variable=channel_var, value="test",
+            text_color=COLOR_TEXT, command=on_channel_changed,
+        ).pack(anchor="w", padx=14, pady=(0, 14))
 
     def _build_bot_settings_section(self, parent):
         ctk.CTkLabel(parent, text="Бот", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))
@@ -3879,6 +3936,7 @@ class ClientApp(ctk.CTk):
             try:
                 release = github_releases.get_latest_release(
                     paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, github_releases.CLIENT_TAG_PREFIX,
+                    include_prerelease=(self.settings.get("update_channel") == "test"),
                 )
             except RuntimeError as exc:
                 release = None

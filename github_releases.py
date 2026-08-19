@@ -136,7 +136,7 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
 
 # ---------- Перевірка/завантаження (публічне, БЕЗ токена - викликає client_app.py) ----------
 
-def get_latest_release(owner, repo, tag_prefix, timeout=15):
+def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeout=15):
     """Список релізів (НЕ /releases/latest - див. коментар над
     CLIENT_TAG_PREFIX вище про чому) - повертає найновіший, чий тег
     підходить під tag_prefix. None, якщо релізів такого типу ще немає
@@ -186,7 +186,16 @@ def get_latest_release(owner, repo, tag_prefix, timeout=15):
         if len(page_releases) < 100:
             break
         page += 1
-    matching = [r for r in releases if r.get("tag_name", "").startswith(tag_prefix)]
+    # Задача користувача (2026-08-19): "канал оновлень... тестова версія
+    # програми, де ми будемо тестувати все спершу" - переливаємось на
+    # РІДНУ ознаку GitHub Releases (prerelease), не окремий тег/репозиторій:
+    # стабільний канал (include_prerelease=False, за замовчуванням) бачить
+    # ЛИШЕ не-тестові релізи, тестовий канал бачить УСІ (і тестові, і
+    # стабільні - завжди справді найновіший, яким би він не був).
+    matching = [
+        r for r in releases
+        if r.get("tag_name", "").startswith(tag_prefix) and (include_prerelease or not r.get("prerelease"))
+    ]
     if not matching:
         return None
     return max(matching, key=lambda r: r.get("published_at") or "")
@@ -261,6 +270,10 @@ def list_recent_releases(owner, repo, limit=15, timeout=15, token=None):
                 "tag_name": tag,
                 "published_at": release.get("published_at") or "",
                 "notes": release.get("body") or "",
+                # Задача користувача (2026-08-19): "канал оновлень" - Історія
+                # позначає тестові релізи, щоб було видно, які ще чекають
+                # на "Просунути в стабільну".
+                "prerelease": bool(release.get("prerelease")),
             }
         )
     entries.sort(key=lambda e: e["published_at"], reverse=True)
@@ -374,13 +387,31 @@ def download_and_extract_release(release, updates_dir, target_name="AI_Automatio
 
 # ---------- Публікація (потребує PAT-токена - викликає лише gui.py) ----------
 
-def create_release(token, owner, repo, tag_prefix, version, notes="", timeout=30):
+def create_release(token, owner, repo, tag_prefix, version, notes="", prerelease=False, timeout=30):
     tag = f"{tag_prefix}{version}"
     payload = json.dumps({
-        "tag_name": tag, "name": tag, "body": notes, "draft": False, "prerelease": False,
+        "tag_name": tag, "name": tag, "body": notes, "draft": False, "prerelease": bool(prerelease),
     }).encode("utf-8")
     return _request(
         f"{API_ROOT}/repos/{owner}/{repo}/releases", token=token, method="POST", data=payload,
+        extra_headers={"Content-Type": "application/json"}, timeout=timeout,
+    )
+
+
+# Задача користувача (2026-08-19): "коли все ок - окрема кнопка 'Просунути
+# в стабільну' перемикає ТОЙ САМИЙ реліз (без нового білда/завантаження) на
+# 'стабільний'" - PATCH prerelease:false на вже опублікованому релізі, той
+# самий .zip-asset лишається на місці, жодного повторного завантаження.
+def promote_release_to_stable(token, owner, repo, tag_name, timeout=30):
+    release = _request(
+        f"{API_ROOT}/repos/{owner}/{repo}/releases/tags/{tag_name}", token=token, timeout=timeout,
+    )
+    release_id = (release or {}).get("id")
+    if not release_id:
+        raise RuntimeError(f"Релиз с тегом {tag_name} не найден.")
+    payload = json.dumps({"prerelease": False}).encode("utf-8")
+    return _request(
+        f"{API_ROOT}/repos/{owner}/{repo}/releases/{release_id}", token=token, method="PATCH", data=payload,
         extra_headers={"Content-Type": "application/json"}, timeout=timeout,
     )
 
@@ -400,11 +431,11 @@ def upload_release_asset(token, upload_url, file_path, timeout=600):
     )
 
 
-def publish_release(token, owner, repo, tag_prefix, version, zip_path, notes=""):
+def publish_release(token, owner, repo, tag_prefix, version, zip_path, notes="", prerelease=False):
     """Один виклик: створити реліз + завантажити .zip. Спільна реалізація
     для publish_client_release/publish_gui_release нижче - розрізняються
     лише префіксом тегу."""
-    release = create_release(token, owner, repo, tag_prefix, version, notes=notes)
+    release = create_release(token, owner, repo, tag_prefix, version, notes=notes, prerelease=prerelease)
     upload_url = release.get("upload_url")
     if not upload_url:
         raise RuntimeError("GitHub не вернул ссылку для загрузки файла.")
@@ -412,9 +443,9 @@ def publish_release(token, owner, repo, tag_prefix, version, zip_path, notes="")
     return release
 
 
-def publish_client_release(token, owner, repo, version, zip_path, notes=""):
+def publish_client_release(token, owner, repo, version, zip_path, notes="", prerelease=False):
     """Те, що реально викликає gui.py при публікації оновлення client_app.py."""
-    return publish_release(token, owner, repo, CLIENT_TAG_PREFIX, version, zip_path, notes=notes)
+    return publish_release(token, owner, repo, CLIENT_TAG_PREFIX, version, zip_path, notes=notes, prerelease=prerelease)
 
 
 # Задача користувача (2026-08-16): "стосовно домашньої версії, щоб вона не
@@ -425,6 +456,6 @@ def publish_client_release(token, owner, repo, version, zip_path, notes=""):
 # (окрема від dist/, тому не блокується запущеним .exe), а встановлення -
 # той самий перевірений .bat-механізм (_install_downloaded_update), що вже
 # є в gui.py.
-def publish_gui_release(token, owner, repo, version, zip_path, notes=""):
+def publish_gui_release(token, owner, repo, version, zip_path, notes="", prerelease=False):
     """Те, що реально викликає gui.py при публікації оновлення для самої себе."""
-    return publish_release(token, owner, repo, GUI_TAG_PREFIX, version, zip_path, notes=notes)
+    return publish_release(token, owner, repo, GUI_TAG_PREFIX, version, zip_path, notes=notes, prerelease=prerelease)

@@ -70,7 +70,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.61"
+__version__ = "1.0.62"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5472,6 +5472,18 @@ class ExcelViewerApp:
             )
             badge.pack(side="left")
 
+            # Задача користувача (2026-08-19): "канал оновлень... коли все
+            # ок - окрема кнопка 'Просунути в стабільну'" - тестові релізи
+            # (prerelease=True на GitHub) позначені окремим бейджем тут-таки,
+            # у "Історія", і мають власну кнопку промоції - без пошуку, чи
+            # взагалі був якийсь тестовий реліз й де саме.
+            if entry.get("prerelease"):
+                test_badge = tk.Label(
+                    header, text=self._t("тестовий"), font=("Segoe UI", 8),
+                    bg="#fff8c5", fg="#9a6700", padx=6, pady=1,
+                )
+                test_badge.pack(side="left", padx=(4, 0))
+
             version_label = tk.Label(header, text=entry["version"], font=("Segoe UI", 9, "bold"), width=10, anchor="w")
             version_label.pack(side="left", padx=(6, 0))
 
@@ -5485,6 +5497,46 @@ class ExcelViewerApp:
 
             chevron = tk.Label(header, text="▸", width=2)
             chevron.pack(side="right")
+
+            if entry.get("prerelease"):
+                tag_name = entry["tag_name"]
+                # promote_button читається ВСЕРЕДИНІ promote_release лише в
+                # момент кліку (звичайне замикання Python) - на той час він
+                # уже точно призначений нижче, порядок визначення тут не
+                # важливий.
+                def promote_release(tag_name=tag_name):
+                    token = github_token_var.get().strip()
+                    if not token:
+                        messagebox.showerror(self._t("Публікація оновлень"), self._t("Спершу вкажіть GitHub-токен."))
+                        return
+                    promote_button.config(state="disabled", text=self._t("Просування..."))
+
+                    def worker():
+                        error = None
+                        try:
+                            github_releases.promote_release_to_stable(
+                                token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, tag_name,
+                            )
+                        except Exception as exc:
+                            error = str(exc)
+                        self._run_on_main_thread(lambda: on_promote_finished(error))
+
+                    def on_promote_finished(error):
+                        if error:
+                            promote_button.config(state="normal", text=self._t("Просунути в стабільну"))
+                            messagebox.showerror(self._t("Публікація оновлень"), error)
+                            return
+                        # Успіх - перезавантажуємо всю "Історія": цей рядок
+                        # більше не тестовий, бейдж і кнопка мають зникнути.
+                        load_history()
+
+                    threading.Thread(target=worker, daemon=True).start()
+
+                promote_button = tk.Button(
+                    header, text=self._t("Просунути в стабільну"), font=("Segoe UI", 8),
+                    command=promote_release,
+                )
+                promote_button.pack(side="right", padx=(0, 6))
 
             state = {"expanded": False, "holder": tk.Frame(entry_frame)}
             state["holder"].pack(anchor="w", fill="x")
@@ -5722,6 +5774,18 @@ class ExcelViewerApp:
             anchor="w", pady=(0, 4)
         )
 
+        # Задача користувача (2026-08-19): "канал оновлень... я буду
+        # тестити, і оновлення потрібно публікувати в тестову версію
+        # спершу" - те саме, що на GitHub зветься prerelease. Клієнт із
+        # каналом "Тестова" (Налаштування) бачить УСІ релізи, "Стабільна"
+        # (за замовчуванням) - лише не-тестові. "Просунути в стабільну" (у
+        # "Історія" вище) перемикає prerelease заднім числом, без нового
+        # білда.
+        is_test_release_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            body, text=self._t("Тестовий реліз (не піде на стабільний канал)"), variable=is_test_release_var,
+        ).pack(anchor="w", pady=(0, 6))
+
         publish_result_text = tk.StringVar()
         tk.Label(body, textvariable=publish_result_text, anchor="w", fg="#555555", justify="left", wraplength=480).pack(
             anchor="w", pady=(0, 4)
@@ -5735,11 +5799,17 @@ class ExcelViewerApp:
                 return
             self._write_last_published_sha(current_git_sha)
             publish_result_text.set(
-                self._t("Версію {value} client_app.py опубліковано на GitHub.").format(value=client_version)
+                self._t("Версію {value} client_app.py опубліковано як ТЕСТОВИЙ реліз на GitHub.").format(value=client_version)
+                if is_test_release_var.get()
+                else self._t("Версію {value} client_app.py опубліковано на GitHub.").format(value=client_version)
             )
 
         def publish_client_update():
             token = github_token_var.get().strip()
+            # Читається тут, на головному потоці (Tk-змінні не для доступу
+            # з фонового worker() нижче) - той самий принцип, що вже й
+            # token/client_version тут-таки.
+            is_test_release = is_test_release_var.get()
             if not token:
                 messagebox.showerror(self._t("Публікація оновлень"), self._t("Спершу вкажіть GitHub-токен."))
                 return
@@ -5806,7 +5876,7 @@ class ExcelViewerApp:
                     )
                     github_releases.publish_client_release(
                         token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, client_version, zip_path,
-                        notes=compose_release_notes(),
+                        notes=compose_release_notes(), prerelease=is_test_release,
                     )
                 except Exception as exc:
                     # Реальна знахідка (аудит коду, 2026-08-16): вузький
