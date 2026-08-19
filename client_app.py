@@ -89,7 +89,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.81"
+__version__ = "0.2.82"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1627,8 +1627,86 @@ class ClientApp(ctk.CTk):
             value="test" if self.settings.get("update_channel") == "test" else "stable"
         )
 
+        # Задача користувача (2026-08-19): "на зміну додай можливість
+        # поставити пароль" (варіант 4 з 5 показаних мокапів - "Попередження
+        # + пароль... з'являється на спробі перемкнути"). Перемикання назад
+        # на "Стабільна" (безпечний напрямок) лишається миттєвим - пароль
+        # питається ЛИШЕ на спробу увімкнути "Тестова" (ризикований напрямок,
+        # той, що міг би поставити неперевірену збірку на робочий канал).
+        # Пароль зберігається в settings.json (той самий рівень довіри, що й
+        # уже наявний backup_encryption_password) - це захист від
+        # випадкового кліку, не від зловмисника з доступом до файлів
+        # програми. Якщо пароль ще не встановлений - перше введене значення
+        # тут-таки СТАЄ паролем (і одразу підтверджує перемикання).
+        warning_panel = {"frame": None}
+
+        def hide_warning_panel():
+            if warning_panel["frame"] is not None:
+                warning_panel["frame"].destroy()
+                warning_panel["frame"] = None
+
+        def commit_test_channel():
+            channel_var.set("test")
+            self.settings.set("update_channel", "test")
+            hide_warning_panel()
+
+        def show_warning_panel():
+            hide_warning_panel()
+            panel = ctk.CTkFrame(body, fg_color=COLOR_ROW, corner_radius=8, border_width=1, border_color=COLOR_WARN)
+            panel.pack(fill="x", padx=14, pady=(0, 14))
+            warning_panel["frame"] = panel
+
+            has_password = bool(self.settings.get("update_channel_password"))
+            ctk.CTkLabel(
+                panel,
+                text=(
+                    "⚠ Это повлияет на рабочий канал"
+                    if has_password else
+                    "⚠ Придумайте пароль для переключения"
+                ),
+                font=("", 12), text_color=COLOR_WARN,
+            ).pack(anchor="w", padx=12, pady=(12, 8))
+
+            password_var = ctk.StringVar()
+            password_entry = ctk.CTkEntry(panel, placeholder_text="Пароль", show="•", textvariable=password_var)
+            password_entry.pack(fill="x", padx=12, pady=(0, 6))
+
+            error_label = ctk.CTkLabel(panel, text="", font=("", 11), text_color=COLOR_STOP_TEXT)
+            error_label.pack(anchor="w", padx=12)
+
+            def on_confirm():
+                entered = password_var.get()
+                if not entered:
+                    error_label.configure(text="Введите пароль")
+                    return
+                stored_password = self.settings.get("update_channel_password")
+                if not stored_password:
+                    self.settings.set("update_channel_password", entered)
+                    commit_test_channel()
+                    return
+                if entered == stored_password:
+                    commit_test_channel()
+                else:
+                    error_label.configure(text="Неверный пароль")
+                    password_var.set("")
+
+            ctk.CTkButton(
+                panel, text="Да, переключить", fg_color=COLOR_UPDATE_BLUE, hover_color=COLOR_UPDATE_BLUE,
+                command=on_confirm,
+            ).pack(fill="x", padx=12, pady=(0, 12))
+            password_entry.bind("<Return>", lambda event: on_confirm())
+
         def on_channel_changed():
-            self.settings.set("update_channel", channel_var.get())
+            if channel_var.get() == "test":
+                # Радіо вже візуально "клацнуло" на Тестова (customtkinter
+                # сам оновлює variable до command) - поки не підтверджено
+                # паролем, повертаємо назад на Стабільна й показуємо
+                # попередження замість реального перемикання.
+                channel_var.set("stable")
+                show_warning_panel()
+            else:
+                self.settings.set("update_channel", "stable")
+                hide_warning_panel()
 
         ctk.CTkRadioButton(
             body, text="Стабильная", variable=channel_var, value="stable",
