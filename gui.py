@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.71"
+__version__ = "1.0.72"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1411,6 +1411,7 @@ class ExcelViewerApp:
 
     def show_settings(self):
         self._update_telegram_settings_labels()
+        self._refresh_active_server_list()
         self._show_only(self.settings_frame, "settings")
 
     # Журнали (Задача користувача) — відкриваються ОКРЕМИМ tk.Toplevel
@@ -1630,6 +1631,21 @@ class ExcelViewerApp:
         side_panel = tk.Frame(content, width=220)
         side_panel.pack(side="right", fill="y", padx=(32, 0))
         side_panel.pack_propagate(False)
+
+        # Задача користувача (2026-08-19): "я хочу вміти вибирати кого
+        # слухати. додай це у меню налаштувань" - варіант 4 з 5 показаних
+        # (радіо-список прямо в Налаштуваннях, без попапу) - той самий вже
+        # готовий і перевірений механізм перемикання (remote_control_client.
+        # set_active_server), що вже й "Сервери" на головному екрані, лише
+        # інше місце й вигляд.
+        active_server_section = tk.Frame(main_settings)
+        active_server_section.pack(anchor="w", fill="x", pady=(0, 16))
+        tk.Label(
+            active_server_section, text=self._t("Активний сервер"), font=("Segoe UI", 10, "bold"), anchor="w",
+        ).pack(anchor="w")
+        self.active_server_list_frame = tk.Frame(active_server_section)
+        self.active_server_list_frame.pack(anchor="w", fill="x", pady=(4, 0))
+        self._active_server_var = tk.StringVar(value=remote_control_client.active_hostname())
 
         choose_token_button = tk.Button(
             main_settings,
@@ -5054,6 +5070,58 @@ class ExcelViewerApp:
     # "сервер" - чоловічого роду, тому "Основний"/"Тестовий" (не
     # "Основна"/"Тестова") - узгодження прикметника з іменником.
     _SERVER_KIND_LABELS = {"main": "Основний", "test": "Тестовий"}
+
+    # Задача користувача (2026-08-19): "я хочу вміти вибирати кого
+    # слухати... додай це у меню налаштувань" - той самий реєстр і той
+    # самий set_active_server, що вже й "Сервери", лише радіо-список
+    # прямо в main_settings, без попапу. Викликається один раз при
+    # побудові екрана (_build_settings_view) і щоразу при відкритті
+    # (show_settings) - список серверів може змінитись, поки Налаштування
+    # були закриті (нова машина щойно сама зареєструвалась).
+    def _refresh_active_server_list(self):
+        frame = getattr(self, "active_server_list_frame", None)
+        if frame is None or not frame.winfo_exists():
+            return
+        self._clear_frame(frame)
+        tk.Label(frame, text=self._t("Завантаження..."), anchor="w", fg="#8c959f").pack(anchor="w")
+        self._apply_theme(frame)
+
+        self._active_server_refresh_generation = getattr(self, "_active_server_refresh_generation", 0) + 1
+        generation = self._active_server_refresh_generation
+
+        def on_loaded(servers):
+            if generation != self._active_server_refresh_generation:
+                return
+            if getattr(self, "active_server_list_frame", None) is None or not frame.winfo_exists():
+                return
+            self._clear_frame(frame)
+            if not servers:
+                tk.Label(
+                    frame, text=self._t("Серверів ще не видно."), anchor="w", fg="#8c959f",
+                ).pack(anchor="w")
+                self._apply_theme(frame)
+                return
+            current_hostname = remote_control_client.active_hostname()
+            self._active_server_var.set(current_hostname)
+
+            def on_pick(hostname=None):
+                hostname = self._active_server_var.get()
+                remote_control_client.set_active_server(hostname)
+                self.settings.set("active_remote_server_hostname", hostname)
+
+            for name, server in sorted(servers.items()):
+                kind_label = self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний"))
+                tk.Radiobutton(
+                    frame, text=f"{name} ({kind_label})", variable=self._active_server_var,
+                    value=server["hostname"], anchor="w", command=on_pick,
+                ).pack(anchor="w")
+            self._apply_theme(frame)
+
+        def worker():
+            servers = servers_registry.read_servers()
+            self._run_on_main_thread(lambda: on_loaded(servers))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # Реальна скарга (2026-08-19, живий скріншот): "поправ кнопки, не
     # видно... зроби як показував взагалі 1 в 1" - gui.py's тема (світла/
