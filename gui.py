@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.77"
+__version__ = "1.0.78"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -6106,8 +6106,35 @@ class ExcelViewerApp:
             anchor="w", pady=(0, 4)
         )
 
+        # Задача користувача (2026-08-20): "коли публікує - додай полоску
+        # прогресу" - завантаження великого .zip (~85-135МБ) на GitHub
+        # займає реальний, помітний час; сама кнопка (просто "Публікація...")
+        # не показувала, що взагалі щось рухається. Прихована, поки
+        # публікація не почалась - той самий принцип, що вже й
+        # update_progress_bar у client_app.py.
+        gui_publish_progress_var = tk.DoubleVar(value=0)
+        gui_publish_progress_bar = ttk.Progressbar(
+            body, mode="determinate", maximum=100, variable=gui_publish_progress_var, length=300,
+        )
+        gui_publish_progress_text = tk.StringVar()
+        gui_publish_progress_label = tk.Label(
+            body, textvariable=gui_publish_progress_text, anchor="w", fg="#555555", font=("Segoe UI", 9),
+        )
+
+        def apply_gui_publish_progress(fraction, total_bytes):
+            gui_publish_progress_var.set(fraction * 100)
+            sent_mb = fraction * total_bytes / (1024 * 1024)
+            total_mb = total_bytes / (1024 * 1024)
+            gui_publish_progress_text.set(
+                self._t("Загрузка на GitHub: {sent:.1f} из {total:.1f} МБ ({percent:.0f}%)").format(
+                    sent=sent_mb, total=total_mb, percent=fraction * 100,
+                )
+            )
+
         def on_gui_publish_finished(error):
             publish_gui_button.config(state="normal", text=self._t("Опублікувати оновлення gui.py (GitHub)"))
+            gui_publish_progress_bar.pack_forget()
+            gui_publish_progress_label.pack_forget()
             if error:
                 gui_publish_result_text.set("")
                 messagebox.showerror(self._t("Публікація оновлень"), error)
@@ -6139,6 +6166,10 @@ class ExcelViewerApp:
                     )
             publish_gui_button.config(state="disabled", text=self._t("Публікація..."))
             gui_publish_result_text.set("")
+            gui_publish_progress_var.set(0)
+            gui_publish_progress_text.set(self._t("Подготовка..."))
+            gui_publish_progress_bar.pack(anchor="w", pady=(0, 2))
+            gui_publish_progress_label.pack(anchor="w", pady=(0, 4))
 
             def worker():
                 error = None
@@ -6163,9 +6194,14 @@ class ExcelViewerApp:
                     zip_path = shutil.make_archive(
                         str(zip_base), "zip", root_dir=str(gui_release_dir.parent), base_dir=gui_release_dir.name,
                     )
+                    zip_size = Path(zip_path).stat().st_size
+
+                    def report_progress(fraction):
+                        self._run_on_main_thread(lambda: apply_gui_publish_progress(fraction, zip_size))
+
                     github_releases.publish_gui_release(
                         token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, __version__, zip_path,
-                        notes=compose_release_notes(),
+                        notes=compose_release_notes(), on_progress=report_progress,
                     )
                 except Exception as exc:
                     # Реальна знахідка (аудит коду, 2026-08-16): вузький
@@ -6244,8 +6280,32 @@ class ExcelViewerApp:
             anchor="w", pady=(0, 4)
         )
 
+        # Той самий принцип, що й gui_publish_progress_bar вище - лише
+        # окремі змінні/віджети (два незалежні паралельні розділи в тій
+        # самій вкладці "Публікація").
+        client_publish_progress_var = tk.DoubleVar(value=0)
+        client_publish_progress_bar = ttk.Progressbar(
+            body, mode="determinate", maximum=100, variable=client_publish_progress_var, length=300,
+        )
+        client_publish_progress_text = tk.StringVar()
+        client_publish_progress_label = tk.Label(
+            body, textvariable=client_publish_progress_text, anchor="w", fg="#555555", font=("Segoe UI", 9),
+        )
+
+        def apply_client_publish_progress(fraction, total_bytes):
+            client_publish_progress_var.set(fraction * 100)
+            sent_mb = fraction * total_bytes / (1024 * 1024)
+            total_mb = total_bytes / (1024 * 1024)
+            client_publish_progress_text.set(
+                self._t("Загрузка на GitHub: {sent:.1f} из {total:.1f} МБ ({percent:.0f}%)").format(
+                    sent=sent_mb, total=total_mb, percent=fraction * 100,
+                )
+            )
+
         def on_publish_finished(error):
             publish_client_button.config(state="normal", text=self._t("Опублікувати оновлення client_app.py (GitHub)"))
+            client_publish_progress_bar.pack_forget()
+            client_publish_progress_label.pack_forget()
             if error:
                 publish_result_text.set("")
                 messagebox.showerror(self._t("Публікація оновлень"), error)
@@ -6288,6 +6348,10 @@ class ExcelViewerApp:
                     )
             publish_client_button.config(state="disabled", text=self._t("Публікація..."))
             publish_result_text.set("")
+            client_publish_progress_var.set(0)
+            client_publish_progress_text.set(self._t("Подготовка..."))
+            client_publish_progress_bar.pack(anchor="w", pady=(0, 2))
+            client_publish_progress_label.pack(anchor="w", pady=(0, 4))
 
             def worker():
                 error = None
@@ -6327,9 +6391,14 @@ class ExcelViewerApp:
                     zip_path = shutil.make_archive(
                         str(zip_base), "zip", root_dir=str(client_dist_dir.parent), base_dir=client_dist_dir.name,
                     )
+                    zip_size = Path(zip_path).stat().st_size
+
+                    def report_progress(fraction):
+                        self._run_on_main_thread(lambda: apply_client_publish_progress(fraction, zip_size))
+
                     github_releases.publish_client_release(
                         token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, client_version, zip_path,
-                        notes=compose_release_notes(), prerelease=is_test_release,
+                        notes=compose_release_notes(), prerelease=is_test_release, on_progress=report_progress,
                     )
                 except Exception as exc:
                     # Реальна знахідка (аудит коду, 2026-08-16): вузький

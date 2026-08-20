@@ -474,22 +474,53 @@ def create_release(token, owner, repo, tag_prefix, version, notes="", prerelease
     )
 
 
-def upload_release_asset(token, upload_url, file_path, timeout=600):
+# Задача користувача (2026-08-20): "коли публікує - додай полоску
+# прогресу" - urllib/http.client самі читають дані для відправки блоками
+# (типово 8КБ) через .read() файлоподібного об'єкта - жодного власного
+# сокет-коду не треба, лише порахувати, скільки вже прочитано (= вже
+# пішло на GitHub), і повідомити калбек. Той самий принцип, що вже й
+# download_asset нижче використовує на прийомі.
+class _ProgressFile:
+    def __init__(self, path, on_progress=None):
+        self._handle = open(path, "rb")
+        self.total = Path(path).stat().st_size
+        self._sent = 0
+        self._on_progress = on_progress
+
+    def read(self, size=-1):
+        chunk = self._handle.read(size)
+        if chunk:
+            self._sent += len(chunk)
+            if self._on_progress and self.total:
+                self._on_progress(self._sent / self.total)
+        return chunk
+
+    def close(self):
+        self._handle.close()
+
+
+def upload_release_asset(token, upload_url, file_path, timeout=600, on_progress=None):
     # upload_url з create_release() - шаблон RFC 6570
     # ("...assets{?name,label}") - фігурні дужки з параметрами прибираються,
     # ім'я файлу підставляється напряму в query string.
     base_url = upload_url.split("{")[0]
     file_path = Path(file_path)
     content_type, _ = mimetypes.guess_type(str(file_path))
-    with open(file_path, "rb") as handle:
-        data = handle.read()
-    return _request(
-        f"{base_url}?name={file_path.name}", token=token, method="POST", data=data,
-        extra_headers={"Content-Type": content_type or "application/octet-stream"}, timeout=timeout,
-    )
+    body = _ProgressFile(file_path, on_progress=on_progress)
+    try:
+        return _request(
+            f"{base_url}?name={file_path.name}", token=token, method="POST", data=body,
+            extra_headers={
+                "Content-Type": content_type or "application/octet-stream",
+                "Content-Length": str(body.total),
+            },
+            timeout=timeout,
+        )
+    finally:
+        body.close()
 
 
-def publish_release(token, owner, repo, tag_prefix, version, zip_path, notes="", prerelease=False):
+def publish_release(token, owner, repo, tag_prefix, version, zip_path, notes="", prerelease=False, on_progress=None):
     """Один виклик: створити реліз + завантажити .zip. Спільна реалізація
     для publish_client_release/publish_gui_release нижче - розрізняються
     лише префіксом тегу."""
@@ -497,13 +528,16 @@ def publish_release(token, owner, repo, tag_prefix, version, zip_path, notes="",
     upload_url = release.get("upload_url")
     if not upload_url:
         raise RuntimeError("GitHub не вернул ссылку для загрузки файла.")
-    upload_release_asset(token, upload_url, zip_path)
+    upload_release_asset(token, upload_url, zip_path, on_progress=on_progress)
     return release
 
 
-def publish_client_release(token, owner, repo, version, zip_path, notes="", prerelease=False):
+def publish_client_release(token, owner, repo, version, zip_path, notes="", prerelease=False, on_progress=None):
     """Те, що реально викликає gui.py при публікації оновлення client_app.py."""
-    return publish_release(token, owner, repo, CLIENT_TAG_PREFIX, version, zip_path, notes=notes, prerelease=prerelease)
+    return publish_release(
+        token, owner, repo, CLIENT_TAG_PREFIX, version, zip_path, notes=notes, prerelease=prerelease,
+        on_progress=on_progress,
+    )
 
 
 # Задача користувача (2026-08-16): "стосовно домашньої версії, щоб вона не
@@ -514,6 +548,9 @@ def publish_client_release(token, owner, repo, version, zip_path, notes="", prer
 # (окрема від dist/, тому не блокується запущеним .exe), а встановлення -
 # той самий перевірений .bat-механізм (_install_downloaded_update), що вже
 # є в gui.py.
-def publish_gui_release(token, owner, repo, version, zip_path, notes="", prerelease=False):
+def publish_gui_release(token, owner, repo, version, zip_path, notes="", prerelease=False, on_progress=None):
     """Те, що реально викликає gui.py при публікації оновлення для самої себе."""
-    return publish_release(token, owner, repo, GUI_TAG_PREFIX, version, zip_path, notes=notes, prerelease=prerelease)
+    return publish_release(
+        token, owner, repo, GUI_TAG_PREFIX, version, zip_path, notes=notes, prerelease=prerelease,
+        on_progress=on_progress,
+    )
