@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.96"
+__version__ = "0.2.97"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -279,7 +279,9 @@ class ClientApp(ctk.CTk):
 
         self.settings = SettingsStore(paths.SETTINGS_PATH)
         self.store = ExcelSqliteStore(paths.DB_PATH)
-        _reconcile_standard_menu_with_cloud(self.store)
+        _reconcile_standard_menu_with_cloud(
+            self.store, email=(self.settings.get("onedrive_shared_email") or "").strip() or None
+        )
         self.telegram_worker = None
         self._bot_stop_in_progress = False
         self._bot_next_auto_check_at = None
@@ -1090,9 +1092,9 @@ class ClientApp(ctk.CTk):
                 # акаунти на двох машинах) - тенантний акаунт (Diverus,
                 # UAB) підтверджено однаковий на обох, тож знову один
                 # спільний файл (servers_registry.py). Опційний email
-                # (settings "onedrive_shared_email") тепер точно
-                # визначає ЯКИЙ акаунт, замість вгадування по назві теки.
-                email = (self.settings.get("onedrive_shared_email") or "").strip() or None
+                # (_onedrive_shared_email) тепер точно визначає ЯКИЙ
+                # акаунт, замість вгадування по назві теки.
+                email = self._onedrive_shared_email()
                 self._last_registry_path = servers_registry.resolved_path_str(email)
                 ok = servers_registry.register_this_server(
                     name=platform.node() or "Неизвестный ПК",
@@ -1350,7 +1352,7 @@ class ClientApp(ctk.CTk):
         self.backup_footer_label.configure(text=f"Хранится локально: {len(snapshots)} копий.")
 
     def _render_cloud_backup_rows(self):
-        backups_root = standard_menu_cloud.cloud_folder_path()
+        backups_root = standard_menu_cloud.cloud_folder_path(self._onedrive_shared_email())
         if backups_root is None:
             self._build_backup_empty_label("OneDrive не найден на этом компьютере.")
             self.backup_footer_label.configure(text="")
@@ -2106,15 +2108,23 @@ class ClientApp(ctk.CTk):
         token_entry.bind("<FocusOut>", on_token_changed)
         token_entry.bind("<Return>", on_token_changed)
 
-    # Задача користувача (2026-08-20): "нащо гадати назву теки OneDrive,
-    # коли можна ввести email напряму" - servers_registry.
-    # find_account_folder(email) шукає точний акаунт через реєстр Windows
-    # (той самий механізм, яким цього сеансу вручну діагностували
-    # плутанину акаунтів vladi/Vladimir2). Порожньо/не знайдено = стара
-    # поведінка (вгадування по назві тенантної теки), нічого не ламається
-    # для тих, хто це не налаштовує.
+    # Задача користувача (2026-08-20): "не туди зберегло кнопкою зберегти
+    # в хмару... здається ти щось пропустив" - поле "Учётная запись
+    # OneDrive" спершу керувало ЛИШЕ servers_registry.py, а бекапи й
+    # стандартне меню (standard_menu_cloud.py) й далі йшли в тенантний
+    # акаунт незалежно від нього - плутанина. Тепер ОДНЕ поле, ОДИН
+    # спільний хелпер - усі виклики (реєстр, бекапи, стандартне меню)
+    # використовують той самий обраний акаунт.
+    def _onedrive_shared_email(self):
+        return (self.settings.get("onedrive_shared_email") or "").strip() or None
+
+    # servers_registry.find_account_folder(email) шукає точний акаунт
+    # через реєстр Windows (той самий механізм, яким цього сеансу вручну
+    # діагностували плутанину акаунтів vladi/Vladimir2). Порожньо/не
+    # знайдено = стара поведінка (вгадування по назві тенантної теки),
+    # нічого не ламається для тих, хто це не налаштовує.
     def _onedrive_account_status_text(self):
-        email = (self.settings.get("onedrive_shared_email") or "").strip()
+        email = self._onedrive_shared_email()
         if not email:
             return "Email не указан — используется угадывание по названию папки."
         resolved = servers_registry.find_account_folder(email)
@@ -2143,8 +2153,9 @@ class ClientApp(ctk.CTk):
         ctk.CTkLabel(
             window,
             text=(
-                "Email аккаунта OneDrive для общих данных (реестр серверов и т.п.). "
-                "Пусто — угадывание по названию папки, как раньше."
+                "Email аккаунта OneDrive для общих данных: реестр серверов, "
+                "резервные копии, стандартное меню. Пусто — угадывание по "
+                "названию папки, как раньше."
             ),
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 8))
@@ -4650,7 +4661,7 @@ class ClientApp(ctk.CTk):
     # що вже й у servers_registry.py) - окрема підтека для кожної машини,
     # і файли, і ротація тепер повністю ізольовані одна від одної.
     def _mirror_backup_to_onedrive(self, snapshot_path, subfolder, glob_pattern):
-        backups_root = standard_menu_cloud.cloud_folder_path()
+        backups_root = standard_menu_cloud.cloud_folder_path(self._onedrive_shared_email())
         if backups_root is None:
             return
         machine_name = platform.node() or "unknown"
@@ -5146,8 +5157,8 @@ class ClientApp(ctk.CTk):
 # яких хмара ще не знає (майбутні версії коду), лишаються локальними
 # значеннями - потраплять у хмару, коли адміністратор наступного разу явно
 # натисне кнопку.
-def _reconcile_standard_menu_with_cloud(store):
-    cloud_state = standard_menu_cloud.read_cloud_state()
+def _reconcile_standard_menu_with_cloud(store, email=None):
+    cloud_state = standard_menu_cloud.read_cloud_state(email)
     local_state = store.get_standard_menu_state()
     if cloud_state is None:
         standard_menu_cloud.write_local_cache(local_state)

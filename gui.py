@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.75"
+__version__ = "1.0.76"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1647,6 +1647,20 @@ class ExcelViewerApp:
         self.active_server_list_frame.pack(anchor="w", fill="x", pady=(4, 0))
         self._active_server_var = tk.StringVar(value=remote_control_client.active_hostname())
 
+        # Задача користувача (2026-08-20): "не туди зберегло... не бачу
+        # тестовий" - client_app.py вже має "Учётная запись OneDrive"
+        # (settings "onedrive_shared_email"), але gui.py й далі читав
+        # СПІЛЬНИЙ реєстр/теку лише за здогадкою по тенантній назві - якщо
+        # клієнт налаштований на ІНШИЙ акаунт, gui.py просто ніколи його
+        # не побачить. Той самий механізм тут-таки, тепер з обох боків.
+        onedrive_account_button = tk.Button(
+            main_settings,
+            text=self._t("Учётная запись OneDrive"),
+            width=28,
+            command=self.open_onedrive_account_dialog,
+        )
+        onedrive_account_button.pack(anchor="w", pady=(0, 12))
+
         choose_token_button = tk.Button(
             main_settings,
             text=self._t("Додати шлях до ТГ-ключа"),
@@ -2190,7 +2204,7 @@ class ExcelViewerApp:
     def _refresh_standard_menu_cloud_path_label(self):
         if not hasattr(self, "_standard_menu_cloud_path_var"):
             return
-        folder = standard_menu_cloud.cloud_folder_path()
+        folder = standard_menu_cloud.cloud_folder_path(self._onedrive_shared_email())
         if folder is None:
             text = self._t("OneDrive не найден на этом компьютере")
         else:
@@ -2200,7 +2214,7 @@ class ExcelViewerApp:
         )
 
     def _open_standard_menu_cloud_folder(self):
-        folder = standard_menu_cloud.cloud_folder_path()
+        folder = standard_menu_cloud.cloud_folder_path(self._onedrive_shared_email())
         if folder is None:
             messagebox.showerror(
                 self._t("Редактор кнопок"),
@@ -3416,6 +3430,72 @@ class ExcelViewerApp:
         tk.Button(bottom, text=self._t("Отмена"), width=14, command=window.destroy).pack(side="right")
         window.bind("<Escape>", lambda event: window.destroy())
         self._center_window(window, width=820, height=500)
+
+    def _onedrive_shared_email(self):
+        return (self.settings.get("onedrive_shared_email") or "").strip() or None
+
+    def _onedrive_account_status_text(self):
+        email = (self.settings.get("onedrive_shared_email") or "").strip()
+        if not email:
+            return self._t("Email не указан — используется угадывание по названию папки.")
+        resolved = servers_registry.find_account_folder(email)
+        if resolved is None:
+            return self._t("Такой аккаунт OneDrive на этом компьютере не найден: {email}").format(email=email)
+        return self._t("Найдено: {path}").format(path=resolved)
+
+    # Задача користувача (2026-08-20): той самий механізм, що вже й у
+    # client_app.py - явний email замість здогадки по назві тенантної
+    # теки. Обидві сторони (клієнт і ця, домашня программа) мають
+    # НАЛАШТУВАТИСЬ на ОДИН і той самий акаунт, інакше кожна читає/пише
+    # свою окрему теку і жодна не бачить іншу.
+    def open_onedrive_account_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Учётная запись OneDrive"))
+        window.geometry("460x260")
+        window.transient(self.root)
+        window.grab_set()
+
+        top = tk.Frame(window)
+        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        tk.Label(
+            top, text=self._t("Учётная запись OneDrive"), font=("Segoe UI", 13, "bold"), anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            top,
+            text=self._t(
+                "Email аккаунта OneDrive для общих данных: реестр серверов, "
+                "резервные копии, стандартное меню. Пусто — угадывание по "
+                "названию папки, как раньше. Должен совпадать с тем же "
+                "полем на клиентских машинах."
+            ),
+            anchor="w", justify="left", wraplength=420, fg="#555555",
+        ).pack(anchor="w", pady=(4, 0))
+
+        body = tk.Frame(window)
+        body.pack(side="top", fill="x", padx=18, pady=8)
+
+        email_var = tk.StringVar(value=self.settings.get("onedrive_shared_email") or "")
+        email_entry = tk.Entry(body, textvariable=email_var, width=40)
+        email_entry.pack(anchor="w", fill="x")
+
+        status_var = tk.StringVar(value=self._onedrive_account_status_text())
+        status_label = tk.Label(
+            body, textvariable=status_var, anchor="w", justify="left", wraplength=420, fg="#555555",
+        )
+        status_label.pack(anchor="w", fill="x", pady=(8, 0))
+
+        def on_email_changed(*_args):
+            self.settings.set("onedrive_shared_email", email_var.get().strip())
+            status_var.set(self._onedrive_account_status_text())
+
+        email_entry.bind("<FocusOut>", on_email_changed)
+        email_entry.bind("<Return>", on_email_changed)
+
+        bottom = tk.Frame(window)
+        bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
+        tk.Button(bottom, text=self._t("Закрыть"), width=14, command=window.destroy).pack(side="right")
+        window.bind("<Escape>", lambda event: window.destroy())
+        self._center_window(window, width=460, height=260)
 
     # Задача користувача (2026-08-19): "додай кнопку системні команди
     # чат-боту... галочки на ввімкнення... кнопка зберегти яка закриває
@@ -5118,7 +5198,7 @@ class ExcelViewerApp:
             self._apply_theme(frame)
 
         def worker():
-            servers = servers_registry.read_servers()
+            servers = servers_registry.read_servers(self._onedrive_shared_email())
             self._run_on_main_thread(lambda: on_loaded(servers))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -5232,7 +5312,7 @@ class ExcelViewerApp:
                     self._t("Сервери"), self._t("Прибрати «{value}» зі спільного списку?").format(value=name),
                 ):
                     return
-                servers_registry.remove_server(name)
+                servers_registry.remove_server(name, self._onedrive_shared_email())
                 refresh_list()
 
             tk.Button(
@@ -5296,7 +5376,7 @@ class ExcelViewerApp:
             generation = refresh_list.generation
 
             def worker():
-                servers = servers_registry.read_servers()
+                servers = servers_registry.read_servers(self._onedrive_shared_email())
                 self._run_on_main_thread(lambda: on_loaded(servers, generation))
 
             threading.Thread(target=worker, daemon=True).start()

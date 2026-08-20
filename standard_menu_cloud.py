@@ -31,6 +31,7 @@ import os
 from pathlib import Path
 
 import paths
+import servers_registry
 
 _CLOUD_FOLDER_NAME = "AI_Automation_Backups"
 _CLOUD_FILE_NAME = "standard_menu.json"
@@ -49,7 +50,17 @@ _CLOUD_FILE_NAME = "standard_menu.json"
 _ONEDRIVE_TENANT_SUFFIX = "OneDrive - Diverus, UAB"
 
 
-def _resolve_onedrive_root():
+# Задача користувача (2026-08-20): "не туди зберегло кнопкою зберегти в
+# хмару" - "Учётная запись OneDrive" (client_app.py) керувала лише
+# servers_registry.py, а бекапи/стандартне меню й далі йшли в тенантний
+# акаунт незалежно від цього поля - плутанина. Тепер email (якщо
+# заданий) працює тут так само, через ТОЙ САМИЙ пошук у реєстрі Windows
+# (servers_registry.find_account_folder) - жодного дублювання логіки.
+def _resolve_onedrive_root(email=None):
+    if email:
+        matched = servers_registry.find_account_folder(email)
+        if matched is not None:
+            return matched
     username = os.environ.get("USERNAME")
     tenant_path = Path(f"C:/Users/{username}/{_ONEDRIVE_TENANT_SUFFIX}") if username else None
     if tenant_path is not None and tenant_path.is_dir():
@@ -61,19 +72,19 @@ def _resolve_onedrive_root():
     return tenant_path or env_path
 
 
-def cloud_folder_path():
+def cloud_folder_path(email=None):
     """Публічна (не лише для read/write_cloud_state нижче) — Задача
     користувача (2026-08-18): "кнопка має бути видима завжди, щоб кожен
     раз з програми міг глянути" - gui.py використовує це саме для кнопки
     "Открыть папку", постійно видимої в Редакторі кнопок."""
-    onedrive_root = _resolve_onedrive_root()
+    onedrive_root = _resolve_onedrive_root(email)
     if onedrive_root is None:
         return None
     return onedrive_root / _CLOUD_FOLDER_NAME
 
 
-def _cloud_file_path():
-    folder = cloud_folder_path()
+def _cloud_file_path(email=None):
+    folder = cloud_folder_path(email)
     if folder is None:
         return None
     return folder / _CLOUD_FILE_NAME
@@ -104,17 +115,17 @@ def _write_state_file(path, state):
         return False
 
 
-def read_cloud_state():
+def read_cloud_state(email=None):
     """None означає "хмара недоступна, чи файлу там ще немає" — виклик має
     трактувати це як "нічого звіряти", НЕ як "хмара каже: усе вимкнено"."""
-    return _read_state_file(_cloud_file_path())
+    return _read_state_file(_cloud_file_path(email))
 
 
-def write_cloud_state(state):
+def write_cloud_state(state, email=None):
     """Best-effort — як і _mirror_backup_to_onedrive: якщо OneDrive не
     налаштований на цій машині, просто тихо нічого не робить (повертає
     False), без винятку — це резервний, не критичний шлях."""
-    path = _cloud_file_path()
+    path = _cloud_file_path(email)
     if path is None:
         return False
     return _write_state_file(path, state)
