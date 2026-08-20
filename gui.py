@@ -74,7 +74,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.86"
+__version__ = "1.0.92"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -4986,6 +4986,31 @@ class ExcelViewerApp:
     # (структура репозиторію: <корінь>/dist/AI_Automation_Home/), інакше
     # git-історія просто недоступна (немає сенсу падати з помилкою - це
     # лише додатковий, необов'язковий контекст для публікації).
+    def _assert_build_is_fresh(self, exe_path, source_path):
+        """Кидає RuntimeError, якщо .exe зібраний РАНІШЕ, ніж востаннє
+        змінювався файл із номером версії. Див. інцидент 2026-08-20:
+        client-v0.3.1 отримав збірку 0.3.0."""
+        exe_path, source_path = Path(exe_path), Path(source_path)
+        if not exe_path.exists():
+            raise RuntimeError(
+                self._t("Не знайдено зібраний файл {path} - публікувати нічого.").format(path=exe_path)
+            )
+        if not source_path.exists():
+            return
+        built_at = exe_path.stat().st_mtime
+        changed_at = source_path.stat().st_mtime
+        if changed_at > built_at:
+            raise RuntimeError(
+                self._t(
+                    "{source} змінювався ПІСЛЯ збірки ({changed} проти {built}) - у пакеті лежить стара "
+                    "версія програми, хоч тег буде новий. Перезберіть через build_exe.py і спробуйте знову."
+                ).format(
+                    source=source_path.name,
+                    changed=datetime.fromtimestamp(changed_at).strftime("%d.%m %H:%M"),
+                    built=datetime.fromtimestamp(built_at).strftime("%d.%m %H:%M"),
+                )
+            )
+
     def _project_git_root(self):
         for candidate in (BASE_DIR, BASE_DIR.parent.parent):
             if (candidate / ".git").exists():
@@ -5984,19 +6009,33 @@ class ExcelViewerApp:
         ).pack(side="left", padx=(6, 0))
 
         body = tk.Frame(card, bg=self._SRV_BG)
-        body.pack(fill="x")
-
         bottom = tk.Frame(card, bg=self._SRV_BG)
-        bottom.pack(side="top", fill="x", pady=(14, 0))
+        # Ряд кнопок пакується ПЕРШИМ і притискається до низу. Порядок тут
+        # принциповий: вікно більше не росте під вміст, тож якщо вміст
+        # переросте висоту, за край має виїжджати середина таблиці, а не
+        # "Обновить" із "Закрити".
+        bottom.pack(side="bottom", fill="x", pady=(14, 0))
+        body.pack(side="top", fill="both", expand=True)
 
-        def resize_to_content():
-            window.update_idletasks()
-            width = self._TUNNEL_WIDTH
-            height = min(window.winfo_reqheight(), window.winfo_screenheight() - 140)
-            root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
-            root_width = self.root.winfo_width()
-            x = root_x + max((root_width - width) // 2, 0)
-            window.geometry(f"{width}x{height}+{max(x, 0)}+{max(root_y + 40, 0)}")
+        state["autosize"] = True
+        state["settled"] = 0
+
+        def resize_to_content(settled=False):
+            """settled=True означає "секція домалювалась остаточно". Коли
+            відзвітують усі три - підгонка вимикається назавжди, і далі
+            вікном керує тільки людина."""
+            if state.get("autosize"):
+                window.update_idletasks()
+                width = self._TUNNEL_WIDTH
+                height = min(window.winfo_reqheight(), window.winfo_screenheight() - 140)
+                root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+                root_width = self.root.winfo_width()
+                x = root_x + max((root_width - width) // 2, 0)
+                window.geometry(f"{width}x{height}+{max(x, 0)}+{max(root_y + 40, 0)}")
+            if settled:
+                state["settled"] = state.get("settled", 0) + 1
+                if state["settled"] >= 3:
+                    state["autosize"] = False
 
         def refresh():
             self._render_tunnel_body(body, state, subtitle_var, refresh, resize_to_content)
@@ -6072,7 +6111,7 @@ class ExcelViewerApp:
                 # Коли відповідати нема кому - показуємо лише пояснення.
                 muted(responders_box, self._t("Адреса не відповіла жодного разу ({count} спроб).").format(
                     count=result["attempts"])).pack(fill="x", pady=(2, 0))
-                resize_to_content()
+                resize_to_content(settled=True)
                 return
             table = self._tunnel_table(responders_box, [
                 (self._t("Машина"), 3, 140), (self._t("Канал"), 0, 92),
@@ -6106,7 +6145,7 @@ class ExcelViewerApp:
             if result["failures"]:
                 muted(responders_box, self._t("Без відповіді: {count} із {total}").format(
                     count=result["failures"], total=result["attempts"])).pack(fill="x", pady=(4, 0))
-            resize_to_content()
+            resize_to_content(settled=True)
 
         def probe_worker():
             result = remote_control_client.probe_responders(hostname, attempts=self._TUNNEL_PROBE_ATTEMPTS)
@@ -6177,7 +6216,7 @@ class ExcelViewerApp:
             muted(domains_box, self._t(
                 "«Продовження» — за 30 днів до спливання: саме цю, ранішу дату показує сайт Cloudflare."
             )).pack(fill="x", pady=(4, 0))
-            resize_to_content()
+            resize_to_content(settled=True)
 
         def domains_worker(domain_names, registrar_map=None):
             rows = []
@@ -6198,7 +6237,7 @@ class ExcelViewerApp:
             self._tunnel_locked_block(
                 locked_box, self._t("Конектори тунелю та керування адресами — вкажіть токен вище"),
             )
-            resize_to_content()
+            resize_to_content(settled=True)
             return
 
         cloud_hint = muted(cloud_box, self._t("Питаю Cloudflare..."), pady=(14, 0))
@@ -6210,7 +6249,7 @@ class ExcelViewerApp:
             cloud_hint.destroy()
             if error:
                 self._tunnel_warning(cloud_box, error)
-                resize_to_content()
+                resize_to_content(settled=True)
                 return
             state["cf"] = data
             if data.get("tunnel_name"):
@@ -6240,6 +6279,28 @@ class ExcelViewerApp:
             if not connectors:
                 muted(cloud_box, self._t("Жодного активного конектора — тунель зараз ніхто не тримає.")).pack(
                     fill="x", pady=(4, 0))
+
+            # Таблиця вище показує лише тунель АКТИВНОЇ адреси, тож питання
+            # "а чи слухає тестовий" лишалось без відповіді - доводилось
+            # перевіряти браузером. Кількість конекторів по всіх тунелях
+            # приходить тією ж відповіддю, що й список тунелів.
+            self._tunnel_section_title(cloud_box, self._t("Тунелі акаунта"))
+            tunnels_table = self._tunnel_table(cloud_box, [
+                (self._t("Тунель"), 3, 200), (self._t("Машин на ньому"), 0, 130),
+            ])
+            for tunnel in data.get("tunnels") or []:
+                live = tunnel.get("connectors") or 0
+                connections = tunnel.get("connections") or 0
+                # У дужках - скільки каналів тримають ці машини. Число саме
+                # по собі нічого не означає (одна машина = близько чотирьох),
+                # але допомагає зрозуміти, звідки воно взялось.
+                count_text = self._t("{machines}  ({channels} каналів)").format(
+                    machines=live, channels=connections) if live else "0"
+                self._tunnel_table_row(tunnels_table, [
+                    (tunnel["name"] + (self._t("  (цей)") if tunnel["id"] == data.get("tunnel_id") else ""),
+                     self._SRV_TEXT),
+                    (count_text, self._SRV_ONLINE if live else self._SRV_MUTED),
+                ])
 
             # --- Адреси ---
             head = tk.Frame(cloud_box, bg=self._SRV_BG)
@@ -6276,7 +6337,15 @@ class ExcelViewerApp:
             if not data.get("addresses"):
                 muted(cloud_box, self._t("До тунелів цього акаунта не прив'язано жодної адреси.")).pack(
                     fill="x", pady=(4, 0))
-            resize_to_content()
+            # Мовчазне ковтання цієї помилки видавало брак прав за
+            # відсутність даних: вікно писало "жодної адреси" там, де
+            # насправді просто не змогло прочитати зону.
+            unreadable = data.get("unreadable_zones") or []
+            if unreadable:
+                muted(cloud_box, self._t(
+                    "Не вдалось прочитати DNS цих зон (токен не має на них прав): {zones}"
+                ).format(zones=", ".join(unreadable))).pack(fill="x", pady=(4, 0))
+            resize_to_content(settled=True)
 
         def cloud_worker():
             data, error = self._load_cloudflare_overview(token, hostname)
@@ -6345,9 +6414,11 @@ class ExcelViewerApp:
             return None, error
 
         addresses = []
+        unreadable_zones = []
         for zone in zones:
             zone_addresses, zone_error = cloudflare_api.list_tunnel_addresses(token, zone["id"])
             if zone_error:
+                unreadable_zones.append(zone["name"])
                 continue
             for address in zone_addresses:
                 address["zone_id"] = zone["id"]
@@ -6374,7 +6445,7 @@ class ExcelViewerApp:
         return {
             "account_id": account_id, "zones": zones, "addresses": addresses, "tunnels": tunnels,
             "tunnel_id": tunnel_id, "tunnel_name": tunnel_name, "connectors": connectors,
-            "registrar": registrar,
+            "registrar": registrar, "unreadable_zones": unreadable_zones,
         }, None
 
     # Ті самі кольори попередження, що вже в макеті й у client_app.py -
@@ -6425,24 +6496,32 @@ class ExcelViewerApp:
 
         window, card = self._tunnel_dialog_shell(self._t("Приєднати адресу"))
 
+        # Два поля - два підписи, кожен рівно над своїм. Grid, а не pack:
+        # інакше підписи "пливуть" відносно колонок.
+        name_block = tk.Frame(card, bg=self._SRV_BG)
+        name_block.pack(fill="x", pady=(0, 10))
+        name_block.grid_columnconfigure(0, weight=2)
+        name_block.grid_columnconfigure(2, weight=3)
         tk.Label(
-            card, text=self._t("Піддомен і домен"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            name_block, text=self._t("Піддомен (наприклад bot)"), bg=self._SRV_BG, fg=self._SRV_MUTED,
             font=("Segoe UI", 8), anchor="w",
-        ).pack(fill="x")
-        name_row = tk.Frame(card, bg=self._SRV_BG)
-        name_row.pack(fill="x", pady=(4, 10))
+        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+        tk.Label(
+            name_block, text=self._t("Домен"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).grid(row=0, column=2, sticky="w", pady=(0, 3))
         subdomain_var = tk.StringVar()
         subdomain_entry = tk.Entry(
-            name_row, textvariable=subdomain_var, bg="#15181B", fg=self._SRV_TEXT,
+            name_block, textvariable=subdomain_var, bg="#15181B", fg=self._SRV_TEXT,
             insertbackground=self._SRV_TEXT, relief="flat", highlightthickness=1,
             highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9),
         )
-        subdomain_entry.pack(side="left", fill="x", expand=True, ipady=4)
-        tk.Label(name_row, text=".", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9)).pack(
-            side="left", padx=4)
+        subdomain_entry.grid(row=1, column=0, sticky="ew", ipady=4)
+        tk.Label(name_block, text=".", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9)).grid(
+            row=1, column=1, padx=5)
         zone_var = tk.StringVar(value=zones[0]["name"])
-        self._tunnel_dropdown(name_row, zone_var, [zone["name"] for zone in zones]).pack(
-            side="left", fill="x", expand=True)
+        self._tunnel_dropdown(name_block, zone_var, [zone["name"] for zone in zones]).grid(
+            row=1, column=2, sticky="ew")
 
         tk.Label(
             card, text=self._t("До якого тунелю"), bg=self._SRV_BG, fg=self._SRV_MUTED,
@@ -6459,8 +6538,21 @@ class ExcelViewerApp:
             highlightcolor=self._SRV_BORDER,
         ).pack(fill="x", pady=(0, 10))
 
+        def clean_subdomain():
+            """Домен, вписаний у поле піддомену, відкидаємо: людина природно
+            вписує туди повну адресу, а склеювання давало aibotapp.uk.aibotapp.uk."""
+            value = subdomain_var.get().strip().strip(".").lower()
+            zone = zone_var.get().strip().lower()
+            if not value or not zone:
+                return value
+            if value == zone:
+                return ""
+            if value.endswith("." + zone):
+                return value[: -(len(zone) + 1)]
+            return value
+
         def update_preview(*_args):
-            subdomain = subdomain_var.get().strip().strip(".")
+            subdomain = clean_subdomain()
             full = f"{subdomain}.{zone_var.get()}" if subdomain else zone_var.get()
             preview_var.set(f"{full} → {tunnel_var.get()}")
 
@@ -6486,7 +6578,7 @@ class ExcelViewerApp:
         result_label.pack(fill="x", pady=(8, 0))
 
         def do_attach():
-            subdomain = subdomain_var.get().strip().strip(".")
+            subdomain = clean_subdomain()
             zone = next((item for item in zones if item["name"] == zone_var.get()), None)
             tunnel = next((item for item in tunnels if item["name"] == tunnel_var.get()), None)
             if zone is None or tunnel is None:
@@ -7341,6 +7433,9 @@ class ExcelViewerApp:
                     # "Тунель": cloudflare_token.txt має право ЗМІНЮВАТИ
                     # DNS, github_token.txt - публікувати релізи. Жоден із
                     # них не має шансу поїхати в чужі руки разом із пакетом.
+                    self._assert_build_is_fresh(
+                        gui_release_dir / "AI_Automation_Home.exe", BASE_DIR / "gui.py",
+                    )
                     stray_settings = (
                         list(gui_release_dir.rglob("settings.json"))
                         + list(gui_release_dir.rglob("app_data.sqlite3"))
@@ -7539,6 +7634,9 @@ class ExcelViewerApp:
                     # журнали) робочого ПК при оновленні. Публікація
                     # client-v0.2.57 з цим файлом уже сталась ДО того, як
                     # цю перевірку додано - виправлено republish'ом v0.2.58.
+                    self._assert_build_is_fresh(
+                        client_dist_dir / "AI_Automation_Client.exe", BASE_DIR / "client_app.py",
+                    )
                     stray_settings = (
                         list(client_dist_dir.rglob("settings.json"))
                         + list(client_dist_dir.rglob("app_data.sqlite3"))

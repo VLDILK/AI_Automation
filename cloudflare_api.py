@@ -84,30 +84,40 @@ def _request(path, token, method="GET", payload=None, timeout=_TIMEOUT, with_sta
     return (body.get("result"), None, 200) if with_status else (body.get("result"), None)
 
 
-# Токен Cloudflare - рівно 40 символів з [A-Za-z0-9_-]. Це не здогадка
-# про формат "на око": усе, що не таке, Cloudflare відкидає з тим самим
-# невиразним "Invalid API Token", що й справді відкликаний токен. Ловимо
-# локально й кажемо, ЩО саме не так.
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{40}$")
+# Довжина токена Cloudflare НЕ фіксована: старі були рівно 40 символів без
+# префікса, нові починаються з "cfat_" і помітно довші (реальний випадок -
+# 53 символи). Тому перевіряємо не точну довжину,
+# а лише те, що справді вказує на зіпсоване копіювання: сторонні символи
+# і явно неправдоподібний розмір. Сенс перевірки - не вгадати формат, а
+# відрізнити "скопійовано криво" від "Cloudflare відхилив", бо на обидва
+# випадки API відповідає тим самим невиразним "Invalid API Token".
+_TOKEN_CHARS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_TOKEN_MIN = 30
+_TOKEN_MAX = 200
 
 
 def describe_token_shape(token):
-    """None = форма правильна. Інакше - готове пояснення для людини."""
+    """None = форма правдоподібна. Інакше - готове пояснення для людини."""
     raw = token or ""
     token = raw.strip()
     if not token:
         return "Токен не вказано."
-    if _TOKEN_RE.match(token):
-        return None
-    if len(token) != 40:
-        return (
-            f"Схоже, скопійовано не весь токен: {len(token)} символів, а має бути рівно 40. "
-            "Скопіюйте рядок цілком із зеленої рамки після «Create Token»."
+    if not _TOKEN_CHARS_RE.match(token):
+        bad = sorted({character for character in token if not re.match(r"[A-Za-z0-9_-]", character)})
+        shown = " ".join(
+            "пробіл" if character == " " else ("перенос рядка" if character in "\r\n" else character)
+            for character in bad[:5]
         )
-    bad = sorted({character for character in token if not re.match(r"[A-Za-z0-9_-]", character)})
-    if bad:
-        shown = " ".join("пробіл" if character == " " else character for character in bad[:5])
-        return f"У токені є зайві символи ({shown}) - скопійовано разом із чимось стороннім."
+        return f"У токені є сторонні символи ({shown}) - скопійовано разом із чимось зайвим."
+    if len(token) < _TOKEN_MIN:
+        return (
+            f"Схоже, скопійовано не весь токен: лише {len(token)} символів. "
+            "Скопіюйте рядок цілком кнопкою Copy після «Create Token»."
+        )
+    if len(token) > _TOKEN_MAX:
+        return (
+            f"Рядок задовгий для токена ({len(token)} символів) - схоже, прихопили щось стороннє."
+        )
     return None
 
 
@@ -179,16 +189,27 @@ def list_tunnels(token, account_id):
     result, error = _request(f"/accounts/{account_id}/cfd_tunnel?is_deleted=false", token)
     if error:
         return [], error
-    return [
-        {
+    tunnels = []
+    for item in result or []:
+        if not item.get("id"):
+            continue
+        connections = item.get("connections") or []
+        # client_id - ідентифікатор запущеного cloudflared. Кілька з'єднань
+        # з одним client_id - це ОДНА машина, що тримає кілька каналів до
+        # різних точок входу; різні client_id - різні машини.
+        connectors = {
+            connection.get("client_id")
+            for connection in connections
+            if connection.get("client_id")
+        }
+        tunnels.append({
             "id": item.get("id"),
             "name": item.get("name"),
             "created_at": item.get("created_at"),
-            "connections": len(item.get("connections") or []),
-        }
-        for item in (result or [])
-        if item.get("id")
-    ], None
+            "connections": len(connections),
+            "connectors": len(connectors) if connectors else (1 if connections else 0),
+        })
+    return tunnels, None
 
 
 def list_connectors(token, account_id, tunnel_id):
