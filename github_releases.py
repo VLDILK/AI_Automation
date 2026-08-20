@@ -335,8 +335,7 @@ def list_recent_releases(owner, repo, limit=15, timeout=15, token=None):
                 "published_at": release.get("published_at") or "",
                 "notes": release.get("body") or "",
                 # Задача користувача (2026-08-19): "канал оновлень" - Історія
-                # позначає тестові релізи, щоб було видно, які ще чекають
-                # на "Просунути в стабільну".
+                # позначає тестові релізи окремим бейджем.
                 "prerelease": bool(release.get("prerelease")),
             }
         )
@@ -458,24 +457,6 @@ def create_release(token, owner, repo, tag_prefix, version, notes="", prerelease
     }).encode("utf-8")
     return _request(
         f"{API_ROOT}/repos/{owner}/{repo}/releases", token=token, method="POST", data=payload,
-        extra_headers={"Content-Type": "application/json"}, timeout=timeout,
-    )
-
-
-# Задача користувача (2026-08-19): "коли все ок - окрема кнопка 'Просунути
-# в стабільну' перемикає ТОЙ САМИЙ реліз (без нового білда/завантаження) на
-# 'стабільний'" - PATCH prerelease:false на вже опублікованому релізі, той
-# самий .zip-asset лишається на місці, жодного повторного завантаження.
-def promote_release_to_stable(token, owner, repo, tag_name, timeout=30):
-    release = _request(
-        f"{API_ROOT}/repos/{owner}/{repo}/releases/tags/{tag_name}", token=token, timeout=timeout,
-    )
-    release_id = (release or {}).get("id")
-    if not release_id:
-        raise RuntimeError(f"Релиз с тегом {tag_name} не найден.")
-    payload = json.dumps({"prerelease": False}).encode("utf-8")
-    return _request(
-        f"{API_ROOT}/repos/{owner}/{repo}/releases/{release_id}", token=token, method="PATCH", data=payload,
         extra_headers={"Content-Type": "application/json"}, timeout=timeout,
     )
 

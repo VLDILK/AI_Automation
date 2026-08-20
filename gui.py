@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.74"
+__version__ = "1.0.75"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -5787,11 +5787,11 @@ class ExcelViewerApp:
             )
             badge.pack(side="left")
 
-            # Задача користувача (2026-08-19): "канал оновлень... коли все
-            # ок - окрема кнопка 'Просунути в стабільну'" - тестові релізи
-            # (prerelease=True на GitHub) позначені окремим бейджем тут-таки,
-            # у "Історія", і мають власну кнопку промоції - без пошуку, чи
-            # взагалі був якийсь тестовий реліз й де саме.
+            # Тестові релізи (prerelease=True на GitHub) позначені окремим
+            # бейджем тут-таки, у "Історія" - без пошуку, чи взагалі був
+            # якийсь тестовий реліз й де саме. (2026-08-20: кнопку
+            # "Просунути в стабільну" прибрано - користувач публікує
+            # стабільну версію сам, звичайним потоком публікації.)
             if entry.get("prerelease"):
                 test_badge = tk.Label(
                     header, text=self._t("тестовий"), font=("Segoe UI", 8),
@@ -5812,46 +5812,6 @@ class ExcelViewerApp:
 
             chevron = tk.Label(header, text="▸", width=2)
             chevron.pack(side="right")
-
-            if entry.get("prerelease"):
-                tag_name = entry["tag_name"]
-                # promote_button читається ВСЕРЕДИНІ promote_release лише в
-                # момент кліку (звичайне замикання Python) - на той час він
-                # уже точно призначений нижче, порядок визначення тут не
-                # важливий.
-                def promote_release(tag_name=tag_name):
-                    token = github_token_var.get().strip()
-                    if not token:
-                        messagebox.showerror(self._t("Публікація оновлень"), self._t("Спершу вкажіть GitHub-токен."))
-                        return
-                    promote_button.config(state="disabled", text=self._t("Просування..."))
-
-                    def worker():
-                        error = None
-                        try:
-                            github_releases.promote_release_to_stable(
-                                token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, tag_name,
-                            )
-                        except Exception as exc:
-                            error = str(exc)
-                        self._run_on_main_thread(lambda: on_promote_finished(error))
-
-                    def on_promote_finished(error):
-                        if error:
-                            promote_button.config(state="normal", text=self._t("Просунути в стабільну"))
-                            messagebox.showerror(self._t("Публікація оновлень"), error)
-                            return
-                        # Успіх - перезавантажуємо всю "Історія": цей рядок
-                        # більше не тестовий, бейдж і кнопка мають зникнути.
-                        load_history()
-
-                    threading.Thread(target=worker, daemon=True).start()
-
-                promote_button = tk.Button(
-                    header, text=self._t("Просунути в стабільну"), font=("Segoe UI", 8),
-                    command=promote_release,
-                )
-                promote_button.pack(side="right", padx=(0, 6))
 
             state = {"expanded": False, "holder": tk.Frame(entry_frame)}
             state["holder"].pack(anchor="w", fill="x")
@@ -6093,9 +6053,11 @@ class ExcelViewerApp:
         # тестити, і оновлення потрібно публікувати в тестову версію
         # спершу" - те саме, що на GitHub зветься prerelease. Клієнт із
         # каналом "Тестова" (Налаштування) бачить УСІ релізи, "Стабільна"
-        # (за замовчуванням) - лише не-тестові. "Просунути в стабільну" (у
-        # "Історія" вище) перемикає prerelease заднім числом, без нового
-        # білда.
+        # (за замовчуванням) - лише не-тестові. Стабільний реліз
+        # публікується напряму звідси (галочка "Тестовий реліз" знята),
+        # без окремого "просунути заднім числом" (2026-08-20: та кнопка
+        # прибрана - користувач публікує стабільну версію сам, коли
+        # готовий).
         # Реальна скарга (2026-08-19, живе тестування): "не закріплюється
         # тут вибір" - дві окремі причини одразу. (1) Дефолтний Tk selectcolor
         # ("SystemWindow", майже білий) занадто близький до theme["bg"]
