@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.97"
+__version__ = "0.2.98"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1066,6 +1066,32 @@ class ClientApp(ctk.CTk):
             return "Файл не выбран — используется общий адрес по умолчанию."
         resolved = self._cloudflared_tunnel_hostname()
         return f"Файл: {hostname_file}\nАдрес: {resolved}"
+
+    # Задача користувача (2026-08-20): "зроби цю заміну оновленням новим" -
+    # вшитий у збірку credentials.json (спільний тунель) НЕ можна
+    # підмінити тестовим секретом через публікацію (публічний репозиторій -
+    # секрет піде в кожен .zip). Той самий принцип, що вже й адреса тунеля:
+    # шлях до ЗОВНІШНЬОГО (поза system/, отже недоторканого оновленнями)
+    # credentials-файлу зберігається в settings.json, сам файл користувач
+    # кладе на диск один раз вручну. Порожньо = стара поведінка (вшитий
+    # спільний файл, paths.CLOUDFLARED_TUNNEL_CREDENTIALS_PATH).
+    def _cloudflared_tunnel_credentials_path(self):
+        credentials_file = self.settings.get("cloudflared_tunnel_credentials_file")
+        if not credentials_file:
+            return paths.CLOUDFLARED_TUNNEL_CREDENTIALS_PATH
+        credentials_path = Path(credentials_file)
+        if not credentials_path.exists():
+            return paths.CLOUDFLARED_TUNNEL_CREDENTIALS_PATH
+        return credentials_path
+
+    def _cloudflared_tunnel_credentials_file_display(self):
+        credentials_file = self.settings.get("cloudflared_tunnel_credentials_file")
+        if not credentials_file:
+            return "Файл не выбран — используется общий credentials.json из сборки."
+        resolved = self._cloudflared_tunnel_credentials_path()
+        if str(resolved) == str(paths.CLOUDFLARED_TUNNEL_CREDENTIALS_PATH):
+            return f"Файл: {credentials_file}\nНе найден — используется общий credentials.json."
+        return f"Файл: {credentials_file}"
 
     # Задача користувача (2026-08-19): "що за ручне налаштування?
     # ...щоб автоматом бачив... і щоб я міг перемикатись між цими
@@ -2078,8 +2104,7 @@ class ClientApp(ctk.CTk):
         ctk.CTkLabel(
             window,
             text=(
-                "Адрес тунеля этого сервера (необязательно) — .txt-файл с одной строкой-адресом, "
-                "заполняется вместе с новым cloudflared_tunnel_credentials.json в system/. "
+                "Адрес тунеля этого сервера (необязательно) — .txt-файл с одной строкой-адресом. "
                 "Без файла — общий адрес по умолчанию."
             ),
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
@@ -2102,6 +2127,42 @@ class ClientApp(ctk.CTk):
         )
         ctk.CTkLabel(
             window, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
+        # Задача користувача (2026-08-20): "зроби цю заміну оновленням
+        # новим" - вшитий у збірку credentials.json НЕ можна безпечно
+        # підмінити секретом через публікацію (публічний репозиторій).
+        # Той самий файл-пікер, що й вище для адреси - шлях зберігається в
+        # settings.json, сам файл (виданий окремо, поза оновленнями)
+        # користувач кладе на диск один раз вручну.
+        ctk.CTkLabel(
+            window,
+            text=(
+                "Credentials-файл этого сервера (необязательно) — свой "
+                "cloudflared_tunnel_credentials.json вместо общего из сборки. "
+                "Без файла — общий (продакшн) credentials.json."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 6))
+
+        credentials_file_label_var = ctk.StringVar(value=self._cloudflared_tunnel_credentials_file_display())
+
+        def choose_credentials_file():
+            selected_file = filedialog.askopenfilename(
+                title="Выберите свой cloudflared_tunnel_credentials.json",
+                filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+            )
+            if not selected_file:
+                return
+            self.settings.set("cloudflared_tunnel_credentials_file", selected_file)
+            credentials_file_label_var.set(self._cloudflared_tunnel_credentials_file_display())
+
+        ctk.CTkButton(window, text="Выбрать файл credentials", command=choose_credentials_file).pack(
+            fill="x", padx=16, pady=(0, 4)
+        )
+        ctk.CTkLabel(
+            window, textvariable=credentials_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 16))
 
@@ -3974,12 +4035,13 @@ class ClientApp(ctk.CTk):
                     # не видається наново щоразу - жодного regex-пошуку
                     # URL у виводі більше не треба, лише дочекатись
                     # підтвердження, що з'єднання зареєстровано.
+                    credentials_path = self._cloudflared_tunnel_credentials_path()
                     process = subprocess.Popen(
                         [
                             str(paths.CLOUDFLARED_EXE), "tunnel", "run",
-                            "--credentials-file", str(paths.CLOUDFLARED_TUNNEL_CREDENTIALS_PATH),
+                            "--credentials-file", str(credentials_path),
                             "--url", f"http://localhost:{self.webapp_server.port}",
-                            paths.read_cloudflared_tunnel_id(),
+                            paths.read_cloudflared_tunnel_id(credentials_path),
                         ],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,

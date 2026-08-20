@@ -136,9 +136,17 @@ CLOUDFLARED_TUNNEL_CREDENTIALS_PATH = SYSTEM_DIR / "cloudflared_tunnel_credentia
 # реальний ID тунеля читається напряму з credentials-файлу, що фізично
 # лежить на кожній конкретній машині - той самий файл, що cloudflared й
 # так вимагає для --credentials-file, тож нового поля вводу для ID не треба.
-def read_cloudflared_tunnel_id():
+#
+# Задача користувача (2026-08-20): "зроби цю заміну оновленням новим" -
+# вшитий у збірку credentials.json НЕ можна замінити тестовим секретом
+# (публічний репозиторій, той самий клас витоку, що вже стався з
+# REMOTE_CONTROL_TOKEN) - тому опційний ЗОВНІШНІЙ файл (шлях у
+# settings.json, той самий принцип, що вже й "Адрес тунеля этого
+# сервера") лишається єдиним безпечним шляхом підмінити секрет.
+def read_cloudflared_tunnel_id(credentials_path=None):
+    path = credentials_path or CLOUDFLARED_TUNNEL_CREDENTIALS_PATH
     try:
-        data = json.loads(CLOUDFLARED_TUNNEL_CREDENTIALS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         tunnel_id = data.get("TunnelID")
         if tunnel_id:
             return tunnel_id
