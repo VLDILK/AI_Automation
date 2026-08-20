@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.99"
+__version__ = "0.3.0"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -2352,7 +2352,35 @@ class ClientApp(ctk.CTk):
             window, text="Установить эту версию", fg_color=COLOR_UPDATE_BLUE, hover_color=COLOR_UPDATE_BLUE,
             state="disabled",
         )
-        install_button.pack(fill="x", padx=16, pady=(4, 16))
+        install_button.pack(fill="x", padx=16, pady=(4, 6))
+
+        # Задача користувача (2026-08-20): "сюди теж додай полоску прогресу
+        # під завантаженням" - той самий принцип, що вже й у публікації
+        # (gui.py) та у звичайному оновленні (update_progress_bar вище):
+        # прихована, поки завантаження не почалось, показує реальні МБ.
+        rollback_progress_bar = ctk.CTkProgressBar(
+            window, height=6, corner_radius=3, fg_color=COLOR_ROW, progress_color=COLOR_UPDATE_BLUE,
+        )
+        rollback_progress_bar.set(0)
+        rollback_progress_text = ctk.StringVar(value="")
+        rollback_progress_label = ctk.CTkLabel(
+            window, textvariable=rollback_progress_text, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left",
+        )
+
+        def apply_rollback_progress(fraction, total_bytes):
+            rollback_progress_bar.set(fraction)
+            if not total_bytes:
+                rollback_progress_text.set(f"Загрузка: {fraction * 100:.0f}%")
+                return
+            rollback_progress_text.set(
+                f"Загрузка: {fraction * total_bytes / (1024 * 1024):.1f} из "
+                f"{total_bytes / (1024 * 1024):.1f} МБ ({fraction * 100:.0f}%)"
+            )
+
+        def hide_rollback_progress():
+            rollback_progress_bar.pack_forget()
+            rollback_progress_label.pack_forget()
 
         def update_details(*_args):
             entry = releases_by_label.get(version_var.get())
@@ -2411,6 +2439,10 @@ class ClientApp(ctk.CTk):
                 return
             install_button.configure(state="disabled", text="Загрузка...")
             status_var.set("")
+            rollback_progress_bar.set(0)
+            rollback_progress_text.set("Подготовка...")
+            rollback_progress_bar.pack(fill="x", padx=16, pady=(0, 4))
+            rollback_progress_label.pack(fill="x", padx=16, pady=(0, 12))
 
             def worker():
                 if not getattr(sys, "frozen", False):
@@ -2425,20 +2457,40 @@ class ClientApp(ctk.CTk):
                         paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, entry["tag_name"],
                         token=self.settings.get("github_read_token") or None,
                     )
+                    # Розмір саме того .zip, що зараз качається - GitHub
+                    # віддає його прямо в метаданих релізу, тож рахувати
+                    # МБ можна ще ДО початку завантаження.
+                    asset_size = next(
+                        (
+                            asset.get("size") or 0
+                            for asset in (release or {}).get("assets", [])
+                            if str(asset.get("name", "")).endswith(".zip")
+                        ),
+                        0,
+                    )
+
+                    def report_progress(fraction):
+                        self._run_on_main_thread(lambda: apply_rollback_progress(fraction, asset_size))
+
                     destination = Path(paths.BASE_DIR) / "updates"
-                    target = github_releases.download_and_extract_release(release, destination)
+                    target = github_releases.download_and_extract_release(
+                        release, destination, on_progress=report_progress,
+                    )
                 except Exception as exc:
                     error = str(exc)
 
                 def finish():
                     if error:
+                        hide_rollback_progress()
                         install_button.configure(state="normal", text="Установить эту версию")
                         status_var.set(f"Не удалось выполнить откат: {error}")
                         return
                     if not getattr(sys, "frozen", False):
+                        hide_rollback_progress()
                         install_button.configure(state="normal", text="Установить эту версию")
                         status_var.set(f"Загружено в {target}. В dev-режиме примените вручную.")
                         return
+                    hide_rollback_progress()
                     status_var.set("Установка и перезапуск...")
                     self._downloaded_update_target = target
                     self._install_downloaded_update()
