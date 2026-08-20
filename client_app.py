@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.93"
+__version__ = "0.2.94"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1084,11 +1084,15 @@ class ClientApp(ctk.CTk):
         # машини, де це реально стається.
         def worker():
             try:
-                self._last_registry_path = servers_registry.resolved_path_str()
+                # Задача користувача (2026-08-20): тест і робочий сервер -
+                # навмисно РІЗНІ акаунти OneDrive (servers_registry.py),
+                # тож шлях, куди пише САМЕ ЦЯ машина, залежить від kind.
+                kind = "test" if self.settings.get("update_channel") == "test" else "main"
+                self._last_registry_path = servers_registry.resolved_path_str(kind)
                 ok = servers_registry.register_this_server(
                     name=platform.node() or "Неизвестный ПК",
                     hostname=self._cloudflared_tunnel_hostname(),
-                    kind="test" if self.settings.get("update_channel") == "test" else "main",
+                    kind=kind,
                     version=__version__,
                 )
                 self._last_registry_error = None if ok else "register_this_server вернул False"
