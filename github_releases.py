@@ -265,6 +265,19 @@ def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeou
     return max(matching, key=lambda r: r.get("published_at") or "")
 
 
+# Задача користувача (2026-08-20): "давай працювати над змогою
+# користувачеві самостійно робити відкат программи" - list_recent_releases
+# нижче навмисно НЕ несе поле "assets" (легка версія лише для списку), тож
+# сама по собі не годиться для завантаження - потрібен ПОВНИЙ реліз за
+# конкретним тегом (той самий, що download_and_extract_release вже вміє
+# приймати - функція одразу нижче не змінюється, просто раніше отримувала
+# лише "найновіший" реліз).
+def get_release_by_tag(owner, repo, tag_name, timeout=15, token=None):
+    return _request(
+        f"{API_ROOT}/repos/{owner}/{repo}/releases/tags/{tag_name}", token=token, timeout=timeout,
+    )
+
+
 def list_recent_releases(owner, repo, limit=15, timeout=15, token=None):
     """Задача користувача (2026-08-19): "журнал оновлень... до кожної
     версії буде прикріплено такий файл з даними. чи просто дані" - окреме

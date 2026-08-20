@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.98"
+__version__ = "0.2.99"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -400,6 +400,7 @@ class ClientApp(ctk.CTk):
         self.auto_update_window = None
         self.update_channel_window = None
         self.onedrive_account_window = None
+        self.rollback_window = None
         self.main_title_style_window = None
         self._last_registry_error = "ещё не пытался"
         self._last_registry_path = None
@@ -1776,6 +1777,13 @@ class ClientApp(ctk.CTk):
         # find_account_folder) - надійніше, той самий механізм, яким цього
         # сеансу вручну діагностували плутанину акаунтів.
         self._build_row_button(card, "key", "Учётная запись OneDrive", self._open_onedrive_account_window)
+        # Задача користувача (2026-08-20): "змога користувачеві самостійно
+        # робити відкат программи... випадкова версія не туди потрапила,
+        # або щось не те відбулось в самому оновленні" - той самий
+        # download_and_extract_release/_install_downloaded_update, що й
+        # звичайне оновлення, лише джерело - ОБРАНИЙ, не обов'язково
+        # найновіший реліз (github_releases.get_release_by_tag).
+        self._build_row_button(card, "refresh", "Откат к предыдущей версии", self._open_rollback_window)
 
     # Задача користувача (2026-08-19, третя редакція): "не працює на
     # клієнті кнопка. вона має спливаюче вікно відкривати з
@@ -2252,6 +2260,195 @@ class ClientApp(ctk.CTk):
         ).pack(fill="x", padx=16, pady=(0, 16))
 
         ctk.CTkButton(window, text="Закрыть", command=window.destroy).pack(fill="x", padx=16, pady=(0, 16))
+
+    # Той самий короткий підпис під реліз-нотатками, що вже й gui.py
+    # "Історія" (навмисно продубльовано - client_app.py уникає імпорту
+    # важкого адмінського gui.py).
+    def _release_summary_line(self, notes):
+        text = (notes or "").strip()
+        if not text:
+            return ""
+        commits_marker = "Коміти:"
+        idx = text.find(commits_marker)
+        plain = text[:idx].strip() if idx > 0 else (text if idx == -1 else "")
+        if plain:
+            return plain.splitlines()[0]
+        if idx >= 0:
+            after = text[idx + len(commits_marker):].lstrip("\n")
+            for line in after.splitlines():
+                line = line.strip()
+                if line.startswith("- "):
+                    return line[2:]
+        return text.splitlines()[0]
+
+    # Задача користувача (2026-08-20): "змога користувачеві самостійно
+    # робити відкат программи... випадкова версія не туди потрапила, або
+    # щось не те відбулось в самому оновленні - завжди можна зробити
+    # відкат" - той самий шлях, що й звичайне оновлення
+    # (download_and_extract_release + _install_downloaded_update, robocopy
+    # /XF settings.json app_data.sqlite3, click-install-restart), лише
+    # джерело - ОБРАНИЙ реліз (github_releases.get_release_by_tag), не
+    # обов'язково найновіший.
+    def _open_rollback_window(self):
+        if self.rollback_window is not None and self.rollback_window.winfo_exists():
+            self.rollback_window.deiconify()
+            self.rollback_window.lift()
+            self.rollback_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Откат к предыдущей версии")
+        window.geometry("380x460")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.rollback_window = window
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(top, text="Откат к предыдущей версии", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(
+            side="left"
+        )
+
+        ctk.CTkLabel(
+            window,
+            text=(
+                f"Установит выбранную более старую версию вместо текущей ({__version__}). "
+                "Настройки и данные не затрагиваются."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 12))
+
+        ctk.CTkLabel(window, text="Версия", font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w").pack(
+            fill="x", padx=16, pady=(0, 4)
+        )
+
+        releases_by_label = {}
+        version_var = ctk.StringVar(value="Загрузка...")
+        dropdown = ctk.CTkOptionMenu(window, variable=version_var, values=["Загрузка..."], state="disabled")
+        dropdown.pack(fill="x", padx=16, pady=(0, 10))
+
+        details_var = ctk.StringVar(value="")
+        ctk.CTkLabel(
+            window, textvariable=details_var, font=("", 10.5), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 10))
+
+        if self.settings.get("auto_update_enabled"):
+            ctk.CTkLabel(
+                window,
+                text=(
+                    "⚠ Включены «Автообновления» — после отката программа может "
+                    "снова обновиться сама. Выключите их здесь же, если хотите "
+                    "остаться на выбранной версии."
+                ),
+                font=("", 10.5), text_color=COLOR_WARN, anchor="w", justify="left", wraplength=340,
+            ).pack(fill="x", padx=16, pady=(0, 6))
+
+        status_var = ctk.StringVar(value="")
+        ctk.CTkLabel(
+            window, textvariable=status_var, font=("", 10.5), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 4))
+
+        install_button = ctk.CTkButton(
+            window, text="Установить эту версию", fg_color=COLOR_UPDATE_BLUE, hover_color=COLOR_UPDATE_BLUE,
+            state="disabled",
+        )
+        install_button.pack(fill="x", padx=16, pady=(4, 16))
+
+        def update_details(*_args):
+            entry = releases_by_label.get(version_var.get())
+            if not entry:
+                details_var.set("")
+                return
+            summary = self._release_summary_line(entry.get("notes"))
+            published = self._format_last_seen(entry.get("published_at"))
+            details_var.set(f"Опубликовано: {published}\n{summary}" if summary else f"Опубликовано: {published}")
+
+        dropdown.configure(command=lambda *_a: update_details())
+
+        def load_releases():
+            try:
+                entries = github_releases.list_recent_releases(
+                    paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, limit=20,
+                    token=self.settings.get("github_read_token") or None,
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                self._run_on_main_thread(lambda: status_var.set(f"Не удалось получить список версий: {error_text}"))
+                return
+            client_entries = [
+                entry for entry in entries if entry.get("kind") == "client" and entry.get("version") != __version__
+            ]
+
+            def apply():
+                if not window.winfo_exists():
+                    return
+                if not client_entries:
+                    dropdown.configure(values=["Нет доступных версий"])
+                    version_var.set("Нет доступных версий")
+                    return
+                for entry in client_entries:
+                    label = f"{entry['version']} ({self._format_last_seen(entry.get('published_at'))})"
+                    releases_by_label[label] = entry
+                labels = list(releases_by_label.keys())
+                dropdown.configure(values=labels, state="normal")
+                version_var.set(labels[0])
+                update_details()
+                install_button.configure(state="normal")
+
+            self._run_on_main_thread(apply)
+
+        threading.Thread(target=load_releases, daemon=True).start()
+
+        def on_install_clicked():
+            entry = releases_by_label.get(version_var.get())
+            if not entry:
+                return
+            if not messagebox.askyesno(
+                "Откат версии",
+                f"Установить версию {entry['version']} вместо текущей ({__version__})?\n"
+                "Программа перезапустится.",
+            ):
+                return
+            install_button.configure(state="disabled", text="Загрузка...")
+            status_var.set("")
+
+            def worker():
+                if not getattr(sys, "frozen", False):
+                    try:
+                        code_backup.create_code_snapshot(label="pre_rollback", force=True)
+                    except OSError:
+                        pass
+                error = None
+                target = None
+                try:
+                    release = github_releases.get_release_by_tag(
+                        paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO, entry["tag_name"],
+                        token=self.settings.get("github_read_token") or None,
+                    )
+                    destination = Path(paths.BASE_DIR) / "updates"
+                    target = github_releases.download_and_extract_release(release, destination)
+                except Exception as exc:
+                    error = str(exc)
+
+                def finish():
+                    if error:
+                        install_button.configure(state="normal", text="Установить эту версию")
+                        status_var.set(f"Не удалось выполнить откат: {error}")
+                        return
+                    if not getattr(sys, "frozen", False):
+                        install_button.configure(state="normal", text="Установить эту версию")
+                        status_var.set(f"Загружено в {target}. В dev-режиме примените вручную.")
+                        return
+                    status_var.set("Установка и перезапуск...")
+                    self._downloaded_update_target = target
+                    self._install_downloaded_update()
+
+                self._run_on_main_thread(finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        install_button.configure(command=on_install_clicked)
+        window.bind("<Escape>", lambda event: window.destroy())
 
     def _build_bot_settings_section(self, parent):
         ctk.CTkLabel(parent, text="Бот", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))
