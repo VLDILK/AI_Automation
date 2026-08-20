@@ -71,7 +71,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.76"
+__version__ = "1.0.77"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1482,6 +1482,9 @@ class ExcelViewerApp:
         self._show_only(self.commands_frame, "commands")
 
     def show_custom_buttons(self):
+        self._custom_buttons_active_server_text.set(
+            self._t("Дані: {value}").format(value=self._active_server_display_name())
+        )
         self._refresh_custom_buttons()
         self._refresh_actions_view()
         self._show_only(self.custom_buttons_frame, "custom_buttons")
@@ -1921,6 +1924,13 @@ class ExcelViewerApp:
         title = tk.Label(top_bar, text=self._t("Журнали"), font=("Segoe UI", 12, "bold"))
         title.pack(side="left", padx=12)
 
+        # Задача користувача (2026-08-20): "чий журнал показуватиме
+        # программа" - однозначно видно, ЯКИЙ сервер зараз обраний.
+        tk.Label(
+            top_bar, text=self._t("Дані: {value}").format(value=self._active_server_display_name()),
+            anchor="e", fg="#8c959f",
+        ).pack(side="right")
+
         menu_panel = tk.Frame(self.journals_hub_frame)
         menu_panel.pack(expand=True)
 
@@ -2050,6 +2060,18 @@ class ExcelViewerApp:
 
         title = tk.Label(top_bar, text=self._t("Редактор кнопок"), font=("Segoe UI", 12, "bold"))
         title.pack(side="left", padx=12)
+
+        # Задача користувача (2026-08-20): "чй розклад кнопок показує" -
+        # цей фрейм будується ОДИН раз при старті (на відміну від Персоналу/
+        # Журналів), тож StringVar, а не статичний текст - show_custom_buttons()
+        # оновлює його щоразу заново на випадок, якщо активний сервер
+        # змінився, поки цей екран був закритий.
+        self._custom_buttons_active_server_text = tk.StringVar(
+            value=self._t("Дані: {value}").format(value=self._active_server_display_name())
+        )
+        tk.Label(
+            top_bar, textvariable=self._custom_buttons_active_server_text, anchor="e", fg="#8c959f",
+        ).pack(side="right")
 
         # Задача користувача (2026-08-18): "додай кнопку яка буде
         # перезберігати ці дані у хмарі... лише якщо кнопку натис - хмара
@@ -3078,6 +3100,14 @@ class ExcelViewerApp:
         refresh_button = tk.Button(top_bar, text=self._t("Обновити"), command=self._refresh_personnel)
         refresh_button.pack(side="left", padx=8)
 
+        # Задача користувача (2026-08-20): "чиї дані в персоналі показують"
+        # - однозначно видно, ЯКИЙ сервер зараз обраний, без потреби йти
+        # перевіряти в Налаштування/Сервері.
+        tk.Label(
+            top_bar, text=self._t("Дані: {value}").format(value=self._active_server_display_name()),
+            anchor="e", fg="#8c959f",
+        ).pack(side="right")
+
         # Задача користувача (2026-08-15): "синхронізація" - список тепер
         # ЛИШЕ показує реальний персонал client_app.py (де реально живе
         # бот) через тунель - додавання/редагування/видалення переїхало
@@ -3433,6 +3463,23 @@ class ExcelViewerApp:
 
     def _onedrive_shared_email(self):
         return (self.settings.get("onedrive_shared_email") or "").strip() or None
+
+    # Задача користувача (2026-08-20): "чиї дані в персоналі показують, чй
+    # розклад кнопок показує, та чий журнал показуватиме программа" -
+    # людське ім'я активного сервера (той самий hostname, що й
+    # remote_control_client._BASE_URL), щоб було однозначно видно, звідки
+    # реально прийшли дані на екрані. Локальний файловий пошук (не
+    # мережевий) - синхронно, без фонового потоку, як і
+    # _onedrive_account_status_text вище.
+    def _active_server_display_name(self):
+        hostname = remote_control_client.active_hostname()
+        if hostname == paths.CLOUDFLARED_TUNNEL_HOSTNAME:
+            return self._t("Стандартний")
+        servers = servers_registry.read_servers(self._onedrive_shared_email())
+        for name, server in servers.items():
+            if server.get("hostname") == hostname:
+                return name
+        return hostname
 
     def _onedrive_account_status_text(self):
         email = (self.settings.get("onedrive_shared_email") or "").strip()
@@ -5149,7 +5196,7 @@ class ExcelViewerApp:
     # _BASE_URL "наживо" на кожен виклик.
     # "сервер" - чоловічого роду, тому "Основний"/"Тестовий" (не
     # "Основна"/"Тестова") - узгодження прикметника з іменником.
-    _SERVER_KIND_LABELS = {"main": "Основний", "test": "Тестовий"}
+    _SERVER_KIND_LABELS = {"main": "Основний", "test": "Тестовий", "standard": "без реєстрації"}
 
     # Задача користувача (2026-08-19): "я хочу вміти вибирати кого
     # слухати... додай це у меню налаштувань" - той самий реєстр і той
@@ -5175,12 +5222,6 @@ class ExcelViewerApp:
             if getattr(self, "active_server_list_frame", None) is None or not frame.winfo_exists():
                 return
             self._clear_frame(frame)
-            if not servers:
-                tk.Label(
-                    frame, text=self._t("Серверів ще не видно."), anchor="w", fg="#8c959f",
-                ).pack(anchor="w")
-                self._apply_theme(frame)
-                return
             current_hostname = remote_control_client.active_hostname()
             self._active_server_var.set(current_hostname)
 
@@ -5189,12 +5230,26 @@ class ExcelViewerApp:
                 remote_control_client.set_active_server(hostname)
                 self.settings.set("active_remote_server_hostname", hostname)
 
-            for name, server in sorted(servers.items()):
-                kind_label = self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний"))
-                tk.Radiobutton(
-                    frame, text=f"{name} ({kind_label})", variable=self._active_server_var,
-                    value=server["hostname"], anchor="w", command=on_pick,
+            # Задача користувача (2026-08-20): "додай ще мені змогу вибрати
+            # стандартний (той який не прописується в строці)" - той самий
+            # синтетичний пункт, що й у "Сервері", завжди доступний
+            # незалежно від того, чи хтось зареєструвався.
+            tk.Radiobutton(
+                frame, text=self._t("Стандартний (без реєстрації)"), variable=self._active_server_var,
+                value=paths.CLOUDFLARED_TUNNEL_HOSTNAME, anchor="w", command=on_pick,
+            ).pack(anchor="w")
+
+            if not servers:
+                tk.Label(
+                    frame, text=self._t("Інших серверів ще не видно."), anchor="w", fg="#8c959f",
                 ).pack(anchor="w")
+            else:
+                for name, server in sorted(servers.items()):
+                    kind_label = self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний"))
+                    tk.Radiobutton(
+                        frame, text=f"{name} ({kind_label})", variable=self._active_server_var,
+                        value=server["hostname"], anchor="w", command=on_pick,
+                    ).pack(anchor="w")
             self._apply_theme(frame)
 
         def worker():
@@ -5219,7 +5274,9 @@ class ExcelViewerApp:
     _SRV_BORDER = "#3A3F46"
     _SRV_ACCENT = "#2F7BD9"
     _SRV_ONLINE = "#3EA96E"
-    _SRV_BADGE = {"main": ("#B5D4F4", "#0C447C"), "test": ("#FAC775", "#633806")}
+    _SRV_BADGE = {
+        "main": ("#B5D4F4", "#0C447C"), "test": ("#FAC775", "#633806"), "standard": ("#3A3F46", "#9AA1AB"),
+    }
 
     # Реальна скарга (2026-08-19, вдруге): "срам, давай як хотів я 1 в 1" -
     # перший фікс поправив лише кольори/контраст, але сама ПРОПОРЦІЯ
@@ -5272,7 +5329,7 @@ class ExcelViewerApp:
         servers_list = tk.Frame(card, bg=self._SRV_BG)
         servers_list.pack(fill="x")
 
-        def make_server_row(parent, name, server, dot_var, version_var):
+        def make_server_row(parent, name, server, dot_var, version_var, deletable=True):
             is_active = server["hostname"] == remote_control_client.active_hostname()
             row_bg = self._SRV_ROW_ACTIVE_BG if is_active else self._SRV_ROW_BG
             row = tk.Frame(
@@ -5307,19 +5364,22 @@ class ExcelViewerApp:
             for clickable in (row, name_label):
                 clickable.bind("<Button-1>", switch_to_this)
 
-            def delete_server():
-                if not messagebox.askyesno(
-                    self._t("Сервери"), self._t("Прибрати «{value}» зі спільного списку?").format(value=name),
-                ):
-                    return
-                servers_registry.remove_server(name, self._onedrive_shared_email())
-                refresh_list()
+            if deletable:
+                def delete_server():
+                    if not messagebox.askyesno(
+                        self._t("Сервери"), self._t("Прибрати «{value}» зі спільного списку?").format(value=name),
+                    ):
+                        return
+                    servers_registry.remove_server(name, self._onedrive_shared_email())
+                    refresh_list()
 
-            tk.Button(
-                row, text="✕", command=delete_server, width=2, bg=row_bg, fg=self._SRV_MUTED, relief="flat",
-                activebackground=self._SRV_ROW_ACTIVE_BG, activeforeground=self._SRV_TEXT,
-                highlightthickness=0, bd=0,
-            ).pack(side="left")
+                tk.Button(
+                    row, text="✕", command=delete_server, width=2, bg=row_bg, fg=self._SRV_MUTED, relief="flat",
+                    activebackground=self._SRV_ROW_ACTIVE_BG, activeforeground=self._SRV_TEXT,
+                    highlightthickness=0, bd=0,
+                ).pack(side="left")
+            else:
+                tk.Label(row, text="", width=2, bg=row_bg).pack(side="left")
             return row
 
         def refresh_statuses(rows_state):
@@ -5354,14 +5414,34 @@ class ExcelViewerApp:
                 if generation != refresh_list.generation:
                     return
                 self._clear_frame(servers_list)
+                rows_state = []
+
+                # Задача користувача (2026-08-20): "додай ще мені змогу
+                # вибрати стандартний (той який не прописується в строці)...
+                # основний зараз до оновлень і не покаже" - продакшн-сервер
+                # на старій версії (до 0.2.82) НІКОЛИ не з'явиться в
+                # реєстрі - синтетичний рядок дає доступ до дефолтної
+                # адреси (paths.CLOUDFLARED_TUNNEL_HOSTNAME) незалежно від
+                # того, чи хтось узагалі коли-небудь зареєструвався.
+                standard_server = {"hostname": paths.CLOUDFLARED_TUNNEL_HOSTNAME, "kind": "standard", "version": ""}
+                standard_dot_var = tk.StringVar(value="…")
+                standard_version_var = tk.StringVar(value="…")
+                make_server_row(
+                    servers_list, self._t("Стандартний"), standard_server,
+                    standard_dot_var, standard_version_var, deletable=False,
+                )
+                rows_state.append({
+                    "hostname": standard_server["hostname"],
+                    "dot_var": standard_dot_var, "version_var": standard_version_var,
+                })
+
                 if not servers:
                     tk.Label(
                         servers_list,
-                        text=self._t("Серверів ще не видно.\nКожен client_app.py сам з'являється тут протягом 2 хв після старту."),
+                        text=self._t("Інших серверів ще не видно.\nКожен client_app.py сам з'являється тут протягом 2 хв після старту."),
                         anchor="w", justify="left", wraplength=330, bg=self._SRV_BG, fg=self._SRV_MUTED,
                     ).pack(anchor="w", pady=8)
                 else:
-                    rows_state = []
                     for name, server in sorted(servers.items()):
                         dot_var = tk.StringVar(value="…")
                         version_var = tk.StringVar(value="…")
@@ -5369,7 +5449,7 @@ class ExcelViewerApp:
                         rows_state.append(
                             {"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var}
                         )
-                    refresh_statuses(rows_state)
+                refresh_statuses(rows_state)
                 resize_to_content()
 
             refresh_list.generation = getattr(refresh_list, "generation", 0) + 1
@@ -7885,9 +7965,16 @@ class ExcelViewerApp:
         self._update_remote_control_labels(status)
         self.root.after(self._REMOTE_CONTROL_POLL_INTERVAL_MS, self._remote_control_tick)
 
+    # Задача користувача (2026-08-20): "туди додай назву кого слухає
+    # зараз" - без цього незрозуміло, ЯКИЙ саме сервер стоїть за коротким
+    # "Сервер онлайн"/"Статус сервера невідомий", коли активний сервер
+    # можна перемикати (Сервері/Налаштування).
     def _update_remote_control_labels(self, status):
+        server_name = self._active_server_display_name()
         if not status:
-            self.telegram_status_text.set(self._t("Статус сервера невідомий"))
+            self.telegram_status_text.set(
+                self._t("Статус сервера невідомий") + f" — {server_name}"
+            )
             self.telegram_heartbeat_text.set("")
             self.webapp_status_text.set("")
             if self.telegram_status_label.winfo_exists():
@@ -7902,7 +7989,7 @@ class ExcelViewerApp:
         # поняття: сам факт успішної відповіді і є "онлайн", а мережевий
         # збій/недоступність сервера вже оброблені гілкою "if not status"
         # вище (fetch_remote_status повертає None).
-        self.telegram_status_text.set(self._t("Сервер онлайн"))
+        self.telegram_status_text.set(self._t("Сервер онлайн") + f" — {server_name}")
         status_color = "#1D9E75"
         if self.telegram_status_label.winfo_exists():
             self.telegram_status_label.configure(fg=status_color)
