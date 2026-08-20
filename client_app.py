@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.92"
+__version__ = "0.2.93"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -1029,15 +1029,40 @@ class ClientApp(ctk.CTk):
     # Задача користувача (2026-08-19): "дім слухає то одну програму то
     # іншу" - кілька реальних серверів не можуть ділити ОДИН named tunnel
     # (Cloudflare веде ім'я лише до останнього, хто підключився). Кожен
-    # окремий сервер тепер може мати ВЛАСНУ адресу - settings.json
-    # (cloudflared_tunnel_hostname), порожньо/відсутнє = стара поведінка
-    # (paths.CLOUDFLARED_TUNNEL_HOSTNAME, той самий спільний тунель, що й
-    # завжди був - нічого не ламається для тих, хто це ніколи не чіпав).
-    # Сам ID тунеля НЕ тут - paths.read_cloudflared_tunnel_id() читає його
-    # напряму з credentials-файлу цієї машини (той самий файл, що
-    # cloudflared і так вимагає).
+    # окремий сервер тепер може мати ВЛАСНУ адресу - файл (не текстове
+    # поле - "туди нічого вставити неможливо, зроби файл, так як з
+    # ключем"), той самий принцип, що вже й _read_telegram_token: шлях до
+    # .txt-файлу зберігається в settings.json, сам вміст (один рядок -
+    # адреса) перечитується щоразу свіжо. Немає файлу/порожньо = стара
+    # поведінка (paths.CLOUDFLARED_TUNNEL_HOSTNAME, той самий спільний
+    # тунель, що й завжди був - нічого не ламається для тих, хто це
+    # ніколи не чіпав). Сам ID тунеля НЕ тут - paths.read_cloudflared_
+    # tunnel_id() читає його напряму з credentials-файлу цієї машини (той
+    # самий файл, що cloudflared і так вимагає).
     def _cloudflared_tunnel_hostname(self):
-        return self.settings.get("cloudflared_tunnel_hostname") or paths.CLOUDFLARED_TUNNEL_HOSTNAME
+        hostname_file = self.settings.get("cloudflared_tunnel_hostname_file")
+        if not hostname_file:
+            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+        hostname_path = Path(hostname_file)
+        if not hostname_path.exists():
+            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+        try:
+            lines = hostname_path.read_text(encoding="utf-8-sig").splitlines()
+        except UnicodeDecodeError:
+            lines = hostname_path.read_text(encoding="cp1251").splitlines()
+        except OSError:
+            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+        hostname = next((line.strip() for line in lines if line.strip()), "")
+        return hostname or paths.CLOUDFLARED_TUNNEL_HOSTNAME
+
+    # Короткий підпис під кнопкою вибору файлу - показує, що реально
+    # зараз обрано (чи "нічого", і тоді діє спільна адреса за замовчуванням).
+    def _cloudflared_tunnel_hostname_file_display(self):
+        hostname_file = self.settings.get("cloudflared_tunnel_hostname_file")
+        if not hostname_file:
+            return "Файл не выбран — используется общий адрес по умолчанию."
+        resolved = self._cloudflared_tunnel_hostname()
+        return f"Файл: {hostname_file}\nАдрес: {resolved}"
 
     # Задача користувача (2026-08-19): "що за ручне налаштування?
     # ...щоб автоматом бачив... і щоб я міг перемикатись між цими
@@ -2021,32 +2046,46 @@ class ClientApp(ctk.CTk):
         token_entry = ctk.CTkEntry(window, textvariable=token_var, placeholder_text="ghp_...", show="•")
         token_entry.pack(fill="x", padx=16, pady=(0, 16))
 
-        # Задача користувача (2026-08-19): "дім слухає то одну програму то
-        # іншу" - кілька серверів не можуть ділити один named tunnel.
-        # Заповнюється РАЗОМ з установкою нового system/cloudflared_tunnel_
-        # credentials.json на цій конкретній машині (той самий одноразовий,
-        # ручний крок налаштування, що вже є для самого файлу credentials) -
-        # порожньо = стара поведінка, спільний тунель за замовчуванням.
+        # Задача користувача (2026-08-19, друга редакція): "туди нічого
+        # вставити неможливо. зроби не строка а файл. так як з ключем" -
+        # текстове поле прибрано, той самий принцип, що вже й "ТГ ключ"/
+        # "ID чату для дублів" (filedialog.askopenfilename) - шлях до
+        # маленького .txt-файлу (один рядок - адреса) зберігається в
+        # налаштуваннях, сам вміст перечитується щоразу свіжо
+        # (_cloudflared_tunnel_hostname), файл заповнюється РАЗОМ з новим
+        # cloudflared_tunnel_credentials.json на цій машині - той самий
+        # одноразовий ручний крок. Немає файлу = стара поведінка, спільний
+        # адрес за замовчуванням.
         ctk.CTkLabel(
             window,
             text=(
-                "Адрес тунеля этого сервера (необязательно) — заполняется вместе "
-                "с новым cloudflared_tunnel_credentials.json в system/. Пусто — общий адрес по умолчанию."
+                "Адрес тунеля этого сервера (необязательно) — .txt-файл с одной строкой-адресом, "
+                "заполняется вместе с новым cloudflared_tunnel_credentials.json в system/. "
+                "Без файла — общий адрес по умолчанию."
             ),
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 6))
 
-        hostname_var = ctk.StringVar(value=self.settings.get("cloudflared_tunnel_hostname") or "")
+        hostname_file_label_var = ctk.StringVar(value=self._cloudflared_tunnel_hostname_file_display())
 
-        def on_hostname_changed(*_args):
-            self.settings.set("cloudflared_tunnel_hostname", hostname_var.get().strip())
+        def choose_hostname_file():
+            selected_file = filedialog.askopenfilename(
+                title="Выберите txt-файл с адресом тунеля",
+                filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+            )
+            if not selected_file:
+                return
+            self.settings.set("cloudflared_tunnel_hostname_file", selected_file)
+            hostname_file_label_var.set(self._cloudflared_tunnel_hostname_file_display())
 
-        hostname_entry = ctk.CTkEntry(
-            window, textvariable=hostname_var, placeholder_text=paths.CLOUDFLARED_TUNNEL_HOSTNAME,
+        ctk.CTkButton(window, text="Выбрать файл с адресом", command=choose_hostname_file).pack(
+            fill="x", padx=16, pady=(0, 4)
         )
-        hostname_entry.pack(fill="x", padx=16, pady=(0, 16))
-        hostname_entry.bind("<FocusOut>", on_hostname_changed)
-        hostname_entry.bind("<Return>", on_hostname_changed)
+        ctk.CTkLabel(
+            window, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
         token_entry.bind("<FocusOut>", on_token_changed)
         token_entry.bind("<Return>", on_token_changed)
 
