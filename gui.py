@@ -27,7 +27,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 from tkinter import ttk, messagebox, filedialog, simpledialog, colorchooser
-from datetime import datetime
+from tkinter import font as tkfont
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import excel_source
@@ -35,8 +36,10 @@ import github_releases
 import onedrive_sync
 import paths
 import permissions as perm
+import cloudflare_api
 import code_backup
 import config_backup
+import domain_info
 import remote_control_client
 import servers_registry
 import standard_menu_cloud
@@ -71,7 +74,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.78"
+__version__ = "1.0.86"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1065,6 +1068,17 @@ class ExcelViewerApp:
             command=self.open_servers_dialog,
         )
         servers_button.pack(pady=8)
+
+        # Задача користувача (2026-08-20): "додай це просто в меню, щоб я
+        # бачив" - другий вхід у те саме вікно, без заходу в "Сервери".
+        tunnel_button = tk.Button(
+            menu_panel,
+            text=self._t("Тунель"),
+            width=28,
+            height=2,
+            command=self.open_tunnel_dialog,
+        )
+        tunnel_button.pack(pady=8)
 
         exit_button = tk.Button(
             menu_panel,
@@ -5234,10 +5248,30 @@ class ExcelViewerApp:
             # стандартний (той який не прописується в строці)" - той самий
             # синтетичний пункт, що й у "Сервері", завжди доступний
             # незалежно від того, чи хтось зареєструвався.
+            # На відміну від попапу "Сервери" (де два рядки на одну адресу
+            # КОРИСНІ - це два незалежні опитування), тут список не
+            # спостерігає, а ВИБИРАЄ: два радіо-пункти з однаковим value
+            # ламають сам вибір - Tk підсвічує обидва як обрані, і
+            # незрозуміло, що вибрано. Тому адреса за замовчуванням завжди
+            # рівно один пункт, а імена зареєстрованих серверів, які сидять
+            # на тій самій адресі, дописуються в його ж підпис - жодна
+            # машина не зникає зі списку.
+            standard_hostname = paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            same_address = sorted(
+                name for name, server in servers.items()
+                if (server.get("hostname") or "") == standard_hostname
+            )
+            standard_text = self._t("Стандартний (без реєстрації)")
+            if same_address:
+                standard_text = "%s - %s" % (standard_text, ", ".join(same_address))
             tk.Radiobutton(
-                frame, text=self._t("Стандартний (без реєстрації)"), variable=self._active_server_var,
-                value=paths.CLOUDFLARED_TUNNEL_HOSTNAME, anchor="w", command=on_pick,
+                frame, text=standard_text, variable=self._active_server_var,
+                value=standard_hostname, anchor="w", command=on_pick,
             ).pack(anchor="w")
+            servers = {
+                name: server for name, server in servers.items()
+                if (server.get("hostname") or "") != standard_hostname
+            }
 
             if not servers:
                 tk.Label(
@@ -5329,8 +5363,7 @@ class ExcelViewerApp:
         servers_list = tk.Frame(card, bg=self._SRV_BG)
         servers_list.pack(fill="x")
 
-        def make_server_row(parent, name, server, dot_var, version_var, deletable=True):
-            is_active = server["hostname"] == remote_control_client.active_hostname()
+        def make_server_row(parent, name, server, dot_var, version_var, node_var, is_active, deletable=True):
             row_bg = self._SRV_ROW_ACTIVE_BG if is_active else self._SRV_ROW_BG
             row = tk.Frame(
                 parent, bg=row_bg, highlightthickness=1,
@@ -5339,11 +5372,27 @@ class ExcelViewerApp:
                 padx=8, pady=6, cursor="hand2",
             )
             row.pack(fill="x", pady=2)
+            # Реальний баг (2026-08-20): два рядки списку показували ТУ САМУ
+            # машину, бо ДВА різні client_app.py трималися однієї адреси
+            # тунелю - із самого рядка це було не видно. Другий, приглушений
+            # рядок під іменем каже, ХТО насправді відповів (platform.node()
+            # зі /control/status), і лише тоді, коли це НЕ той, кого рядок
+            # обіцяє - інакше порожньо, щоб не дублювати ім'я двічі. Місце
+            # під нього зарезервоване ЗАВЖДИ (label спакований одразу, лише
+            # текст порожній) - рядок не має підстрибувати, коли відповідь
+            # приходить із мережі.
+            name_column = tk.Frame(row, bg=row_bg)
+            name_column.pack(side="left", fill="x", expand=True)
             name_label = tk.Label(
-                row, text=(f"✓ {name}" if is_active else name), anchor="w",
+                name_column, text=(f"✓ {name}" if is_active else name), anchor="w",
                 font=("Segoe UI", 10, "bold" if is_active else "normal"), bg=row_bg, fg=self._SRV_TEXT,
             )
-            name_label.pack(side="left", fill="x", expand=True)
+            name_label.pack(anchor="w", fill="x")
+            node_label = tk.Label(
+                name_column, textvariable=node_var, anchor="w", font=("Segoe UI", 8),
+                bg=row_bg, fg=self._SRV_MUTED,
+            )
+            node_label.pack(anchor="w", fill="x")
             badge_bg, badge_fg = self._SRV_BADGE.get(server["kind"], self._SRV_BADGE["main"])
             badge = tk.Label(
                 row, text=self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний")), font=("Segoe UI", 8),
@@ -5359,9 +5408,14 @@ class ExcelViewerApp:
             def switch_to_this(event=None):
                 remote_control_client.set_active_server(server["hostname"])
                 self.settings.set("active_remote_server_hostname", server["hostname"])
+                # Самої адреси не досить, щоб потім відновити "✓": кілька
+                # рядків можуть мати ОДНУ адресу (дві машини за одним
+                # тунелем), і без імені рядка позначка стрибала б на
+                # перший-ліпший із них замість натиснутого.
+                self.settings.set("active_remote_server_row", name)
                 refresh_list()
 
-            for clickable in (row, name_label):
+            for clickable in (row, name_column, name_label, node_label):
                 clickable.bind("<Button-1>", switch_to_this)
 
             if deletable:
@@ -5390,9 +5444,30 @@ class ExcelViewerApp:
                         if status is None:
                             state["dot_var"].set("○")
                             state["version_var"].set(self._t("нет связи"))
+                            state["node_var"].set(state["default_subline"])
                         else:
                             state["dot_var"].set("●")
-                            state["version_var"].set(status.get("version") or "?")
+                            # Задача користувача (2026-08-20): "неоновлений
+                            # так і показувати як без версії чи стара
+                            # версія". Поля "version" немає взагалі лише в
+                            # клієнтах, старших за той реліз, де його
+                            # додали - тобто порожньо тут означає не збій, а
+                            # конкретний факт: відповіла стара збірка.
+                            # Коротке "старая" - бо колонка фіксовані 7
+                            # символів (55px), а "старая версия" займає 83px
+                            # і обрізалась би посеред слова.
+                            state["version_var"].set(
+                                (status.get("version") or "").strip() or self._t("старая")
+                            )
+                            # Порожньо, коли відповіла та сама машина, що й у
+                            # назві рядка - підпис потрібен лише там, де вони
+                            # РОЗІЙШЛИСЬ (або де рядок узагалі не називає
+                            # машини, як синтетичний "Стандартний"). Старі
+                            # клієнти поля "node" ще не шлють - теж порожньо.
+                            node = (status.get("node") or "").strip()
+                            state["node_var"].set(
+                                node if node and node != state["name"] else state["default_subline"]
+                            )
                     self._run_on_main_thread(apply)
 
             threading.Thread(target=worker, daemon=True).start()
@@ -5423,17 +5498,70 @@ class ExcelViewerApp:
                 # реєстрі - синтетичний рядок дає доступ до дефолтної
                 # адреси (paths.CLOUDFLARED_TUNNEL_HOSTNAME) незалежно від
                 # того, чи хтось узагалі коли-небудь зареєструвався.
-                standard_server = {"hostname": paths.CLOUDFLARED_TUNNEL_HOSTNAME, "kind": "standard", "version": ""}
-                standard_dot_var = tk.StringVar(value="…")
-                standard_version_var = tk.StringVar(value="…")
-                make_server_row(
-                    servers_list, self._t("Стандартний"), standard_server,
-                    standard_dot_var, standard_version_var, deletable=False,
-                )
-                rows_state.append({
-                    "hostname": standard_server["hostname"],
-                    "dot_var": standard_dot_var, "version_var": standard_version_var,
-                })
+                # Реальна скарга (2026-08-20, одразу після спроби прибрати
+                # цей рядок як "дубль"): "тепер перестав бачити неоновлений
+                # стандартний". Дедуплікація за адресою була ПОМИЛКОЮ саме
+                # тут: два рядки справді вели на одну адресу, але за нею
+                # стоять ДВІ РІЗНІ машини (робочий клієнт, який досі на
+                # старій версії й НІКОЛИ себе не реєструє, і оновлений
+                # тестовий) - Cloudflare щоразу обирає бекенд наново. Тобто
+                # синтетичний рядок був єдиною ручкою до неоновленої
+                # машини, і прибирати його не можна НІКОЛИ: він тут не
+                # "запасний варіант на випадок порожнього реєстру", а
+                # постійний спостерігач за адресою за замовчуванням. Два
+                # рядки на одну адресу - це ДВА незалежні опитування, тобто
+                # вдвічі більше шансів упіймати стару машину; хто саме
+                # відповів, видно з підпису під іменем.
+                standard_server = {
+                    "hostname": paths.CLOUDFLARED_TUNNEL_HOSTNAME, "kind": "standard", "version": "",
+                }
+                display_rows = [(self._t("Стандартний"), standard_server, False)]
+                for name, server in sorted(servers.items()):
+                    display_rows.append((name, server, True))
+
+                # Реальний баг (2026-08-20, скріншот): "показує 2 вибраних...
+                # вони ніби злиті" - обидва рядки стояли з "✓" і синьою
+                # рамкою ОДНОЧАСНО. Причина: is_active рахувався з самої
+                # АДРЕСИ, а вона в обох рядків однакова, тож активними
+                # ставали обидва. Тепер "✓" дістається рівно одному рядку -
+                # тому, який людина справді натиснула (ім'я лежить у
+                # settings), а якщо його в списку вже нема - першому за
+                # порядком. Самі рядки лишаються обидва: за однією адресою
+                # реально сидять дві різні машини, і це не помилка списку.
+                active_hostname = remote_control_client.active_hostname()
+                same_as_active = [
+                    name for name, server, _ in display_rows if server["hostname"] == active_hostname
+                ]
+                preferred_row = self.settings.get("active_remote_server_row") or ""
+                if preferred_row in same_as_active:
+                    active_row_name = preferred_row
+                elif same_as_active:
+                    active_row_name = same_as_active[0]
+                else:
+                    active_row_name = ""
+
+                seen_hostnames = set()
+                for name, server, deletable in display_rows:
+                    hostname = server["hostname"]
+                    # Другий і наступні рядки з ТІЄЮ САМОЮ адресою кажуть про
+                    # це прямо: без підпису два однакові рядки виглядають як
+                    # збій програми, а не як реальний стан (дві машини за
+                    # одним тунелем). Живий підпис машини (node) має
+                    # пріоритет і перекриває цей текст, коли приходить.
+                    default_subline = self._t("та сама адреса") if hostname in seen_hostnames else ""
+                    seen_hostnames.add(hostname)
+                    dot_var = tk.StringVar(value="…")
+                    version_var = tk.StringVar(value="…")
+                    node_var = tk.StringVar(value=default_subline)
+                    make_server_row(
+                        servers_list, name, server, dot_var, version_var, node_var,
+                        is_active=(name == active_row_name), deletable=deletable,
+                    )
+                    rows_state.append({
+                        "hostname": hostname, "name": name, "dot_var": dot_var,
+                        "version_var": version_var, "node_var": node_var,
+                        "default_subline": default_subline,
+                    })
 
                 if not servers:
                     tk.Label(
@@ -5441,14 +5569,6 @@ class ExcelViewerApp:
                         text=self._t("Інших серверів ще не видно.\nКожен client_app.py сам з'являється тут протягом 2 хв після старту."),
                         anchor="w", justify="left", wraplength=330, bg=self._SRV_BG, fg=self._SRV_MUTED,
                     ).pack(anchor="w", pady=8)
-                else:
-                    for name, server in sorted(servers.items()):
-                        dot_var = tk.StringVar(value="…")
-                        version_var = tk.StringVar(value="…")
-                        make_server_row(servers_list, name, server, dot_var, version_var)
-                        rows_state.append(
-                            {"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var}
-                        )
                 refresh_statuses(rows_state)
                 resize_to_content()
 
@@ -5469,6 +5589,15 @@ class ExcelViewerApp:
             activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
             highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
         ).pack(side="left")
+        # Задача користувача (2026-08-20): "створи там окрему кнопку" -
+        # звідси, з того самого місця, де людина й помітила, що дві машини
+        # злились в один рядок.
+        tk.Button(
+            bottom, text=self._t("Тунель"), command=self.open_tunnel_dialog,
+            bg=self._SRV_ROW_BG, fg="#9EC5F2", activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, padx=14, pady=6,
+        ).pack(side="left", padx=(6, 0))
         tk.Button(
             bottom, text=self._t("Закрити"), command=window.destroy,
             bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
@@ -5484,6 +5613,1034 @@ class ExcelViewerApp:
         # світлу/темну тему програми.
         resize_to_content()
         refresh_list()
+
+    # ---------- Вікно "Тунель" ----------
+    # Задача користувача (2026-08-20): "хочу інформацію про тунель бачити в
+    # домашці... створи там окрему кнопку, розширь вікно... а ще можливо
+    # термін закінчення дії там вивести? а також додати змогу приєднувати чи
+    # від'єднувати куплені посилання".
+    #
+    # Чому ОКРЕМЕ вікно, а не всередині "Сервери": той діалог людина свого
+    # часу вивіряла до 360px ("срам, давай як хотів я 1 в 1"), а таблиця
+    # конекторів туди не влазить. Тут - власна ширина, "Сервери" лишається
+    # незмінним.
+    #
+    # Вікно НАВМИСНО поділене на дві половини за вимогами доступу:
+    #   - "Хто відповідає" і "Домени" працюють ЗАВЖДИ, без токена й на
+    #     будь-якій машині (самоопитування адреси + публічний RDAP);
+    #   - "Конектори" й керування адресами вимагають токена Cloudflare.
+    # Без цього поділу вікно без токена було б просто порожнім - а так воно
+    # й далі відповідає на головне питання "чи злиті машини прямо зараз".
+    _TUNNEL_WIDTH = 720
+    _TUNNEL_PROBE_ATTEMPTS = 12
+
+    def _read_cloudflare_token(self):
+        if paths.CLOUDFLARE_TOKEN_PATH.exists():
+            try:
+                return paths.CLOUDFLARE_TOKEN_PATH.read_text(encoding="utf-8").strip()
+            except OSError:
+                return ""
+        return ""
+
+    def _write_cloudflare_token(self, token):
+        """Той самий шлях, що й у токена GitHub (_write_github_publish_token):
+        system/ уже в .gitignore, тож у репозиторій не потрапляє, а запис іде
+        через .tmp + os.replace - обрив посеред збереження не лишає
+        напівзаписаного токена."""
+        paths.CLOUDFLARE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        token = (token or "").strip()
+        if not token:
+            paths.CLOUDFLARE_TOKEN_PATH.unlink(missing_ok=True)
+            return
+        tmp_path = paths.CLOUDFLARE_TOKEN_PATH.with_name(paths.CLOUDFLARE_TOKEN_PATH.name + ".tmp")
+        tmp_path.write_text(token, encoding="utf-8")
+        os.replace(tmp_path, paths.CLOUDFLARE_TOKEN_PATH)
+
+    # Tk не вміє заокруглених кутів у жодного віджета. Значок-"пігулку"
+    # робимо картинкою: PIL малює заокруглений прямокутник (з 4-кратним
+    # згладжуванням, інакше кути "драбинкою"), а сам ТЕКСТ малює Tk поверх
+    # неї через compound="center" - тобто шрифт лишається рідним, як у
+    # решті програми, і нічого не треба міряти в PIL.
+    # Картинку композитимо одразу на колір ТЛА рядка, а не лишаємо
+    # прозорість: так кути виглядають правильно на будь-якій версії Tk.
+    # Якщо PIL раптом недоступний (у зібраному .exe теоретично можливо) -
+    # мовчки лишається звичайний квадратний Label, вікно не ламається.
+    def _rounded_badge(self, parent, text, fill_color, text_color, behind_color, font=("Segoe UI", 8)):
+        photo = None
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+
+            cache = getattr(self, "_tunnel_badge_cache", None)
+            if cache is None:
+                cache = self._tunnel_badge_cache = {}
+            measure_font = tkfont.Font(font=font)
+            width = measure_font.measure(text) + 14
+            height = measure_font.metrics("linespace") + 6
+            key = (width, height, fill_color, behind_color)
+            photo = cache.get(key)
+            if photo is None:
+                scale = 4
+                image = Image.new("RGB", (width * scale, height * scale), behind_color)
+                ImageDraw.Draw(image).rounded_rectangle(
+                    (0, 0, width * scale - 1, height * scale - 1),
+                    radius=4 * scale, fill=fill_color,
+                )
+                photo = ImageTk.PhotoImage(image.resize((width, height), Image.LANCZOS))
+                cache[key] = photo
+        except Exception:
+            photo = None
+        if photo is None:
+            return tk.Label(parent, text=text, bg=fill_color, fg=text_color, font=font, padx=5)
+        label = tk.Label(
+            parent, image=photo, text=text, compound="center", fg=text_color,
+            bg=behind_color, font=font, borderwidth=0, highlightthickness=0,
+        )
+        label.image = photo
+        return label
+
+    def _tunnel_section_title(self, parent, text, pady=(14, 4)):
+        label = tk.Label(
+            parent, text=text, bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 9), anchor="w",
+        )
+        label.pack(fill="x", pady=pady)
+        return label
+
+    # Таблиці тут - grid, а не pack: у прототипі заголовки колонок
+    # розповзались із рядками на кілька пікселів саме тому, що заголовок
+    # без рамки, а рядок із рамкою в 1px. grid із однаковими вагами
+    # колонок тримає їх рівно.
+    def _tunnel_table(self, parent, columns):
+        table = tk.Frame(parent, bg=self._SRV_BG)
+        table.pack(fill="x")
+        header = tk.Frame(table, bg=self._SRV_BG)
+        header.pack(fill="x", pady=(0, 2))
+        for index, (title, weight, minwidth) in enumerate(columns):
+            tk.Label(
+                header, text=title, bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8), anchor="w",
+            ).grid(row=0, column=index, sticky="w", padx=(7, 0))
+            header.grid_columnconfigure(index, weight=weight, minsize=minwidth)
+        table.columns = columns
+        return table
+
+    def _tunnel_table_row(self, table, cells, bg=None):
+        bg = bg or self._SRV_ROW_BG
+        row = tk.Frame(
+            table, bg=bg, highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_BORDER,
+        )
+        row.pack(fill="x", pady=1)
+        for index, (weight, minwidth) in enumerate((column[1], column[2]) for column in table.columns):
+            row.grid_columnconfigure(index, weight=weight, minsize=minwidth)
+        for index, cell in enumerate(cells):
+            if callable(cell):
+                widget = cell(row, bg)
+            else:
+                text, color = cell
+                widget = tk.Label(
+                    row, text=text, bg=bg, fg=color, font=("Segoe UI", 9), anchor="w",
+                )
+            widget.grid(row=0, column=index, sticky="w", padx=(6, 0), pady=4)
+        return row
+
+    def open_tunnel_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Тунель"))
+        window.configure(bg=self._SRV_BG)
+        window.transient(self.root)
+
+        card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=12)
+        card.pack(fill="both", expand=True)
+
+        tk.Label(
+            card, text=self._t("Тунель"), font=("Segoe UI", 13, "bold"), anchor="w",
+            bg=self._SRV_BG, fg=self._SRV_TEXT,
+        ).pack(fill="x")
+        subtitle_var = tk.StringVar(value=remote_control_client.active_hostname())
+        tk.Label(
+            card, textvariable=subtitle_var, anchor="w", font=("Segoe UI", 8),
+            bg=self._SRV_BG, fg=self._SRV_MUTED,
+        ).pack(fill="x", pady=(1, 10))
+
+        # ---- Доступ до Cloudflare ----
+        access = tk.Frame(
+            card, bg=self._SRV_BG, highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_BORDER, padx=8, pady=7,
+        )
+        access.pack(fill="x")
+        access_title = tk.Label(
+            access, text=self._t("Доступ до Cloudflare"), bg=self._SRV_BG, fg=self._SRV_TEXT,
+            font=("Segoe UI", 9), anchor="w",
+        )
+        access_title.pack(fill="x")
+        # Блок доступу має ДВА вигляди (макет, стани 1 і 2): доки токена
+        # нема або його міняють - розгорнуте поле з підказкою; щойно
+        # прийнято - один рядок із хвостиком токена, переліком того, що
+        # реально перевірено, і кнопкою "Замінити". Обидва живуть тут
+        # одночасно, показується рівно один.
+        expanded = tk.Frame(access, bg=self._SRV_BG)
+        expanded.pack(fill="x")
+        field_row = tk.Frame(expanded, bg=self._SRV_BG)
+        field_row.pack(fill="x", pady=(6, 0))
+        token_var = tk.StringVar(value=self._read_cloudflare_token())
+        token_entry = tk.Entry(
+            field_row, textvariable=token_var, bg="#15181B", fg=self._SRV_TEXT, insertbackground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9), show="•",
+        )
+        token_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        status_row = tk.Frame(expanded, bg=self._SRV_BG)
+        status_row.pack(fill="x", pady=(6, 0))
+        status_icon_var = tk.StringVar(value="")
+        status_text_var = tk.StringVar(
+            value=self._t("Потрібні права: Zone:DNS:Edit на цю зону та Account:Cloudflare Tunnel:Read.")
+        )
+        status_icon = tk.Label(status_row, textvariable=status_icon_var, bg=self._SRV_BG, fg=self._SRV_MUTED,
+                               font=("Segoe UI", 10, "bold"))
+        status_icon.pack(side="left")
+        status_label = tk.Label(status_row, textvariable=status_text_var, bg=self._SRV_BG, fg=self._SRV_MUTED,
+                                font=("Segoe UI", 8), anchor="w", justify="left")
+        status_label.pack(side="left", padx=(4, 0), fill="x", expand=True)
+
+        # Tk не має "placeholder" у Entry, тому робимо його руками: сірий
+        # текст, поки поле порожнє й не у фокусі. Головна пастка - textvariable:
+        # вставлений підказковий текст ІНАКШЕ полетів би у trace і зберігся
+        # б на диск як справжній токен. Тому кожне читання йде через
+        # current_token(), а сам trace виходить одразу, поки підказка на місці.
+        placeholder_text = self._t("вставте токен або прикріпіть файл")
+        state = {
+            "token": token_var.get(), "token_ok": False, "generation": 0, "verify_after": None,
+            "placeholder": False, "permissions": "",
+        }
+
+        def current_token():
+            return "" if state["placeholder"] else token_var.get().strip()
+
+        def show_placeholder():
+            if current_token():
+                return
+            state["placeholder"] = True
+            token_entry.configure(show="", fg="#5E656E")
+            token_var.set(placeholder_text)
+
+        def hide_placeholder(event=None):
+            if not state["placeholder"]:
+                return
+            state["placeholder"] = False
+            token_var.set("")
+            token_entry.configure(show="•", fg=self._SRV_TEXT)
+
+        token_entry.bind("<FocusIn>", hide_placeholder)
+        token_entry.bind("<FocusOut>", lambda event: show_placeholder())
+
+        collapsed = tk.Frame(access, bg=self._SRV_BG)
+        collapsed_tail_var = tk.StringVar()
+        collapsed_perms_var = tk.StringVar()
+        tk.Label(
+            collapsed, text=self._t("Доступ до Cloudflare"), bg=self._SRV_BG, fg=self._SRV_TEXT,
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            collapsed, textvariable=collapsed_tail_var, bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(10, 0))
+
+        def show_expanded():
+            collapsed.pack_forget()
+            expanded.pack(fill="x")
+            access_title.pack(fill="x", before=expanded)
+            token_entry.focus_set()
+
+        def show_collapsed():
+            expanded.pack_forget()
+            access_title.pack_forget()
+            collapsed.pack(fill="x")
+
+        tk.Button(
+            collapsed, text=self._t("Замінити"), command=show_expanded,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=10, pady=2,
+            font=("Segoe UI", 8),
+        ).pack(side="right")
+        collapsed_perms = tk.Label(
+            collapsed, textvariable=collapsed_perms_var, bg="#1E3A2A", fg="#7FD3A4", font=("Segoe UI", 8),
+            padx=6,
+        )
+        collapsed_perms.pack(side="right", padx=(0, 8))
+
+        def set_status(icon, icon_color, text, text_color, border):
+            status_icon_var.set(icon)
+            status_icon.configure(fg=icon_color)
+            status_text_var.set(text)
+            status_label.configure(fg=text_color)
+            access.configure(highlightbackground=border, highlightcolor=border)
+            token_entry.configure(highlightbackground=border)
+
+        def verify_token_now():
+            token = current_token()
+            state["token"] = token
+            if not token:
+                state["token_ok"] = False
+                set_status(
+                    "", self._SRV_MUTED,
+                    self._t("Потрібні права: Zone:DNS:Edit на цю зону та Account:Cloudflare Tunnel:Read."),
+                    self._SRV_MUTED, self._SRV_BORDER,
+                )
+                refresh()
+                return
+            set_status("", self._SRV_MUTED, self._t("Перевіряю токен..."), self._SRV_MUTED, self._SRV_ACCENT)
+            generation = state["generation"] = state["generation"] + 1
+
+            def worker():
+                ok, error = cloudflare_api.verify_token(token)
+                probe = cloudflare_api.probe_permissions(token) if ok else None
+
+                def apply():
+                    if generation != state["generation"] or not window.winfo_exists():
+                        return
+                    if not ok:
+                        state["token_ok"] = False
+                        # Помилка ФОРМИ - наша власна, до Cloudflare справа
+                        # не доходила; підписувати її "Cloudflare відповів"
+                        # означало б збивати з пантелику.
+                        set_status("✕", "#E06A4A", error or self._t("Токен не прийнято."),
+                                   self._SRV_WARN_TEXT, self._SRV_WARN_BORDER)
+                    elif not probe or not probe.get("zones_ok") or not probe.get("tunnels_ok"):
+                        # Токен дійсний, але читання не проходить - окремий
+                        # стан від "недійсний": дії різні, і без розділення
+                        # це виглядало б як загадковий збій десь пізніше.
+                        state["token_ok"] = True
+                        missing = []
+                        if not (probe or {}).get("zones_ok"):
+                            missing.append("Zone:Read/DNS")
+                        if not (probe or {}).get("tunnels_ok"):
+                            missing.append("Account:Tunnel:Read")
+                        set_status(
+                            "!", "#FAC775",
+                            self._t("Токен дійсний, але бракує прав: {missing}").format(
+                                missing=", ".join(missing)),
+                            "#FAC775", "#7A5A10",
+                        )
+                    else:
+                        state["token_ok"] = True
+                        set_status(
+                            "✓", self._SRV_ONLINE,
+                            self._t("Токен прийнято · читання зон і тунелів перевірено · зон видно: {count} "
+                                    "· збережено в system/cloudflare_token.txt").format(
+                                count=probe.get("zones_count", 0)),
+                            "#7FD3A4", "#2A5C40",
+                        )
+                        # Значок перелічує лише те, що РЕАЛЬНО перевірено
+                        # читанням. Права на запис у DNS перевірити наперед
+                        # неможливо (окремий дозвіл, якого токен на себе
+                        # зазвичай не має), тож обіцяти "DNS:Edit" тут було б
+                        # неправдою - воно підтвердиться на першому приєднанні.
+                        collapsed_perms_var.set(self._t("Zone:Read · Tunnel:Read"))
+                        collapsed_tail_var.set("•" * 16 + " " + token[-4:])
+                        show_collapsed()
+                    refresh()
+
+                self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def on_token_typed(*_args):
+            if state["placeholder"]:
+                return
+            # Зберігаємо ОДРАЗУ (той самий принцип, що й у токена GitHub -
+            # нічого не губиться, навіть якщо вікно закрити не перевіривши),
+            # а перевірку відкладаємо на секунду після останньої літери,
+            # щоб не бити по API на кожен символ.
+            self._write_cloudflare_token(current_token())
+            if state["verify_after"] is not None:
+                try:
+                    window.after_cancel(state["verify_after"])
+                except tk.TclError:
+                    pass
+            state["verify_after"] = window.after(1000, verify_token_now)
+
+        token_var.trace_add("write", on_token_typed)
+
+        def attach_token_file():
+            file_path = filedialog.askopenfilename(
+                title=self._t("Виберіть файл із токеном Cloudflare"),
+                filetypes=[("Текстові файли", "*.txt"), ("Усі файли", "*.*")],
+            )
+            if not file_path:
+                return
+            try:
+                token_text = Path(file_path).read_text(encoding="utf-8-sig").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                messagebox.showerror(self._t("Тунель"), self._t("Не вдалось прочитати файл: {error}").format(error=exc))
+                return
+            token_var.set(token_text)
+
+        tk.Button(
+            field_row, text=self._t("Прикріпити файл..."), command=attach_token_file,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=12, pady=4,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(6, 0))
+
+        body = tk.Frame(card, bg=self._SRV_BG)
+        body.pack(fill="x")
+
+        bottom = tk.Frame(card, bg=self._SRV_BG)
+        bottom.pack(side="top", fill="x", pady=(14, 0))
+
+        def resize_to_content():
+            window.update_idletasks()
+            width = self._TUNNEL_WIDTH
+            height = min(window.winfo_reqheight(), window.winfo_screenheight() - 140)
+            root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            root_width = self.root.winfo_width()
+            x = root_x + max((root_width - width) // 2, 0)
+            window.geometry(f"{width}x{height}+{max(x, 0)}+{max(root_y + 40, 0)}")
+
+        def refresh():
+            self._render_tunnel_body(body, state, subtitle_var, refresh, resize_to_content)
+
+        def refresh_everything():
+            # Реальний сценарій (2026-08-20): людина бачить "бракує прав",
+            # іде в Cloudflare, дописує дозволи тому САМОМУ токену - і
+            # тисне тут. Без повторної перевірки токена вікно показувало б
+            # стару відмову, хоч права вже на місці.
+            domain_info.clear_cache()
+            if current_token():
+                verify_token_now()
+            else:
+                refresh()
+
+        tk.Button(
+            bottom, text=self._t("Обновить"), command=refresh_everything,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
+        ).pack(side="left")
+        tk.Button(
+            bottom, text=self._t("Закрити"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
+        ).pack(side="right")
+
+        window.bind("<Escape>", lambda event: window.destroy())
+        resize_to_content()
+        if state["token"]:
+            verify_token_now()
+        else:
+            show_placeholder()
+            refresh()
+
+    # Тіло вікна перемальовується цілком на кожне "Обновить" і після кожної
+    # зміни токена. Кожна секція має ВЛАСНИЙ фоновий потік і власний
+    # напис "завантажую" - інакше найповільніше (опитування адреси 12 раз)
+    # тримало б порожнім усе вікно.
+    def _render_tunnel_body(self, body, state, subtitle_var, refresh, resize_to_content):
+        self._clear_frame(body)
+        generation = state["render"] = state.get("render", 0) + 1
+        hostname = remote_control_client.active_hostname()
+        token = state.get("token") or ""
+        token_ok = bool(token) and state.get("token_ok")
+
+        def alive(frame):
+            return generation == state.get("render") and frame.winfo_exists()
+
+        def muted(parent, text, pady=(4, 0)):
+            return tk.Label(
+                parent, text=text, bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8),
+                anchor="w", justify="left", wraplength=self._TUNNEL_WIDTH - 60,
+            )
+
+        # ---------- Хто відповідає на адресу ----------
+        responders_box = tk.Frame(body, bg=self._SRV_BG)
+        responders_box.pack(fill="x")
+        self._tunnel_section_title(
+            responders_box, self._t("Хто відповідає на {host}").format(host=hostname)
+        )
+        responders_hint = muted(responders_box, self._t("Опитую адресу {count} разів...").format(
+            count=self._TUNNEL_PROBE_ATTEMPTS))
+        responders_hint.pack(fill="x")
+
+        def paint_responders(result):
+            if not alive(responders_box):
+                return
+            responders_hint.destroy()
+            if not result["responders"]:
+                # Голі заголовки над порожнечею читаються як зламане вікно.
+                # Коли відповідати нема кому - показуємо лише пояснення.
+                muted(responders_box, self._t("Адреса не відповіла жодного разу ({count} спроб).").format(
+                    count=result["attempts"])).pack(fill="x", pady=(2, 0))
+                resize_to_content()
+                return
+            table = self._tunnel_table(responders_box, [
+                (self._t("Машина"), 3, 140), (self._t("Канал"), 0, 92),
+                (self._t("Версія"), 0, 74), (self._t("Влучань"), 0, 84),
+            ])
+            if len(result["responders"]) > 1:
+                # Головний сенс усього блоку: кілька РІЗНИХ відповідачів за
+                # однією адресою і є та сама підміна, через яку персонал і
+                # журнал показувались із чужої машини.
+                self._tunnel_warning(
+                    responders_box,
+                    self._t("На одну адресу відповіли {count} різні машини — дані приходять то з однієї, "
+                            "то з іншої").format(count=len(result["responders"])),
+                    before=table,
+                )
+            for item in result["responders"]:
+                channel = item["channel"]
+                badge_fill, badge_fg = self._SRV_BADGE.get(
+                    "test" if channel == "test" else "main", self._SRV_BADGE["main"])
+                channel_text = self._t("тестовий") if channel == "test" else (
+                    self._t("основний") if channel else self._t("невідомо"))
+                self._tunnel_table_row(table, [
+                    (item["node"] or self._t("не назвалась"),
+                     self._SRV_TEXT if item["node"] else self._SRV_MUTED),
+                    (lambda parent, bg, text=channel_text, fill=badge_fill, fg=badge_fg:
+                        self._rounded_badge(parent, text, fill, fg, bg)),
+                    (item["version"] or self._t("старая"), self._SRV_MUTED),
+                    (self._t("{hits} із {total}").format(hits=item["hits"], total=result["attempts"]),
+                     self._SRV_MUTED),
+                ])
+            if result["failures"]:
+                muted(responders_box, self._t("Без відповіді: {count} із {total}").format(
+                    count=result["failures"], total=result["attempts"])).pack(fill="x", pady=(4, 0))
+            resize_to_content()
+
+        def probe_worker():
+            result = remote_control_client.probe_responders(hostname, attempts=self._TUNNEL_PROBE_ATTEMPTS)
+            self._run_on_main_thread(lambda: paint_responders(result))
+
+        threading.Thread(target=probe_worker, daemon=True).start()
+
+        # ---------- Конектори / Адреси ----------
+        cloud_box = tk.Frame(body, bg=self._SRV_BG)
+        cloud_box.pack(fill="x")
+
+        # ---------- Домени ----------
+        domains_box = tk.Frame(body, bg=self._SRV_BG)
+        domains_box.pack(fill="x")
+
+        # Замок малюється в самому низу, тому й контейнер під нього
+        # створюємо тут - після доменів.
+        locked_box = tk.Frame(body, bg=self._SRV_BG)
+        locked_box.pack(fill="x")
+        self._tunnel_section_title(domains_box, self._t("Домени"))
+        domains_hint = muted(domains_box, self._t("Питаю RDAP..."))
+        domains_hint.pack(fill="x")
+
+        def paint_domains(rows, registrar_map=None):
+            if not alive(domains_box):
+                return
+            registrar_map = registrar_map or {}
+            domains_hint.destroy()
+            table = self._tunnel_table(domains_box, [
+                (self._t("Домен"), 3, 170), (self._t("Реєстратор"), 0, 110),
+                (self._t("Спливає"), 0, 84), (self._t("Продовження"), 0, 104),
+                (self._t("Лишилось"), 0, 80),
+            ])
+            for domain, info, error in rows:
+                if error:
+                    self._tunnel_table_row(table, [
+                        (domain, self._SRV_TEXT), (error, self._SRV_MUTED), ("", self._SRV_MUTED),
+                        ("", self._SRV_MUTED), ("", self._SRV_MUTED),
+                    ])
+                    continue
+                days = info.get("days_left")
+                # Червоне тільки тоді, коли справді час діяти - інакше
+                # кольори перестають щось означати.
+                days_color = self._SRV_ONLINE if (days or 0) > 30 else "#E06A4A"
+                expires = info.get("expires")
+                # Реальна знахідка користувача (2026-08-20): на сайті
+                # Cloudflare стояло "Auto-renewal scheduled for July 16,
+                # 2027", а тут - 15.08.2027, і це виглядало як розбіжність
+                # у даних. Насправді це ДВІ різні дати: RDAP віддає день,
+                # коли домен СПЛИВАЄ, а Cloudflare показує день, коли він
+                # його ПРОДОВЖИТЬ - рівно за 30 днів до спливання (для
+                # цього домену різниця перевірена: 16.07 -> 15.08).
+                registrar_info = registrar_map.get(domain)
+                if expires is None:
+                    renewal_text, renewal_color = "-", self._SRV_MUTED
+                elif registrar_info is not None and not registrar_info.get("auto_renew"):
+                    renewal_text, renewal_color = self._t("вимкнено"), "#E06A4A"
+                else:
+                    renewal_text = (expires - timedelta(days=30)).strftime("%d.%m.%Y")
+                    renewal_color = self._SRV_MUTED
+                self._tunnel_table_row(table, [
+                    (domain, self._SRV_TEXT),
+                    (info.get("registrar") or "-", self._SRV_MUTED),
+                    (expires.strftime("%d.%m.%Y") if expires else "-", self._SRV_MUTED),
+                    (renewal_text, renewal_color),
+                    (self._t("{days} днів").format(days=days) if days is not None else "-", days_color),
+                ])
+            muted(domains_box, self._t(
+                "«Продовження» — за 30 днів до спливання: саме цю, ранішу дату показує сайт Cloudflare."
+            )).pack(fill="x", pady=(4, 0))
+            resize_to_content()
+
+        def domains_worker(domain_names, registrar_map=None):
+            rows = []
+            for name in domain_names:
+                info, error = domain_info.fetch_domain_info(name)
+                rows.append((name, info or {}, error))
+            self._run_on_main_thread(lambda: paint_domains(rows, registrar_map))
+
+        if not token_ok:
+            # Без токена показуємо термін дії хоча б для того домену, під
+            # яким живе поточна адреса - його видно й без Cloudflare.
+            threading.Thread(
+                target=domains_worker, args=([domain_info.registrable_domain(hostname)],), daemon=True,
+            ).start()
+            # Замок іде ПІСЛЯ "Доменів" (як у макеті): спершу все, що
+            # реально працює, і аж потім те, чого бракує - інакше вікно
+            # починається з відмови.
+            self._tunnel_locked_block(
+                locked_box, self._t("Конектори тунелю та керування адресами — вкажіть токен вище"),
+            )
+            resize_to_content()
+            return
+
+        cloud_hint = muted(cloud_box, self._t("Питаю Cloudflare..."), pady=(14, 0))
+        cloud_hint.pack(fill="x", pady=(14, 0))
+
+        def paint_cloud(data, error):
+            if not alive(cloud_box):
+                return
+            cloud_hint.destroy()
+            if error:
+                self._tunnel_warning(cloud_box, error)
+                resize_to_content()
+                return
+            state["cf"] = data
+            if data.get("tunnel_name"):
+                subtitle_var.set("%s · %s" % (data["tunnel_name"], data.get("tunnel_id") or ""))
+
+            # --- Конектори ---
+            self._tunnel_section_title(cloud_box, self._t("Конектори"))
+            connectors = data.get("connectors") or []
+            if len(connectors) > 1:
+                self._tunnel_warning(
+                    cloud_box,
+                    self._t("{count} конектори на одній адресі — запити діляться між машинами випадково")
+                    .format(count=len(connectors)),
+                )
+            table = self._tunnel_table(cloud_box, [
+                (self._t("Конектор"), 0, 110), (self._t("IP джерела"), 0, 130),
+                (self._t("Точки входу"), 3, 180), (self._t("З"), 0, 60),
+            ])
+            for connector in connectors:
+                opened = (connector.get("opened_at") or "")[11:16]
+                self._tunnel_table_row(table, [
+                    ((connector["id"][:8] + "…") if connector.get("id") else "-", self._SRV_MUTED),
+                    (connector.get("origin_ip") or "-", self._SRV_TEXT),
+                    (", ".join(connector.get("edges") or []) or "-", self._SRV_MUTED),
+                    (opened or "-", self._SRV_MUTED),
+                ])
+            if not connectors:
+                muted(cloud_box, self._t("Жодного активного конектора — тунель зараз ніхто не тримає.")).pack(
+                    fill="x", pady=(4, 0))
+
+            # --- Адреси ---
+            head = tk.Frame(cloud_box, bg=self._SRV_BG)
+            head.pack(fill="x", pady=(14, 4))
+            tk.Label(
+                head, text=self._t("Адреси"), bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 9),
+                anchor="w",
+            ).pack(side="left")
+            tk.Button(
+                head, text=self._t("Приєднати адресу"),
+                command=lambda: self._open_attach_address_dialog(state, refresh),
+                bg=self._SRV_ROW_BG, fg="#9EC5F2", activebackground=self._SRV_ROW_ACTIVE_BG,
+                activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+                highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, bd=0,
+                padx=12, pady=3, font=("Segoe UI", 8),
+            ).pack(side="right")
+            addresses_table = self._tunnel_table(cloud_box, [
+                (self._t("Посилання"), 3, 240), (self._t("Прив'язано до"), 0, 190), ("", 0, 96),
+            ])
+            tunnel_names = {item["id"]: item["name"] for item in data.get("tunnels") or []}
+            for address in data.get("addresses") or []:
+                self._tunnel_table_row(addresses_table, [
+                    (address["hostname"], self._SRV_TEXT),
+                    (tunnel_names.get(address["tunnel_id"], address["tunnel_id"][:8] + "…"), self._SRV_MUTED),
+                    (lambda parent, bg, item=address: tk.Button(
+                        parent, text=self._t("Від'єднати"),
+                        command=lambda item=item: self._confirm_detach_address(state, item, refresh),
+                        bg=bg, fg="#E39C88", activebackground=self._SRV_ROW_ACTIVE_BG,
+                        activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+                        highlightbackground=self._SRV_WARN_BORDER, highlightcolor=self._SRV_WARN_BORDER,
+                        bd=0, padx=8, pady=0, font=("Segoe UI", 8),
+                    )),
+                ])
+            if not data.get("addresses"):
+                muted(cloud_box, self._t("До тунелів цього акаунта не прив'язано жодної адреси.")).pack(
+                    fill="x", pady=(4, 0))
+            resize_to_content()
+
+        def cloud_worker():
+            data, error = self._load_cloudflare_overview(token, hostname)
+            if data:
+                names = sorted({zone["name"] for zone in data.get("zones") or []})
+                threading.Thread(target=domains_worker, args=(names or [
+                    domain_info.registrable_domain(hostname)], data.get("registrar") or {}),
+                    daemon=True).start()
+            else:
+                threading.Thread(
+                    target=domains_worker, args=([domain_info.registrable_domain(hostname)],), daemon=True,
+                ).start()
+            self._run_on_main_thread(lambda: paint_cloud(data, error))
+
+        threading.Thread(target=cloud_worker, daemon=True).start()
+
+    # Пунктирна рамка (як у макеті) - її не має жоден віджет Tk, тому блок
+    # малюється на Canvas: dash=(4,3) там рідна можливість, без картинок і
+    # без PIL. Перемальовується на <Configure>, бо ширина відома лише після
+    # того, як менеджер геометрії розклав вікно.
+    def _tunnel_locked_block(self, parent, text):
+        canvas = tk.Canvas(parent, bg=self._SRV_BG, highlightthickness=0, height=48, bd=0)
+        canvas.pack(fill="x", pady=(14, 0))
+
+        def redraw(event=None):
+            canvas.delete("all")
+            width = canvas.winfo_width()
+            if width <= 1:
+                return
+            canvas.create_rectangle(1, 1, width - 2, 46, dash=(4, 3), outline=self._SRV_BORDER)
+            canvas.create_text(width / 2, 24, text=text, fill="#5E656E", font=("Segoe UI", 9))
+
+        canvas.bind("<Configure>", redraw)
+        redraw()
+        return canvas
+
+    def _tunnel_warning(self, parent, text, before=None):
+        strip = tk.Frame(
+            parent, bg=self._SRV_WARN_BG, highlightthickness=1, highlightbackground=self._SRV_WARN_BORDER,
+            highlightcolor=self._SRV_WARN_BORDER, padx=8, pady=5,
+        )
+        tk.Label(
+            strip, text=text, bg=self._SRV_WARN_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=self._TUNNEL_WIDTH - 70,
+        ).pack(fill="x")
+        if before is not None:
+            strip.pack(fill="x", pady=(0, 4), before=before)
+        else:
+            strip.pack(fill="x", pady=(0, 4))
+        return strip
+
+    # Один фоновий прохід по Cloudflare: акаунт -> зони -> адреси тунелів ->
+    # тунелі -> конектори ТОГО тунелю, що обслуговує поточну адресу. Зібрано
+    # в одному місці, щоб UI-код не тримав ланцюжок із п'яти залежних
+    # запитів і не малював кожен проміжний стан.
+    def _load_cloudflare_overview(self, token, hostname):
+        accounts, error = cloudflare_api.list_accounts(token)
+        if error:
+            return None, error
+        if not accounts:
+            return None, self._t("Токен не бачить жодного акаунта Cloudflare.")
+        account_id = accounts[0]["id"]
+
+        zones, error = cloudflare_api.list_zones(token)
+        if error:
+            return None, error
+
+        addresses = []
+        for zone in zones:
+            zone_addresses, zone_error = cloudflare_api.list_tunnel_addresses(token, zone["id"])
+            if zone_error:
+                continue
+            for address in zone_addresses:
+                address["zone_id"] = zone["id"]
+                address["zone_name"] = zone["name"]
+                addresses.append(address)
+        addresses.sort(key=lambda item: item["hostname"])
+
+        tunnels, error = cloudflare_api.list_tunnels(token, account_id)
+        if error:
+            return None, error
+
+        current = next((item for item in addresses if item["hostname"] == hostname), None)
+        tunnel_id = current["tunnel_id"] if current else ""
+        tunnel_name = next((item["name"] for item in tunnels if item["id"] == tunnel_id), "")
+        connectors = []
+        if tunnel_id:
+            connectors, connectors_error = cloudflare_api.list_connectors(token, account_id, tunnel_id)
+            if connectors_error:
+                connectors = []
+        # Реєстратор - НЕ обов'язкова частина: домен може бути куплений не
+        # в Cloudflare, і тоді список просто порожній. Помилку тут навмисно
+        # ковтаємо: через неї не має падати все вікно.
+        registrar, _registrar_error = cloudflare_api.list_registrar_domains(token, account_id)
+        return {
+            "account_id": account_id, "zones": zones, "addresses": addresses, "tunnels": tunnels,
+            "tunnel_id": tunnel_id, "tunnel_name": tunnel_name, "connectors": connectors,
+            "registrar": registrar,
+        }, None
+
+    # Ті самі кольори попередження, що вже в макеті й у client_app.py -
+    # окремими константами, бо вживаються і у вікні "Тунель", і в обох
+    # його діалогах.
+    _SRV_WARN_BG = "#3A2520"
+    _SRV_WARN_BORDER = "#7A2410"
+    _SRV_WARN_TEXT = "#F3C2B4"
+
+    def _tunnel_dialog_shell(self, title, width=460):
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=self._SRV_BG)
+        window.transient(self.root)
+        window.grab_set()
+        card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=12)
+        card.pack(fill="both", expand=True)
+        tk.Label(
+            card, text=title, bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 11, "bold"), anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+        window.bind("<Escape>", lambda event: window.destroy())
+        return window, card
+
+    def _tunnel_dropdown(self, parent, variable, values):
+        menu = tk.OptionMenu(parent, variable, *(values or [""]))
+        menu.configure(
+            bg="#15181B", fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0,
+            font=("Segoe UI", 9), anchor="w",
+        )
+        menu["menu"].configure(
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ACCENT,
+            activeforeground=self._SRV_TEXT, font=("Segoe UI", 9),
+        )
+        return menu
+
+    def _open_attach_address_dialog(self, state, on_done):
+        data = state.get("cf") or {}
+        zones = data.get("zones") or []
+        tunnels = data.get("tunnels") or []
+        if not zones or not tunnels:
+            messagebox.showinfo(
+                self._t("Тунель"),
+                self._t("Cloudflare ще не відповів списком доменів і тунелів — спробуйте «Обновить»."),
+            )
+            return
+
+        window, card = self._tunnel_dialog_shell(self._t("Приєднати адресу"))
+
+        tk.Label(
+            card, text=self._t("Піддомен і домен"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).pack(fill="x")
+        name_row = tk.Frame(card, bg=self._SRV_BG)
+        name_row.pack(fill="x", pady=(4, 10))
+        subdomain_var = tk.StringVar()
+        subdomain_entry = tk.Entry(
+            name_row, textvariable=subdomain_var, bg="#15181B", fg=self._SRV_TEXT,
+            insertbackground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9),
+        )
+        subdomain_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        tk.Label(name_row, text=".", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9)).pack(
+            side="left", padx=4)
+        zone_var = tk.StringVar(value=zones[0]["name"])
+        self._tunnel_dropdown(name_row, zone_var, [zone["name"] for zone in zones]).pack(
+            side="left", fill="x", expand=True)
+
+        tk.Label(
+            card, text=self._t("До якого тунелю"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).pack(fill="x")
+        tunnel_var = tk.StringVar(value=tunnels[0]["name"])
+        self._tunnel_dropdown(card, tunnel_var, [item["name"] for item in tunnels]).pack(
+            fill="x", pady=(4, 10))
+
+        preview_var = tk.StringVar()
+        tk.Label(
+            card, textvariable=preview_var, bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, font=("Segoe UI", 9),
+            anchor="w", padx=8, pady=6, highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_BORDER,
+        ).pack(fill="x", pady=(0, 10))
+
+        def update_preview(*_args):
+            subdomain = subdomain_var.get().strip().strip(".")
+            full = f"{subdomain}.{zone_var.get()}" if subdomain else zone_var.get()
+            preview_var.set(f"{full} → {tunnel_var.get()}")
+
+        for variable in (subdomain_var, zone_var, tunnel_var):
+            variable.trace_add("write", update_preview)
+        update_preview()
+
+        tk.Label(
+            card,
+            text=self._t("У списку лише домени, вже додані у ваш Cloudflare. Новий куплений домен спершу "
+                         "треба додати туди й перевести на його сервери імен — кнопкою це не робиться."),
+            bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8), anchor="w", justify="left",
+            wraplength=420,
+        ).pack(fill="x", pady=(0, 12))
+
+        buttons = tk.Frame(card, bg=self._SRV_BG)
+        buttons.pack(fill="x")
+        result_var = tk.StringVar()
+        result_label = tk.Label(
+            card, textvariable=result_var, bg=self._SRV_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=420,
+        )
+        result_label.pack(fill="x", pady=(8, 0))
+
+        def do_attach():
+            subdomain = subdomain_var.get().strip().strip(".")
+            zone = next((item for item in zones if item["name"] == zone_var.get()), None)
+            tunnel = next((item for item in tunnels if item["name"] == tunnel_var.get()), None)
+            if zone is None or tunnel is None:
+                return
+            hostname = f"{subdomain}.{zone['name']}" if subdomain else zone["name"]
+            attach_button.config(state="disabled", text=self._t("Приєдную..."))
+            result_var.set("")
+
+            def worker():
+                _result, error = cloudflare_api.attach_address(
+                    state.get("token") or "", zone["id"], hostname, tunnel["id"])
+
+                def apply():
+                    if not window.winfo_exists():
+                        return
+                    if error:
+                        # Право ЗАПИСУ в DNS неможливо перевірити наперед -
+                        # воно спливає саме тут, тож помилка показується
+                        # прямим текстом, а не мовчазним нічого-не-сталося.
+                        attach_button.config(state="normal", text=self._t("Приєднати"))
+                        result_var.set(error)
+                        return
+                    window.destroy()
+                    on_done()
+
+                self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        attach_button = tk.Button(
+            buttons, text=self._t("Приєднати"), command=do_attach,
+            bg="#1B3559", fg="#CFE3FA", activebackground=self._SRV_ACCENT, activeforeground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground=self._SRV_ACCENT,
+            highlightcolor=self._SRV_ACCENT, bd=0, padx=14, pady=5, font=("Segoe UI", 9),
+        )
+        attach_button.pack(side="left")
+        tk.Button(
+            buttons, text=self._t("Скасувати"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=14, pady=5,
+            font=("Segoe UI", 9),
+        ).pack(side="right")
+        subdomain_entry.focus_set()
+        self._size_dialog_to_content(window, 460)
+
+    # Від'єднання - єдина справді незворотна дія в цьому вікні: DNS-запис
+    # зникає, і бот із формою за цією адресою перестають відповідати
+    # ОДРАЗУ. Тому не messagebox.askyesno (одне випадкове натискання
+    # Enter - і продакшн лежить), а ввід повного імені хоста: доки текст
+    # не збігається СИМВОЛ У СИМВОЛ, кнопка лишається неактивною.
+    def _confirm_detach_address(self, state, address, on_done):
+        window, card = self._tunnel_dialog_shell(self._t("Від'єднати адресу"), width=440)
+
+        warning = tk.Frame(
+            card, bg=self._SRV_WARN_BG, highlightthickness=1, highlightbackground=self._SRV_WARN_BORDER,
+            highlightcolor=self._SRV_WARN_BORDER, padx=8, pady=6,
+        )
+        warning.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            warning,
+            text=self._t("Бот і форма за цією адресою перестануть відповідати одразу. Повернути можна лише "
+                         "повторним приєднанням."),
+            bg=self._SRV_WARN_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8), anchor="w",
+            justify="left", wraplength=400,
+        ).pack(fill="x")
+
+        prompt = tk.Frame(card, bg=self._SRV_BG)
+        prompt.pack(fill="x")
+        tk.Label(
+            prompt, text=self._t("Введіть"), bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8),
+        ).pack(side="left")
+        tk.Label(
+            prompt, text=address["hostname"], bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 8, "bold"),
+        ).pack(side="left", padx=4)
+        tk.Label(
+            prompt, text=self._t("для підтвердження:"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+
+        typed_var = tk.StringVar()
+        entry = tk.Entry(
+            card, textvariable=typed_var, bg="#15181B", fg=self._SRV_TEXT, insertbackground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9),
+        )
+        entry.pack(fill="x", pady=(4, 12), ipady=4)
+
+        result_var = tk.StringVar()
+        tk.Label(
+            card, textvariable=result_var, bg=self._SRV_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=400,
+        ).pack(fill="x", pady=(0, 8))
+
+        buttons = tk.Frame(card, bg=self._SRV_BG)
+        buttons.pack(fill="x")
+
+        def do_detach():
+            detach_button.config(state="disabled", text=self._t("Від'єдную..."))
+            result_var.set("")
+
+            def worker():
+                ok, error = cloudflare_api.detach_address(
+                    state.get("token") or "", address["zone_id"], address["record_id"])
+
+                def apply():
+                    if not window.winfo_exists():
+                        return
+                    if not ok:
+                        detach_button.config(state="normal", text=self._t("Від'єднати"))
+                        result_var.set(error or self._t("Не вдалось від'єднати."))
+                        return
+                    window.destroy()
+                    on_done()
+
+                self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        detach_button = tk.Button(
+            buttons, text=self._t("Від'єднати"), command=do_detach, state="disabled",
+            bg="#2A1D1A", fg="#6E4B42", activebackground=self._SRV_WARN_BG, activeforeground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground="#4A2A20", highlightcolor="#4A2A20",
+            bd=0, padx=14, pady=5, font=("Segoe UI", 9), disabledforeground="#6E4B42",
+        )
+        detach_button.pack(side="left")
+        tk.Button(
+            buttons, text=self._t("Скасувати"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=14, pady=5,
+            font=("Segoe UI", 9),
+        ).pack(side="right")
+
+        def on_typed(*_args):
+            matches = typed_var.get().strip() == address["hostname"]
+            detach_button.config(
+                state="normal" if matches else "disabled",
+                bg="#3A2520" if matches else "#2A1D1A",
+                fg="#E39C88" if matches else "#6E4B42",
+                highlightbackground=self._SRV_WARN_BORDER if matches else "#4A2A20",
+            )
+
+        typed_var.trace_add("write", on_typed)
+        entry.focus_set()
+        self._size_dialog_to_content(window, 440)
+
+    def _size_dialog_to_content(self, window, width):
+        window.update_idletasks()
+        height = min(window.winfo_reqheight(), window.winfo_screenheight() - 160)
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        root_width = self.root.winfo_width()
+        x = root_x + max((root_width - width) // 2, 0)
+        window.geometry(f"{width}x{height}+{max(x, 0)}+{max(root_y + 80, 0)}")
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
@@ -6180,8 +7337,15 @@ class ExcelViewerApp:
                     # чужим settings.json чи тестовою app_data.sqlite3 не
                     # публікується (друге додано того ж дня - client_app.py
                     # постраждав саме від тестової бази даних, не settings.json).
-                    stray_settings = list(gui_release_dir.rglob("settings.json")) + list(
-                        gui_release_dir.rglob("app_data.sqlite3")
+                    # Токени (2026-08-20) додані сюди разом із вікном
+                    # "Тунель": cloudflare_token.txt має право ЗМІНЮВАТИ
+                    # DNS, github_token.txt - публікувати релізи. Жоден із
+                    # них не має шансу поїхати в чужі руки разом із пакетом.
+                    stray_settings = (
+                        list(gui_release_dir.rglob("settings.json"))
+                        + list(gui_release_dir.rglob("app_data.sqlite3"))
+                        + list(gui_release_dir.rglob("github_token.txt"))
+                        + list(gui_release_dir.rglob("cloudflare_token.txt"))
                     )
                     if stray_settings:
                         raise RuntimeError(
@@ -6375,8 +7539,11 @@ class ExcelViewerApp:
                     # журнали) робочого ПК при оновленні. Публікація
                     # client-v0.2.57 з цим файлом уже сталась ДО того, як
                     # цю перевірку додано - виправлено republish'ом v0.2.58.
-                    stray_settings = list(client_dist_dir.rglob("settings.json")) + list(
-                        client_dist_dir.rglob("app_data.sqlite3")
+                    stray_settings = (
+                        list(client_dist_dir.rglob("settings.json"))
+                        + list(client_dist_dir.rglob("app_data.sqlite3"))
+                        + list(client_dist_dir.rglob("github_token.txt"))
+                        + list(client_dist_dir.rglob("cloudflare_token.txt"))
                     )
                     if stray_settings:
                         raise RuntimeError(
