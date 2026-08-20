@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.2.95"
+__version__ = "0.2.96"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -397,6 +397,7 @@ class ClientApp(ctk.CTk):
         # у Настройках, який не відповідав очікуваному вигляду).
         self.auto_update_window = None
         self.update_channel_window = None
+        self.onedrive_account_window = None
         self.main_title_style_window = None
         self._last_registry_error = "ещё не пытался"
         self._last_registry_path = None
@@ -1088,13 +1089,17 @@ class ClientApp(ctk.CTk):
                 # акаунти OneDrive виявився хибним (два РІЗНІ "особисті"
                 # акаунти на двох машинах) - тенантний акаунт (Diverus,
                 # UAB) підтверджено однаковий на обох, тож знову один
-                # спільний файл (servers_registry.py).
-                self._last_registry_path = servers_registry.resolved_path_str()
+                # спільний файл (servers_registry.py). Опційний email
+                # (settings "onedrive_shared_email") тепер точно
+                # визначає ЯКИЙ акаунт, замість вгадування по назві теки.
+                email = (self.settings.get("onedrive_shared_email") or "").strip() or None
+                self._last_registry_path = servers_registry.resolved_path_str(email)
                 ok = servers_registry.register_this_server(
                     name=platform.node() or "Неизвестный ПК",
                     hostname=self._cloudflared_tunnel_hostname(),
                     kind="test" if self.settings.get("update_channel") == "test" else "main",
                     version=__version__,
+                    email=email,
                 )
                 self._last_registry_error = None if ok else "register_this_server вернул False"
             except Exception as exc:
@@ -1736,6 +1741,13 @@ class ClientApp(ctk.CTk):
         # той самий singleton-Toplevel принцип, окрема кнопка в тій самій
         # картці ("Обновления"), бо семантично поруч з "Автообновления".
         self._build_row_button(card, "refresh", "Канал обновлений", self._open_update_channel_window)
+        # Задача користувача (2026-08-20): "додай в налаштування клієнту
+        # змогу вносити пошту з якою будемо мати вправу з тим клієнтом" -
+        # замінює вгадування назви теки OneDrive на точний пошук
+        # облікового запису через реєстр Windows (servers_registry.
+        # find_account_folder) - надійніше, той самий механізм, яким цього
+        # сеансу вручну діагностували плутанину акаунтів.
+        self._build_row_button(card, "key", "Учётная запись OneDrive", self._open_onedrive_account_window)
 
     # Задача користувача (2026-08-19, третя редакція): "не працює на
     # клієнті кнопка. вона має спливаюче вікно відкривати з
@@ -2093,6 +2105,81 @@ class ClientApp(ctk.CTk):
 
         token_entry.bind("<FocusOut>", on_token_changed)
         token_entry.bind("<Return>", on_token_changed)
+
+    # Задача користувача (2026-08-20): "нащо гадати назву теки OneDrive,
+    # коли можна ввести email напряму" - servers_registry.
+    # find_account_folder(email) шукає точний акаунт через реєстр Windows
+    # (той самий механізм, яким цього сеансу вручну діагностували
+    # плутанину акаунтів vladi/Vladimir2). Порожньо/не знайдено = стара
+    # поведінка (вгадування по назві тенантної теки), нічого не ламається
+    # для тих, хто це не налаштовує.
+    def _onedrive_account_status_text(self):
+        email = (self.settings.get("onedrive_shared_email") or "").strip()
+        if not email:
+            return "Email не указан — используется угадывание по названию папки."
+        resolved = servers_registry.find_account_folder(email)
+        if resolved is None:
+            return f"Такой аккаунт OneDrive на этом компьютере не найден: {email}"
+        return f"Найдено: {resolved}"
+
+    def _open_onedrive_account_window(self):
+        if self.onedrive_account_window is not None and self.onedrive_account_window.winfo_exists():
+            self.onedrive_account_window.deiconify()
+            self.onedrive_account_window.lift()
+            self.onedrive_account_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Учётная запись OneDrive")
+        window.geometry("380x420")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.onedrive_account_window = window
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(top, text="Учётная запись OneDrive", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(
+            side="left"
+        )
+
+        ctk.CTkLabel(
+            window,
+            text=(
+                "Email аккаунта OneDrive для общих данных (реестр серверов и т.п.). "
+                "Пусто — угадывание по названию папки, как раньше."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 8))
+
+        email_var = ctk.StringVar(value=self.settings.get("onedrive_shared_email") or "")
+        status_var = ctk.StringVar(value=self._onedrive_account_status_text())
+
+        def on_email_changed(*_args):
+            self.settings.set("onedrive_shared_email", email_var.get().strip())
+            status_var.set(self._onedrive_account_status_text())
+
+        email_entry = ctk.CTkEntry(window, textvariable=email_var, placeholder_text="you@company.com")
+        email_entry.pack(fill="x", padx=16, pady=(0, 6))
+        email_entry.bind("<FocusOut>", on_email_changed)
+        email_entry.bind("<Return>", on_email_changed)
+
+        ctk.CTkLabel(
+            window, textvariable=status_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 14))
+
+        divider = ctk.CTkFrame(window, fg_color=COLOR_DIVIDER, height=1)
+        divider.pack(fill="x", padx=16, pady=(0, 14))
+
+        ctk.CTkLabel(
+            window,
+            text=(
+                "Данные этого компьютера хранятся отдельно по его имени — "
+                "даже если несколько компьютеров используют один и тот же "
+                "email, их папки не пересекутся."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
+        ctk.CTkButton(window, text="Закрыть", command=window.destroy).pack(fill="x", padx=16, pady=(0, 16))
 
     def _build_bot_settings_section(self, parent):
         ctk.CTkLabel(parent, text="Бот", font=("", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", pady=(0, 6))

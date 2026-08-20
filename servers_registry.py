@@ -18,7 +18,15 @@ client_app.py, а сам client_app.py уникає циклічного імп�
 на іншій), тоді як ТЕНАНТНИЙ акаунт (Diverus, UAB) підтверджено
 ОДНАКОВИЙ на обох машинах. Повернено єдиний спільний файл у тенантному
 OneDrive - той самий акаунт, який і так уже все стабільно синхронізує в
-цьому проєкті (бекапи, standard_menu_cloud.py тощо)."""
+цьому проєкті (бекапи, standard_menu_cloud.py тощо).
+
+Задача користувача (2026-08-20, продовження): замість вгадування назви
+теки по тенанту - опційне явне поле "email" (client_app.py, "Учётная
+запись OneDrive") шукає ТОЧНИЙ обліковий запис через реєстр Windows
+(той самий механізм, яким цього сеансу вручну діагностували плутанину
+акаунтів) і бере його UserFolder напряму - надійніше за вгадування,
+жодних сюрпризів з назвою тенантної теки. Порожньо/не знайдено = стара
+поведінка (вгадування), нічого не ламається для тих, хто це не чіпав."""
 
 import json
 import os
@@ -35,7 +43,54 @@ _CLOUD_FILE_NAME = "servers_registry.json"
 _ONEDRIVE_TENANT_SUFFIX = "OneDrive - Diverus, UAB"
 
 
-def _resolve_onedrive_root():
+# Windows зберігає КОЖЕН залогінений OneDrive-акаунт (особистий,
+# Business1, Business2...) окремим підключем реєстру з парою UserEmail/
+# UserFolder - той самий шлях, яким цього сеансу вручну через PowerShell
+# з'ясували, що "особистий" слот на двох машинах виявився двома різними
+# акаунтами. Пошук за email тут точний, без здогадок по назві теки.
+def find_account_folder(email):
+    try:
+        import winreg
+    except ImportError:
+        return None
+    email_normalized = email.strip().lower()
+    if not email_normalized:
+        return None
+    try:
+        accounts_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\OneDrive\Accounts")
+    except OSError:
+        return None
+    try:
+        index = 0
+        while True:
+            try:
+                subkey_name = winreg.EnumKey(accounts_key, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                subkey = winreg.OpenKey(accounts_key, subkey_name)
+                try:
+                    user_email = winreg.QueryValueEx(subkey, "UserEmail")[0]
+                    user_folder = winreg.QueryValueEx(subkey, "UserFolder")[0]
+                finally:
+                    winreg.CloseKey(subkey)
+            except OSError:
+                continue
+            if isinstance(user_email, str) and user_email.strip().lower() == email_normalized:
+                folder_path = Path(user_folder)
+                if folder_path.is_dir():
+                    return folder_path
+    finally:
+        winreg.CloseKey(accounts_key)
+    return None
+
+
+def _resolve_onedrive_root(email=None):
+    if email:
+        matched = find_account_folder(email)
+        if matched is not None:
+            return matched
     username = os.environ.get("USERNAME")
     tenant_path = Path(f"C:/Users/{username}/{_ONEDRIVE_TENANT_SUFFIX}") if username else None
     if tenant_path is not None and tenant_path.is_dir():
@@ -47,8 +102,8 @@ def _resolve_onedrive_root():
     return tenant_path or env_path
 
 
-def _cloud_file_path():
-    onedrive_root = _resolve_onedrive_root()
+def _cloud_file_path(email=None):
+    onedrive_root = _resolve_onedrive_root(email)
     if onedrive_root is None:
         return None
     return onedrive_root / _CLOUD_FOLDER_NAME / _CLOUD_FILE_NAME
@@ -61,16 +116,16 @@ def _cloud_file_path():
 # трапляється, тепер варто списувати на звичайну затримку синхронізації
 # OneDrive, не на різні акаунти. Видно через /control/status без потреби
 # локального доступу до машини, де це реально стається.
-def resolved_path_str():
-    path = _cloud_file_path()
+def resolved_path_str(email=None):
+    path = _cloud_file_path(email)
     return str(path) if path else None
 
 
-def read_servers():
+def read_servers(email=None):
     """{} означає "хмара недоступна, чи файлу там ще немає" - викликач
     (gui.py) має трактувати це як "поки нічого не відомо", не як "серверів
     справді немає"."""
-    path = _cloud_file_path()
+    path = _cloud_file_path(email)
     if path is None or not path.exists():
         return {}
     try:
@@ -90,8 +145,8 @@ def read_servers():
 # записи інших машин; класична гонка при одночасному записі ДВОХ машин
 # теоретично можлива, але виклик іде раз на кілька хвилин - той самий
 # рівень допущення, що вже й іншими "дурними" cloud-модулями цього проєкту.
-def register_this_server(name, hostname, kind, version):
-    path = _cloud_file_path()
+def register_this_server(name, hostname, kind, version, email=None):
+    path = _cloud_file_path(email)
     if path is None or not name or not hostname:
         return False
     try:
@@ -121,8 +176,8 @@ def register_this_server(name, hostname, kind, version):
 # Задача користувача: "✕" у попапі - прибрати сервер, що реально
 # демонтований (стара тестова машина тощо), зі СПІЛЬНОГО реєстру, а не
 # лише зі свого локального перегляду.
-def remove_server(name):
-    path = _cloud_file_path()
+def remove_server(name, email=None):
+    path = _cloud_file_path(email)
     if path is None:
         return False
     try:
