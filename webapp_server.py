@@ -185,9 +185,15 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         self, *args, db_path=None, get_token=None, get_fresh_context=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
         handle_home_heartbeat=None, handle_set_role=None,
-        get_form_content_enabled=None, **kwargs
+        get_form_content_enabled=None, get_onedrive_email=None, **kwargs
     ):
         self.db_path = db_path
+        # Пошта OneDrive приходить КАЛБЕКОМ, не значенням: її можна змінити
+        # в налаштуваннях на ходу, а сервер живе весь час роботи програми.
+        # Без неї хмара не використовується взагалі (див. servers_registry.
+        # _resolve_onedrive_root) - тож ці два маршрути мовчки писали б у
+        # нікуди навіть у того, хто пошту вказав.
+        self.get_onedrive_email = get_onedrive_email
         self.get_token = get_token
         self.get_fresh_context = get_fresh_context
         # Задача користувача (2026-08-16): "прибери ту кнопку... і пофіксь
@@ -422,11 +428,19 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
     # UAB", не особистий акаунт gui.py). Read-only, той самий принцип, що й
     # /control/status - лише повертає РЕАЛЬНИЙ шлях з боку client_app.py,
     # нічого не пише.
+    def _onedrive_email(self):
+        if not self.get_onedrive_email:
+            return None
+        try:
+            return self.get_onedrive_email()
+        except Exception:
+            return None
+
     def _handle_standard_menu_cloud_path(self, query):
         if not self._remote_control_token_valid(self._remote_control_query_token(query)):
             self._send_json(401, {"ok": False, "error": "Недействительный токен."})
             return
-        folder = standard_menu_cloud.cloud_folder_path()
+        folder = standard_menu_cloud.cloud_folder_path(self._onedrive_email())
         cloud_path = str(folder / "standard_menu.json") if folder is not None else None
         self._send_json(200, {"ok": True, "cloud_path": cloud_path})
 
@@ -571,9 +585,12 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             state = store.get_standard_menu_state()
         finally:
             store.close()
-        saved = standard_menu_cloud.write_cloud_state(state)
+        saved = standard_menu_cloud.write_cloud_state(state, self._onedrive_email())
         if not saved:
-            self._send_json(503, {"ok": False, "error": "OneDrive не найден на этом компьютере."})
+            self._send_json(503, {"ok": False, "error": (
+                "Облако не используется: не указана «Учётная запись OneDrive». "
+                "Без неё всё хранится только на этом компьютере."
+            )})
             return
         # Задача користувача (2026-08-18): "не зберігає нічого на хмару" -
         # діагностика РЕАЛЬНОГО шляху й факту існування файлу ОДРАЗУ ПІСЛЯ
@@ -1081,7 +1098,7 @@ class WebappServer:
         self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
         handle_home_heartbeat=None, handle_set_role=None,
-        get_form_content_enabled=None,
+        get_form_content_enabled=None, get_onedrive_email=None,
     ):
         self.port = port or paths.WEBAPP_LOCAL_PORT
         self.directory = str(directory or paths.WEBAPP_DIR)
@@ -1094,6 +1111,7 @@ class WebappServer:
         self.handle_home_heartbeat = handle_home_heartbeat
         self.handle_set_role = handle_set_role
         self.get_form_content_enabled = get_form_content_enabled
+        self.get_onedrive_email = get_onedrive_email
         self._httpd = None
         self._thread = None
 
@@ -1106,6 +1124,7 @@ class WebappServer:
             get_remote_status=self.get_remote_status, handle_remote_command=self.handle_remote_command,
             handle_home_heartbeat=self.handle_home_heartbeat,
             handle_set_role=self.handle_set_role, get_form_content_enabled=self.get_form_content_enabled,
+            get_onedrive_email=self.get_onedrive_email,
         )
         self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)

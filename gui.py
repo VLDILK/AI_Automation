@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -633,6 +633,7 @@ class ExcelViewerApp:
         # "мигтіти" адресою форми під час звичайних перепідключень бота).
         self.webapp_server = WebappServer(
             db_path=self.db_path,
+            get_onedrive_email=lambda: self._onedrive_shared_email(),
             get_token=lambda: self._read_telegram_token()[0],
             get_fresh_context=lambda store, is_admin, telegram_id=None: (
                 self.telegram_worker._webapp_data_browser_context(

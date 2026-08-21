@@ -92,7 +92,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.9"
+__version__ = "0.3.10"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -306,6 +306,7 @@ class ClientApp(ctk.CTk):
         # reconnect бота, только на явное "Выкл.").
         self.webapp_server = WebappServer(
             db_path=paths.DB_PATH,
+            get_onedrive_email=lambda: self._onedrive_shared_email(),
             get_token=lambda: self._read_telegram_token()[0],
             get_fresh_context=lambda store, is_admin, telegram_id=None: (
                 self.telegram_worker._webapp_data_browser_context(
