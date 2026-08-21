@@ -92,7 +92,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -5421,6 +5421,7 @@ class ClientApp(ctk.CTk):
             # webapp_server.py - окреме, власне з'єднання ЦЬОГО потоку.
             error = None
             repair_plan = None
+            repair_error = None
             try:
                 ensure_workbook_has_required_sheets()
                 # Другий крок самозцілення, ДО імпорту: доводимо СКЛАД до
@@ -5430,7 +5431,16 @@ class ClientApp(ctk.CTk):
                 # взагалі. Дописані колонки одразу ж заповнюються, тож
                 # робити це треба саме до import_workbook - інакше база
                 # прочитала б ще порожні колонки.
-                repair_plan = repair_warehouse_columns()
+                #
+                # Реальний випадок (2026-08-21): "[WinError 5] Access is
+                # denied: ...xlsx.tmp -> ...xlsx" - файл тримав відкритим
+                # Excel, і невдалий ЗАПИС скасовував цілком справне
+                # ЧИТАННЯ. Дописування колонок - покращення, а не умова
+                # роботи: без нього програма читає таблицю як раніше.
+                try:
+                    repair_plan = repair_warehouse_columns()
+                except Exception as exc:
+                    repair_error = exc
                 workbook = excel_source.open_workbook(data_only=True)
                 try:
                     thread_store = ExcelSqliteStore(paths.DB_PATH)
@@ -5443,17 +5453,34 @@ class ClientApp(ctk.CTk):
             except Exception as exc:
                 error = str(exc)
             self._run_on_main_thread(
-                lambda: self._on_excel_refresh_finished(error, repair_plan)
+                lambda: self._on_excel_refresh_finished(error, repair_plan, repair_error)
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_excel_refresh_finished(self, error, repair_plan=None):
+    def _on_excel_refresh_finished(self, error, repair_plan=None, repair_error=None):
         self._excel_refresh_in_progress = False
         if self.refresh_excel_button is not None:
             self.refresh_excel_button.configure(text="\U0001F504  Обновить эксели", state="normal")
         if error:
             messagebox.showerror("AI Automation", f"Не удалось обновить: {error}")
+            return
+        if repair_error is not None:
+            # Заблокований файл - найчастіша причина, і вона має чітку дію:
+            # закрити таблицю в Excel. Сирий WinError людині нічого не каже.
+            if isinstance(repair_error, PermissionError):
+                reason = (
+                    "Файл занят другой программой — скорее всего он открыт в Excel.\n"
+                    "Закройте его и нажмите \u00abОбновить эксели\u00bb ещё раз."
+                )
+            else:
+                reason = str(repair_error)
+            messagebox.showwarning(
+                "AI Automation",
+                "Таблица Excel прочитана, но недостающие столбцы добавить не удалось.\n\n"
+                f"{reason}\n\n"
+                "Пока столбцов нет, позиции в погонных метрах показывают 0 мп.",
+            )
             return
         # Про правку самої таблиці мовчати не можна - програма змінила
         # файл користувача. Повідомлення з'явиться рівно один раз:
