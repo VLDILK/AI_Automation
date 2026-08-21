@@ -28,7 +28,7 @@ import paths
 # без потреби чіпати кожну функцію окремо. За замовчуванням - той самий
 # єдиний, зашитий у paths.py, сервер, що й завжди був (жодної зміни
 # поведінки для тих, хто ще не обирав інший).
-_BASE_URL = f"https://{paths.CLOUDFLARED_TUNNEL_HOSTNAME}"
+_BASE_URL = f"https://{paths.cloudflared_tunnel_hostname()}"
 # Cloudflare free-tier бот-захист блокує "generic" User-Agent (403) -
 # реальний браузер отримує 200, тож тут теж явно видаємо себе за нього.
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -55,7 +55,7 @@ def fetch_remote_status(timeout=10):
     успішно отриманий)."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/status",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -80,7 +80,7 @@ def fetch_remote_status(timeout=10):
 def fetch_remote_status_from(hostname, timeout=10):
     request = urllib.request.Request(
         f"https://{hostname}/control/status",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -99,7 +99,7 @@ def fetch_remote_personnel(timeout=10):
     вирішує, як показати відсутність даних, тут жодного UI."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/personnel",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -115,7 +115,7 @@ def fetch_remote_personnel(timeout=10):
 def fetch_remote_action_log(limit=50, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/action_log?limit={limit}",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -134,7 +134,7 @@ def send_home_heartbeat(timeout=10):
     критична помилка, яку gui.py має показувати користувачу."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/heartbeat",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token()}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
@@ -163,7 +163,7 @@ def send_home_heartbeat(timeout=10):
 def fetch_remote_standard_menu_cloud_path(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/standard_menu_cloud_path",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -179,7 +179,7 @@ def fetch_remote_standard_menu_cloud_path(timeout=10):
 def fetch_remote_custom_buttons(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/custom_buttons",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -198,7 +198,7 @@ def fetch_remote_custom_buttons(timeout=10):
 # функції нижче лише формують payload під конкретну дію.
 def _post_custom_button_action(payload, timeout=10):
     body = dict(payload)
-    body["token"] = paths.REMOTE_CONTROL_TOKEN
+    body["token"] = paths.remote_control_token()
     request = urllib.request.Request(
         f"{_BASE_URL}/control/custom_button_action",
         data=json.dumps(body).encode("utf-8"),
@@ -247,7 +247,7 @@ def delete_remote_custom_button(node_id, timeout=10):
 def fetch_remote_payment_methods(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/payment_methods",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -262,7 +262,7 @@ def fetch_remote_payment_methods(timeout=10):
 
 def _post_payment_method_action(payload, timeout=10):
     body = dict(payload)
-    body["token"] = paths.REMOTE_CONTROL_TOKEN
+    body["token"] = paths.remote_control_token()
     request = urllib.request.Request(
         f"{_BASE_URL}/control/payment_method_action",
         data=json.dumps(body).encode("utf-8"),
@@ -294,7 +294,7 @@ def delete_remote_payment_method(option_id, timeout=10):
 def fetch_remote_operations_tree(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/operations_tree",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -319,7 +319,7 @@ def fetch_remote_operations_tree(timeout=10):
 def save_standard_menu_to_cloud(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/save_standard_menu_to_cloud",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token()}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
@@ -337,7 +337,7 @@ def save_standard_menu_to_cloud(timeout=10):
 def fetch_remote_system_commands(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/system_commands",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -353,7 +353,7 @@ def fetch_remote_system_commands(timeout=10):
 def save_remote_system_commands(commands, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/system_commands_save",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "commands": commands}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token(), "commands": commands}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
@@ -364,7 +364,7 @@ def save_remote_system_commands(commands, timeout=10):
 def set_remote_role(user_id, role, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/set_role",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "user_id": user_id, "role": role}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token(), "user_id": user_id, "role": role}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
@@ -378,7 +378,7 @@ def send_remote_command(action, timeout=10):
     показати помилку користувачу, тут жодного UI."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/command",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "action": action}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token(), "action": action}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )

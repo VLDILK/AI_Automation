@@ -91,7 +91,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -310,7 +310,7 @@ class ClientApp(ctk.CTk):
                 self.telegram_worker._webapp_data_browser_context(store, is_admin)
                 if self.telegram_worker else None
             ),
-            get_remote_control_token=lambda: paths.REMOTE_CONTROL_TOKEN,
+            get_remote_control_token=lambda: paths.remote_control_token(),
             get_remote_status=self._get_remote_status,
             handle_remote_command=self._handle_remote_command,
             handle_home_heartbeat=self._handle_home_heartbeat,
@@ -1043,21 +1043,73 @@ class ClientApp(ctk.CTk):
     # ніколи не чіпав). Сам ID тунеля НЕ тут - paths.read_cloudflared_
     # tunnel_id() читає його напряму з credentials-файлу цієї машини (той
     # самий файл, що cloudflared і так вимагає).
+    # Спільний вигляд для всіх значень, які можна або вписати, або
+    # прикріпити файлом. Обидва шляхи ведуть в ОДИН файл у system/, тож
+    # питання "що з двох діє" не виникає. Порожнє поле видаляє файл -
+    # повертається значення, вшите в програму.
+    def _build_override_entry(self, parent, title, path, placeholder, note,
+                              secret=False, with_file_button=""):
+        ctk.CTkLabel(
+            parent, text=title, font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 2))
+        value_var = ctk.StringVar(value=paths.read_override_file(path))
+        state_var = ctk.StringVar(value=note)
+        entry = ctk.CTkEntry(
+            parent, textvariable=value_var, placeholder_text=placeholder,
+            show="•" if secret else "",
+        )
+        entry.pack(fill="x", padx=16, pady=(0, 4))
+
+        def save(*_args):
+            paths.write_override_file(path, value_var.get())
+            saved = paths.read_override_file(path)
+            state_var.set(
+                ("Сохранено: " + ("•" * len(saved) if secret else saved)) if saved else note
+            )
+
+        value_var.trace_add("write", save)
+
+        if with_file_button:
+            def attach_file():
+                selected_file = filedialog.askopenfilename(
+                    title=with_file_button,
+                    filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+                )
+                if not selected_file:
+                    return
+                try:
+                    lines = Path(selected_file).read_text(encoding="utf-8-sig").splitlines()
+                except (OSError, UnicodeDecodeError):
+                    state_var.set("Не удалось прочитать файл.")
+                    return
+                # Кладемо ВМІСТ, а не шлях: інакше значення залежало б від
+                # того, чи лежить той файл на місці, і чи його не змінили.
+                value_var.set(next((line.strip() for line in lines if line.strip()), ""))
+
+            ctk.CTkButton(parent, text=with_file_button, command=attach_file).pack(
+                fill="x", padx=16, pady=(0, 4)
+            )
+
+        ctk.CTkLabel(
+            parent, textvariable=state_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
     def _cloudflared_tunnel_hostname(self):
         hostname_file = self.settings.get("cloudflared_tunnel_hostname_file")
         if not hostname_file:
-            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            return paths.cloudflared_tunnel_hostname()
         hostname_path = Path(hostname_file)
         if not hostname_path.exists():
-            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            return paths.cloudflared_tunnel_hostname()
         try:
             lines = hostname_path.read_text(encoding="utf-8-sig").splitlines()
         except UnicodeDecodeError:
             lines = hostname_path.read_text(encoding="cp1251").splitlines()
         except OSError:
-            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            return paths.cloudflared_tunnel_hostname()
         hostname = next((line.strip() for line in lines if line.strip()), "")
-        return hostname or paths.CLOUDFLARED_TUNNEL_HOSTNAME
+        return hostname or paths.cloudflared_tunnel_hostname()
 
     # Короткий підпис під кнопкою вибору файлу - показує, що реально
     # зараз обрано (чи "нічого", і тоді діє спільна адреса за замовчуванням).
@@ -2136,7 +2188,19 @@ class ClientApp(ctk.CTk):
         ctk.CTkLabel(
             window, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
-        ).pack(fill="x", padx=16, pady=(0, 16))
+        ).pack(fill="x", padx=16, pady=(0, 6))
+
+        # Те саме значення, але вписане руками. Пишеться у system/
+        # tunnel_hostname.txt - той самий файл, що читає paths.
+        # cloudflared_tunnel_hostname(), тож "вписане" й "прикріплене" не
+        # можуть розійтись між собою.
+        self._build_override_entry(
+            window,
+            title="Или впишите адрес строкой",
+            path=paths.TUNNEL_HOSTNAME_FILE,
+            placeholder="bot.example.com",
+            note="Пусто — действует адрес из файла выше или общий по умолчанию.",
+        )
 
         # Задача користувача (2026-08-20): "зроби цю заміну оновленням
         # новим" - вшитий у збірку credentials.json НЕ можна безпечно
@@ -2173,6 +2237,28 @@ class ClientApp(ctk.CTk):
             window, textvariable=credentials_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 16))
+
+        # Ключ, яким домашня програма доводить, що це саме вона. Раніше був
+        # вшитий у код обох програм - тобто однаковий у всіх копіях і
+        # незмінний без перезбірки.
+        ctk.CTkLabel(
+            window,
+            text=(
+                "Ключ управления (необязательно) — им домашняя программа подтверждает, "
+                "что это она. ВАЖНО: значение должно совпадать в обеих программах, "
+                "иначе они перестанут видеть друг друга."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 6))
+        self._build_override_entry(
+            window,
+            title="Ключ управления",
+            path=paths.REMOTE_CONTROL_TOKEN_FILE,
+            placeholder="вставьте ключ или прикрепите файл",
+            note="Пусто — действует ключ, вшитый в программу.",
+            secret=True,
+            with_file_button="Прикрепить файл с ключом",
+        )
 
         token_entry.bind("<FocusOut>", on_token_changed)
         token_entry.bind("<Return>", on_token_changed)

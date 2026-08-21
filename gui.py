@@ -74,7 +74,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.95"
+__version__ = "1.0.97"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1688,6 +1688,18 @@ class ExcelViewerApp:
             command=self.open_onedrive_account_dialog,
         )
         onedrive_account_button.pack(anchor="w", pady=(0, 12))
+
+        # Задача користувача (2026-08-21): "ключі зроби змогу або файлом
+        # .тхт, або в строку ввести". Поле мусить бути з ОБОХ боків: ключ
+        # спільний, і якщо його змінити лише на клієнті, програми просто
+        # перестануть одна одну впізнавати.
+        remote_key_button = tk.Button(
+            main_settings,
+            text=self._t("Ключ управления"),
+            width=28,
+            command=self.open_remote_key_dialog,
+        )
+        remote_key_button.pack(anchor="w", pady=(0, 12))
 
         choose_token_button = tk.Button(
             main_settings,
@@ -3498,7 +3510,7 @@ class ExcelViewerApp:
     # _onedrive_account_status_text вище.
     def _active_server_display_name(self):
         hostname = remote_control_client.active_hostname()
-        if hostname == paths.CLOUDFLARED_TUNNEL_HOSTNAME:
+        if hostname == paths.cloudflared_tunnel_hostname():
             return self._t("Стандартний")
         servers = servers_registry.read_servers(self._onedrive_shared_email())
         for name, server in servers.items():
@@ -3520,6 +3532,87 @@ class ExcelViewerApp:
     # теки. Обидві сторони (клієнт і ця, домашня программа) мають
     # НАЛАШТУВАТИСЬ на ОДИН і той самий акаунт, інакше кожна читає/пише
     # свою окрему теку і жодна не бачить іншу.
+    def open_remote_key_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Ключ управления"))
+        window.transient(self.root)
+        window.grab_set()
+
+        top = tk.Frame(window)
+        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        tk.Label(
+            top, text=self._t("Ключ управления"), font=("Segoe UI", 13, "bold"), anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            top,
+            text=self._t(
+                "Этим ключом домашняя программа подтверждает клиенту, что это она. "
+                "ВАЖНО: значение должно совпадать с полем «Ключ управления» на клиентской "
+                "машине — иначе программы перестанут видеть друг друга. "
+                "Пусто — действует ключ, вшитый в программу."
+            ),
+            anchor="w", justify="left", wraplength=420, fg="#555555",
+        ).pack(anchor="w", pady=(4, 0))
+
+        body = tk.Frame(window)
+        body.pack(side="top", fill="x", padx=18, pady=8)
+
+        key_var = tk.StringVar(value=paths.read_override_file(paths.REMOTE_CONTROL_TOKEN_FILE))
+        key_entry = tk.Entry(body, textvariable=key_var, width=40, show="•")
+        key_entry.pack(anchor="w", fill="x")
+
+        status_var = tk.StringVar()
+        tk.Label(
+            body, textvariable=status_var, anchor="w", justify="left", wraplength=420, fg="#555555",
+        ).pack(anchor="w", fill="x", pady=(8, 0))
+
+        def describe():
+            saved = paths.read_override_file(paths.REMOTE_CONTROL_TOKEN_FILE)
+            if saved:
+                status_var.set(
+                    self._t("Сохранено ({count} символов) в system/remote_control_token.txt").format(
+                        count=len(saved))
+                )
+            else:
+                status_var.set(self._t("Файла нет — действует ключ, вшитый в программу."))
+
+        def on_key_changed(*_args):
+            # Той самий принцип, що й у токенів GitHub/Cloudflare: зберігаємо
+            # одразу, без кнопки "Зберегти" - забути натиснути тут коштувало
+            # б обірваного зв'язку.
+            paths.write_override_file(paths.REMOTE_CONTROL_TOKEN_FILE, key_var.get())
+            describe()
+
+        key_var.trace_add("write", on_key_changed)
+        describe()
+
+        def attach_file():
+            file_path = filedialog.askopenfilename(
+                title=self._t("Виберіть .txt із ключем"),
+                filetypes=[("Текстові файли", "*.txt"), ("Усі файли", "*.*")],
+            )
+            if not file_path:
+                return
+            try:
+                lines = Path(file_path).read_text(encoding="utf-8-sig").splitlines()
+            except (OSError, UnicodeDecodeError) as exc:
+                messagebox.showerror(
+                    self._t("Ключ управления"),
+                    self._t("Не вдалось прочитати файл: {error}").format(error=exc),
+                )
+                return
+            # Кладемо ВМІСТ, а не шлях - інакше значення залежало б від того,
+            # чи лежить той файл на місці й чи його не змінили.
+            key_var.set(next((line.strip() for line in lines if line.strip()), ""))
+
+        buttons = tk.Frame(window)
+        buttons.pack(side="top", fill="x", padx=18, pady=(4, 16))
+        tk.Button(buttons, text=self._t("Прикріпити файл..."), command=attach_file).pack(side="left")
+        tk.Button(buttons, text=self._t("Закрити"), command=window.destroy).pack(side="right")
+
+        window.bind("<Escape>", lambda event: window.destroy())
+        self._center_window(window, 480, 300)
+
     def open_onedrive_account_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Учётная запись OneDrive"))
@@ -5292,7 +5385,7 @@ class ExcelViewerApp:
             # рівно один пункт, а імена зареєстрованих серверів, які сидять
             # на тій самій адресі, дописуються в його ж підпис - жодна
             # машина не зникає зі списку.
-            standard_hostname = paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            standard_hostname = paths.cloudflared_tunnel_hostname()
             same_address = sorted(
                 name for name, server in servers.items()
                 if (server.get("hostname") or "") == standard_hostname
@@ -5556,7 +5649,7 @@ class ExcelViewerApp:
                 # вдвічі більше шансів упіймати стару машину; хто саме
                 # відповів, видно з підпису під іменем.
                 standard_server = {
-                    "hostname": paths.CLOUDFLARED_TUNNEL_HOSTNAME, "kind": "standard", "version": "",
+                    "hostname": paths.cloudflared_tunnel_hostname(), "kind": "standard", "version": "",
                 }
                 display_rows = [(self._t("Стандартний"), standard_server, False)]
                 for name, server in sorted(servers.items()):
@@ -9348,7 +9441,7 @@ class ExcelViewerApp:
         за замовчуванням, далі всі зареєстровані машини. Синтетичний рядок
         обов'язковий: стара збірка себе не реєструє взагалі, і без нього
         робочої машини на екрані просто не було б."""
-        rows = [(self._t("Рабочий"), paths.CLOUDFLARED_TUNNEL_HOSTNAME, "main")]
+        rows = [(self._t("Рабочий"), paths.cloudflared_tunnel_hostname(), "main")]
         try:
             servers = servers_registry.read_servers(self._onedrive_shared_email())
         except OSError:
