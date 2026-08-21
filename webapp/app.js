@@ -1346,6 +1346,25 @@
       if (thickness == null || width == null) {
         return price * numberOrZero(quantity);
       }
+      // Для антисептирования ціна ЗАВЖДИ MDL/м3 - незалежно від того, як
+      // продається сам товар. Реальний випадок (2026-08-21, скріншот):
+      // 50x50x6000, 153 шт, 350 MDL - живий рядок під ціною показував
+      // "Сумма за товар: 321300 MDL" (правило погонних метрів: 918 мп x
+      // 350) замість 803,25 MDL (2,295 м3 x 350). Підказка над ним у ТІЙ
+      // САМІЙ формі чесно писала "Объём: 2,295 м3", а поле звалось "Цена
+      // за м3" - тобто форма сама собі суперечила.
+      //
+      // Екран підтвердження (buildAntisepticSummaryElement) і сам бот
+      // (telegram_dialog_antiseptic: total_amount = price_per_unit *
+      // volume) рахували правильно від початку - розходився лише цей
+      // рядок, бо йшов через СПІЛЬНУ computePositionTotal, побудовану
+      // навколо "товар + необов'язкове антисептик-доповнення".
+      //
+      // Антисептик-ДОПОВНЕННЯ до продажу сюди не потрапляє: там cat - це
+      // категорія самого товару, і його вимір (мп/м2/м3) лишається своїм.
+      if (cat && cat.kind === "antiseptic") {
+        return pieceMeasure(thickness, width, length, "volume") * numberOrZero(quantity) * price;
+      }
       var kind = rowMeasureKind(cat && cat.product, thickness, width);
       if (!kind) {
         return price * numberOrZero(quantity);
