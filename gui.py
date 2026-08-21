@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -7846,6 +7846,79 @@ class ExcelViewerApp:
                 )
                 return
             self._write_github_publish_token(token)
+
+            # Реальний глухий кут (2026-08-21, живе тестування): версію
+            # опублікували в тестовий канал, вона пройшла перевірку - і
+            # віддати ТОЙ САМИЙ пакет у стабільний виявилось нічим.
+            # Повторна публікація впиралась у 422 "Увеличьте номер версии",
+            # а це порада гірша за проблему: у продакшн поїхала б щойно
+            # зібрана, ще не перевірена збірка замість відтестованої.
+            # Канал - це рідний прапорець prerelease того самого релізу,
+            # тож тут його просто перемикаємо, лишаючи файл недоторканим.
+            existing_tag = github_releases.CLIENT_TAG_PREFIX + client_version
+            try:
+                existing_release = github_releases.find_release_by_tag(
+                    paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO,
+                    existing_tag, token=token,
+                )
+            except Exception as exc:
+                messagebox.showerror(self._t("Публікація оновлень"), self._t(str(exc)))
+                return
+            if existing_release is not None:
+                already_test = bool(existing_release.get("prerelease"))
+                if already_test == bool(is_test_release):
+                    messagebox.showerror(
+                        self._t("Публікація оновлень"),
+                        self._t(
+                            "Версія {version} вже опублікована в {channel} каналі. Щоб випустити НОВУ "
+                            "збірку, підніміть номер версії в client_app.py і перезберіть."
+                        ).format(
+                            version=client_version,
+                            channel=self._t("тестовому") if already_test else self._t("стабільному"),
+                        ),
+                    )
+                    return
+                assets = existing_release.get("assets") or []
+                uploaded = (assets[0].get("updated_at") or "")[:16].replace("T", " ") if assets else "—"
+                if is_test_release:
+                    question = self._t(
+                        "Версія {version} зараз у СТАБІЛЬНОМУ каналі.\n\n"
+                        "Повернути її в тестовий? Файл лишиться той самий (завантажений {uploaded} UTC), "
+                        "але стабільні клієнти перестануть його бачити."
+                    )
+                else:
+                    question = self._t(
+                        "Версія {version} вже опублікована в тестовому каналі.\n\n"
+                        "Просунути її в стабільний? У клієнтів піде РІВНО той файл, що вже завантажений "
+                        "({uploaded} UTC) — той самий, який ви щойно перевірили на тесті, а не поточна "
+                        "локальна збірка."
+                    )
+                if not messagebox.askyesno(
+                    self._t("Публікація оновлень"),
+                    question.format(version=client_version, uploaded=uploaded),
+                ):
+                    return
+                try:
+                    github_releases.set_release_channel(
+                        token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO,
+                        existing_tag, is_test_release,
+                    )
+                except Exception as exc:
+                    messagebox.showerror(self._t("Публікація оновлень"), self._t(str(exc)))
+                    return
+                moved_to = self._t("тестовий") if is_test_release else self._t("стабільний")
+                publish_result_text.set(
+                    self._t("{tag} переведено в {channel} канал.").format(tag=existing_tag, channel=moved_to)
+                )
+                messagebox.showinfo(
+                    self._t("Публікація оновлень"),
+                    self._t(
+                        "{tag} тепер у {channel} каналі. Файл не перезавантажувався — клієнти отримають "
+                        "той самий пакет."
+                    ).format(tag=existing_tag, channel=moved_to),
+                )
+                return
+
             # Реальна знахідка (2026-08-15, живий продакшн): "не удалось
             # создать снимок кода перед публикацией" - той самий клас багу,
             # що вже виправлений у client_app.py - у зібраній версії

@@ -522,6 +522,43 @@ def create_release(token, owner, repo, tag_prefix, version, notes="", prerelease
     )
 
 
+# Реальний глухий кут (2026-08-21, живе тестування): версію 0.3.7
+# опублікували в тестовий канал, вона пройшла перевірку - і виявилось, що
+# віддати ТОЙ САМИЙ, уже перевірений пакет у стабільний канал нічим.
+# create_release на наявний тег повертає 422 ("Такая версия уже была
+# опубликована ранее"), а окрему кнопку просування колись прибрали.
+# Вихід через збільшення номера гірший за проблему: у стабільний канал
+# поїхала б ЩОЙНО зібрана, ще не перевірена збірка замість тієї, яку
+# щойно відтестували.
+#
+# Канал - це не окремий тег і не окремий реліз, а РІДНИЙ прапорець
+# prerelease того самого релізу. Тож просування - це його перемикання, і
+# файл лишається буквально той самий, уже завантажений.
+def set_release_channel(token, owner, repo, tag_name, prerelease, timeout=30):
+    release = get_release_by_tag(owner, repo, tag_name, timeout=timeout, token=token)
+    payload = json.dumps({"prerelease": bool(prerelease)}).encode("utf-8")
+    return _request(
+        f"{API_ROOT}/repos/{owner}/{repo}/releases/{release['id']}",
+        token=token, method="PATCH", data=payload,
+        extra_headers={"Content-Type": "application/json"}, timeout=timeout,
+    )
+
+
+def find_release_by_tag(owner, repo, tag_name, timeout=15, token=None):
+    """Реліз із таким тегом або None. Окремо від get_release_by_tag, бо
+    тут ВІДСУТНІСТЬ - нормальна відповідь, а не помилка.
+
+    Ковтаємо РІВНО 404. Проблеми з токеном чи мережею мусять лишатись
+    помилками: інакше "GitHub не прийняв токен" мовчки перетворилося б на
+    "такого релізу немає", і програма пішла б створювати дублікат."""
+    try:
+        return get_release_by_tag(owner, repo, tag_name, timeout=timeout, token=token)
+    except GitHubApiError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+
+
 # Задача користувача (2026-08-20): "коли публікує - додай полоску
 # прогресу" - urllib/http.client самі читають дані для відправки блоками
 # (типово 8КБ) через .read() файлоподібного об'єкта - жодного власного
