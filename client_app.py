@@ -92,7 +92,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.11"
+__version__ = "0.3.12"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -404,6 +404,7 @@ class ClientApp(ctk.CTk):
         self.auto_update_window = None
         self.update_channel_window = None
         self.onedrive_account_window = None
+        self.efactura_accountant_window = None
         self.rollback_window = None
         self.main_title_style_window = None
         self._last_registry_error = "ещё не пытался"
@@ -1833,6 +1834,12 @@ class ClientApp(ctk.CTk):
         # find_account_folder) - надійніше, той самий механізм, яким цього
         # сеансу вручну діагностували плутанину акаунтів.
         self._build_row_button(card, "key", "Учётная запись OneDrive", self._open_onedrive_account_window)
+        # Задача клієнта (2026-08-21): якщо оплата - ЕФАКТУРА, у звіті
+        # про продаж треба звернутись до бухгалтера, щоб він її виписав.
+        # Кого саме звати - налаштовується тут.
+        self._build_row_button(
+            card, "personnel", "Бухгалтер для ЕФАКТУРА", self._open_efactura_accountant_window
+        )
         # Задача користувача (2026-08-20): "змога користувачеві самостійно
         # робити відкат программи... випадкова версія не туди потрапила,
         # або щось не те відбулось в самому оновленні" - той самий
@@ -2285,6 +2292,234 @@ class ClientApp(ctk.CTk):
     # акаунт незалежно від нього - плутанина. Тепер ОДНЕ поле, ОДИН
     # спільний хелпер - усі виклики (реєстр, бекапи, стандартне меню)
     # використовують той самий обраний акаунт.
+    # Задача клієнта (2026-08-21): "Если форма оплаты содержит слово
+    # ЕФАКТУРА... бот должен добавить активный тег бухгалтера" - хто саме
+    # цей бухгалтер, налаштовується тут.
+    #
+    # Спосіб звернення рівно ОДИН з чотирьох (пряма вимога користувача:
+    # "тут має бути або або"), тому це перемикач, а не набір полів: обране
+    # активне, решта згасає. Інакше довелось би вигадувати прихований
+    # порядок пріоритетів між заповненими полями й пояснювати його людині.
+    def _open_efactura_accountant_window(self):
+        if self.efactura_accountant_window is not None and self.efactura_accountant_window.winfo_exists():
+            self.efactura_accountant_window.deiconify()
+            self.efactura_accountant_window.lift()
+            self.efactura_accountant_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Бухгалтер для ЕФАКТУРА")
+        window.geometry("420x640")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.efactura_accountant_window = window
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(
+            top, text="Бухгалтер для ЕФАКТУРА", font=("", 16, "bold"), text_color=COLOR_TEXT
+        ).pack(side="left")
+
+        scroll = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, pady=(4, 8))
+
+        ctk.CTkLabel(
+            scroll,
+            text=(
+                "Если в форме оплаты есть слово ЕФАКТУРА, бот добавит обращение "
+                "к бухгалтеру в конце отчёта о продаже.\n\n"
+                "Обращение появляется только в том чате, куда дублируются отчёты. "
+                "Тому, кто оформляет продажу, приходит обычное сообщение."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=360,
+        ).pack(fill="x", padx=16, pady=(8, 12))
+
+        mode_var = ctk.StringVar(value=(self.settings.get("efactura_tag_mode") or ""))
+        id_var = ctk.StringVar(value=str(self.settings.get("efactura_tag_user_id") or ""))
+        username_var = ctk.StringVar(value=self.settings.get("efactura_tag_username") or "")
+        phone_var = ctk.StringVar(value=self.settings.get("efactura_tag_phone") or "")
+        label_var = ctk.StringVar(value=self.settings.get("efactura_tag_label") or "Бухгалтер")
+        text_var = ctk.StringVar(
+            value=self.settings.get("efactura_tag_text")
+            or "просьба принять информацию и выпустить ЕФАКТУРУ."
+        )
+
+        # Список тих, хто вже писав боту - найпростіший шлях: вибір одразу
+        # дає Telegram ID, а саме він переживає зміну @імені.
+        id_by_choice = {}
+        choices = []
+        try:
+            for _row_id, telegram_id, username, full_name, _role, _seen in self.store.list_users():
+                if not telegram_id:
+                    continue
+                name = (full_name or username or str(telegram_id)).strip()
+                choice = f"{name} (@{username})" if username else f"{name} (ID {telegram_id})"
+                if choice in id_by_choice:
+                    continue
+                id_by_choice[choice] = int(telegram_id)
+                choices.append(choice)
+        except Exception:
+            choices = []
+        if not choices:
+            choices = ["— никто ещё не писал боту —"]
+        saved_id = str(self.settings.get("efactura_tag_user_id") or "").strip()
+        preselected = choices[0]
+        for choice, telegram_id in id_by_choice.items():
+            if str(telegram_id) == saved_id:
+                preselected = choice
+                break
+        choice_var = ctk.StringVar(value=preselected)
+
+        def add_option(value, title, hint, builder):
+            row = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=10)
+            row.pack(fill="x", padx=16, pady=(0, 8))
+            ctk.CTkRadioButton(
+                row, text=title, variable=mode_var, value=value, command=lambda: refresh_state(),
+                font=("", 13), text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+            if hint:
+                ctk.CTkLabel(
+                    row, text=hint, font=("", 10), text_color=COLOR_TEXT_MUTED,
+                    justify="left", wraplength=320, anchor="w",
+                ).pack(fill="x", padx=34, pady=(0, 6))
+            widget = builder(row)
+            if widget is not None:
+                widget.pack(fill="x", padx=34, pady=(0, 12))
+            return widget
+
+        off_widget = add_option("", "Не отмечать никого", "Обращение не добавляется вовсе.", lambda row: None)
+        list_widget = add_option(
+            "list", "Из тех, кто писал боту", "Самый надёжный способ — сразу берётся Telegram ID.",
+            lambda row: ctk.CTkOptionMenu(row, values=choices, variable=choice_var),
+        )
+        id_widget = add_option(
+            "id", "Telegram ID вручную", "Если человек ещё ни разу не писал боту.",
+            lambda row: ctk.CTkEntry(row, textvariable=id_var, placeholder_text="123456789"),
+        )
+        username_widget = add_option(
+            "username", "Имя в чате (@username)",
+            "Перестанет отмечать, если человек сменит себе имя.",
+            lambda row: ctk.CTkEntry(row, textvariable=username_var, placeholder_text="@buhgalter"),
+        )
+        phone_widget = add_option(
+            "phone", "Телефон",
+            "Уведомление НЕ придёт: Telegram не умеет искать человека по номеру. "
+            "Обращение появится текстом, но без отметки.",
+            lambda row: ctk.CTkEntry(row, textvariable=phone_var, placeholder_text="+373 79 410 337"),
+        )
+
+        common = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=10)
+        common.pack(fill="x", padx=16, pady=(4, 8))
+        ctk.CTkLabel(
+            common, text="Имя в обращении", font=("", 12), text_color=COLOR_TEXT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkEntry(common, textvariable=label_var, placeholder_text="Бухгалтер").pack(
+            fill="x", padx=12, pady=(0, 10)
+        )
+        ctk.CTkLabel(
+            common, text="Текст уведомления", font=("", 12), text_color=COLOR_TEXT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkEntry(common, textvariable=text_var).pack(fill="x", padx=12, pady=(0, 12))
+
+        preview_var = ctk.StringVar(value="")
+        ctk.CTkLabel(
+            scroll, textvariable=preview_var, font=("", 11), text_color=COLOR_TEXT_MUTED,
+            justify="left", wraplength=360, anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 12))
+
+        def refresh_state():
+            mode = mode_var.get()
+            for value, widget in (
+                ("list", list_widget), ("id", id_widget),
+                ("username", username_widget), ("phone", phone_widget),
+            ):
+                if widget is None:
+                    continue
+                widget.configure(state="normal" if mode == value else "disabled")
+            preview_var.set(self._efactura_preview_text(mode, choice_var.get(), id_by_choice,
+                                                        id_var.get(), username_var.get(), phone_var.get()))
+
+        def save():
+            mode = mode_var.get()
+            values = {
+                "efactura_tag_mode": mode,
+                "efactura_tag_label": label_var.get().strip() or "Бухгалтер",
+                "efactura_tag_text": text_var.get().strip()
+                or "просьба принять информацию и выпустить ЕФАКТУРУ.",
+            }
+            # Порожнє значення при обраному способі - найімовірніша помилка
+            # людини, і мовчки зберегти його означало б, що бот просто
+            # нікого не покличе, а ніхто про це не дізнається.
+            if mode == "list":
+                telegram_id = id_by_choice.get(choice_var.get())
+                if not telegram_id:
+                    messagebox.showwarning("AI Automation", "Выберите человека из списка.")
+                    return
+                values["efactura_tag_user_id"] = telegram_id
+            elif mode == "id":
+                raw = id_var.get().strip()
+                if not raw.lstrip("-").isdigit() or int(raw) <= 0:
+                    messagebox.showwarning("AI Automation", "Telegram ID — это число, например 123456789.")
+                    return
+                values["efactura_tag_user_id"] = int(raw)
+            elif mode == "username":
+                username = username_var.get().strip().lstrip("@")
+                if not username:
+                    messagebox.showwarning("AI Automation", "Укажите имя в чате, например @buhgalter.")
+                    return
+                values["efactura_tag_username"] = username
+            elif mode == "phone":
+                phone = phone_var.get().strip()
+                if not phone:
+                    messagebox.showwarning("AI Automation", "Укажите номер телефона.")
+                    return
+                values["efactura_tag_phone"] = phone
+            for key, value in values.items():
+                self.settings.set(key, value)
+            if not mode:
+                messagebox.showinfo("AI Automation", "Сохранено. Бухгалтер не отмечается.")
+                return
+            messagebox.showinfo(
+                "AI Automation",
+                "Сохранено.\n\nПри оплате с ЕФАКТУРА бот добавит обращение:\n"
+                + self._efactura_preview_text(mode, choice_var.get(), id_by_choice,
+                                              id_var.get(), username_var.get(), phone_var.get()),
+            )
+
+        for var in (choice_var, id_var, username_var, phone_var):
+            var.trace_add("write", lambda *_args: refresh_state())
+
+        bottom = ctk.CTkFrame(window, fg_color="transparent")
+        bottom.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(bottom, text="Сохранить", command=save).pack(fill="x")
+
+        refresh_state()
+        window.bind("<Escape>", lambda event: window.destroy())
+
+    # Один текст і для підказки під вибором, і для повідомлення про успіх -
+    # щоб людина бачила РІВНО те, що збережеться, ще до натискання кнопки.
+    def _efactura_preview_text(self, mode, choice, id_by_choice, raw_id, username, phone):
+        if not mode:
+            return "Обращение к бухгалтеру не добавляется."
+        if mode == "list":
+            telegram_id = id_by_choice.get(choice)
+            if not telegram_id:
+                return "Человек не выбран — обращения не будет."
+            return f"Отметит: {choice} — уведомление придёт."
+        if mode == "id":
+            raw = (raw_id or "").strip()
+            if not raw.isdigit():
+                return "Нужен числовой Telegram ID — обращения не будет."
+            return f"Отметит по ID {raw} — уведомление придёт."
+        if mode == "username":
+            name = (username or "").strip().lstrip("@")
+            if not name:
+                return "Имя не указано — обращения не будет."
+            return f"Отметит @{name} — уведомление придёт, пока имя не изменится."
+        if mode == "phone":
+            if not (phone or "").strip():
+                return "Номер не указан — обращения не будет."
+            return "Обращение появится текстом, но БЕЗ уведомления: по номеру Telegram человека не находит."
+        return ""
+
     def _onedrive_shared_email(self):
         return (self.settings.get("onedrive_shared_email") or "").strip() or None
 

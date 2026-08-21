@@ -11,6 +11,10 @@ from pathlib import Path
 import permissions as perm
 import webapp_server
 from paths import DISPLAY_SETTINGS_PATH, REPORT_BROADCAST_CHAT_ID, SETTINGS_PATH
+
+# Текст звернення до бухгалтера за замовчуванням - той, що просив
+# клієнт. Редагується у вікні налаштувань, тут лише запасне значення.
+_EFACTURA_DEFAULT_TEXT = "просьба принять информацию и выпустить ЕФАКТУРУ."
 from settings import DisplaySettingsStore, SettingsStore
 from utils import (
     _display_bot_number,
@@ -1925,7 +1929,71 @@ class CoreDialogMixin:
     # основну відповідь користувачу, збій мережі/тимчасова недоступність
     # групи НЕ повинні ламати чи затримувати саму операцію, яка вже
     # успішно записана в БД.
-    def _notify_report_broadcast(self, context, message_text):
+    # --- Тег бухгалтера для ЕФАКТУРА ---
+    # Задача клієнта (2026-08-21): якщо форма оплати містить "ЕФАКТУРА",
+    # у повідомленні про продаж треба звернутись до бухгалтера, щоб він її
+    # виписав.
+    #
+    # У Молдові це слово пишуть і кирилицею, і латиницею, і через дефіс,
+    # тож порівнюємо в нижньому регістрі й без розділювачів: "ЕФАКТУРА Б/Н",
+    # "E-Factura", "efactura" однаково спрацюють.
+    _EFACTURA_MARKERS = ("ефактура", "efactura")
+
+    def _payment_method_is_efactura(self, payment_method):
+        if not payment_method:
+            return False
+        normalized = str(payment_method).lower()
+        for character in (" ", "-", "\u2013", "\u2014", "."):
+            normalized = normalized.replace(character, "")
+        return any(marker in normalized for marker in self._EFACTURA_MARKERS)
+
+    def _efactura_accountant_tail(self, payment_method):
+        """HTML-хвіст зі зверненням до бухгалтера або "" - якщо оплата не
+        ЕФАКТУРА чи бухгалтера не налаштовано.
+
+        Спосіб звернення рівно один, той, що обрано в налаштуваннях -
+        ніяких прихованих пріоритетів між заповненими полями.
+        """
+        if not self._payment_method_is_efactura(payment_method):
+            return ""
+        try:
+            settings = SettingsStore(self.settings_path)
+        except OSError:
+            return ""
+        mode = (settings.get("efactura_tag_mode") or "").strip()
+        if not mode:
+            return ""
+        label = (settings.get("efactura_tag_label") or "").strip() or "Бухгалтер"
+        text = (settings.get("efactura_tag_text") or "").strip() or _EFACTURA_DEFAULT_TEXT
+        if mode in ("list", "id"):
+            try:
+                user_id = int(str(settings.get("efactura_tag_user_id") or "").strip())
+            except ValueError:
+                return ""
+            if user_id <= 0:
+                return ""
+            # Згадка через ID працює й для людини без @імені, і переживає
+            # зміну цього імені - тому це основний спосіб.
+            mention = f'<a href="tg://user?id={user_id}">{html.escape(label)}</a>'
+        elif mode == "username":
+            username = (settings.get("efactura_tag_username") or "").strip().lstrip("@")
+            if not username:
+                return ""
+            mention = f"@{html.escape(username)}"
+        elif mode == "phone":
+            # Bot API не має способу знайти користувача за номером
+            # телефону - перевірено в офіційній документації. Тому тут
+            # виходить звернення БЕЗ справжньої згадки: текст у групі
+            # з'явиться, але сповіщення нікому не прийде. Це чесно
+            # написано у вікні налаштувань, поруч із самим полем.
+            if not (settings.get("efactura_tag_phone") or "").strip():
+                return ""
+            mention = html.escape(label)
+        else:
+            return ""
+        return f"{mention}, {html.escape(text)}"
+
+    def _notify_report_broadcast(self, context, message_text, accountant_tail=""):
         chat_id = self._report_broadcast_chat_id()
         if not chat_id:
             return
@@ -1941,8 +2009,14 @@ class CoreDialogMixin:
             # тут - явна, постійна гарантія, а не одноразовий фікс: кожен
             # звіт у групу заразом прибирає будь-яку клавіатуру, якщо вона
             # там ще є.
+            body = f"<b>{html.escape(full_name)}</b>:\n{message_text}"
+            # Звернення до бухгалтера з'являється ЛИШЕ тут, у груповому
+            # дублі: у приватному чаті з оператором згадка нікого
+            # стороннього не сповістить, вона там була б просто текстом.
+            if accountant_tail:
+                body = f"{body}\n\n{accountant_tail}"
             self._send_message(
-                chat_id, f"<b>{html.escape(full_name)}</b>:\n{message_text}",
+                chat_id, body,
                 reply_markup={"remove_keyboard": True}, parse_mode="HTML",
             )
         except Exception:

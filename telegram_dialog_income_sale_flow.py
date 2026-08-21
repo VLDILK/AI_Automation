@@ -9,6 +9,7 @@ from utils import (
     _display_bot_number,
     _normalize_phrase,
     _number_value,
+    price_line_text,
 )
 from warehouse_data import (
     BOT_MESSAGE_DEFAULTS,
@@ -1849,7 +1850,16 @@ class IncomeSaleFlowDialogMixin:
             # Задача користувача (2026-08-17): дубль звіту в окрему групу -
             # покриває і продаж, і прихід (обидва проходять через цю саму
             # гілку), разом з будь-яким дописаним вище "antiseptic"-хвостом.
-            self._notify_report_broadcast(context, result["message"])
+            # Тег бухгалтера - ТІЛЬКИ на продажу (рішення користувача:
+            # "бугалтера тільки на продаж, антисептирование не потрібно").
+            # Ця сама гілка обслуговує й прихід, тому перевірка обов'язкова.
+            self._notify_report_broadcast(
+                context, result["message"],
+                accountant_tail=(
+                    self._efactura_accountant_tail(write_payload.get("payment_method"))
+                    if operation_type == "stock_sale" else ""
+                ),
+            )
             # Реальний баг зі скріна: форма → успіх → бот ЗАВЖДИ повертав у
             # СТАРИЙ покроковий вибір категорії (нижче) - людина, що більше
             # ніколи не торкалась чату вручну, раптом опинялась у чужому
@@ -3905,6 +3915,14 @@ class IncomeSaleFlowDialogMixin:
                 f"{_display_bot_number(item['quantity'])} шт — "
                 f"{_display_bot_number(measure_value)} {measure_unit}"
             )
+        # Ціна за одиницю - те, що назвав клієнт. Досі в повідомленні
+        # була лише сума, і перевірити ціну очима було ніде.
+        price_line = price_line_text(
+            position.get("price_per_unit"),
+            [self._row_measure_kind(position, item) for item in position.get("rows") or []],
+        )
+        if price_line:
+            lines.append(f"   {price_line}")
         position_total = self._sale_total_amount(position)
         if position_total:
             lines.append(f"   Сумма: {_display_bot_number(position_total)} MDL")

@@ -43,6 +43,7 @@ from utils import (
     _sanitize_excel_value,
     _serialize_row,
     piece_measure as _shared_piece_measure,
+    price_line_text,
     row_measure_kind as _shared_row_measure_kind,
 )
 
@@ -6043,6 +6044,14 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                         f"{_display_bot_number(item['quantity'])} шт, -"
                         f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
                     )
+        # Та сама ціна, що й на екрані підтвердження - щоб підсумкове
+        # повідомлення не втрачало те, що людина щойно бачила.
+        price_line = price_line_text(
+            position_payload.get("price_per_unit"),
+            [item_measure_kind(item) for item in group["rows"]],
+        )
+        if price_line:
+            lines.append(f"  {_esc(price_line)}")
         goods_total = round(group["total_amount"], 2)
         antiseptic_sum = round(group["antiseptic_sum"], 2)
         if antiseptic_sum:
@@ -6846,6 +6855,11 @@ def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
         lines.append(f"Адрес выгрузки: {_esc(address)}")
     if payment_method:
         lines.append(f"Оплата: {_esc(payment_method)}")
+    # Ціна за куб - та сама, що на екрані підтвердження. Антисептирование
+    # завжди рахується об'ємом, тож одиниця тут завжди м3.
+    price_line = price_line_text(payload.get("price_per_unit"), ["volume"])
+    if price_line:
+        lines.append(_esc(price_line))
     # Задача користувача: "сумма має бути завжди знизу, скрізь" - Сумма
     # переїхала в самий кінець (після клієнта/адреси/оплати), той самий
     # порядок, що вже узгоджено для продажу й екрана підтвердження.

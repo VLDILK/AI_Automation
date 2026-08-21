@@ -258,3 +258,39 @@ def measure_classification_data():
         "quantity_only_products": sorted(_QUANTITY_ONLY_PRODUCT_NAMES),
         "linear_meter_sizes": [list(pair) for pair in sorted(_LINEAR_METER_SIZES)],
     }
+
+
+# --- Ціна за одиницю в повідомленнях бота ---
+# Задача користувача (2026-08-21): "давай тоді в ітогову додамо ще ціну, в
+# антисептирование тоже тоді... в кінечном, та передкінечном повідомленні".
+# Досі бот показував лише суми - ціну, яку назвав клієнт, у звіті було не
+# видно взагалі.
+#
+# Тонкість, через яку це не просто f-рядок: ціна одна на ВСЮ позицію, а
+# рядки в позиції можуть мати РІЗНИЙ вимір (звичайна дошка в м3 і
+# мп-розмір поруч - _sale_total_amount множить ціну на вимір КОЖНОГО рядка
+# окремо). Написати в такому разі "MDL/м3" означало б збрехати про частину
+# рядків, тож підпис одиниці ставиться лише коли він однаковий для всіх.
+#
+# Правило живе ТУТ, а не в чотирьох місцях, які його показують (продаж і
+# антисептирование, кожне - підтвердження й підсумок): у цьому проєкті вже
+# двічі розходились незалежні копії одного правила.
+_MEASURE_UNIT_BY_KIND = {"volume": "м3", "area": "м2", "linear": "мп"}
+
+
+def price_unit_label(measure_kinds):
+    """Одиниця для підпису ціни або None, якщо рядки міряються по-різному."""
+    units = {_MEASURE_UNIT_BY_KIND.get(kind) or "шт" for kind in measure_kinds}
+    if len(units) == 1:
+        return units.pop()
+    return None
+
+
+def price_line_text(price, measure_kinds, prefix="Цена: "):
+    """Готовий рядок "Цена: 6 200 MDL/м3" або None, якщо ціни немає."""
+    value = _number_value(price)
+    if value <= 0:
+        return None
+    unit = price_unit_label(measure_kinds)
+    suffix = f"/{unit}" if unit else " за единицу"
+    return f"{prefix}{_display_bot_number(value)} MDL{suffix}"

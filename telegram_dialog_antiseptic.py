@@ -8,6 +8,7 @@ from utils import (
     _display_bot_number,
     _normalize_phrase,
     _number_value,
+    price_line_text,
 )
 from warehouse_data import (
     BOT_MESSAGE_DEFAULTS,
@@ -176,8 +177,13 @@ class AntisepticDialogMixin:
             lines.append(f"Объём всего: {_display_bot_number(volume)} м3")
         else:
             lines.append(f"Объем: {_display_bot_number(volume)} м3")
-            if price_per_unit:
-                lines.append(f"Цена: {_display_bot_number(price_per_unit)} MDL/м3")
+        # Ціна показувалась ЛИШЕ в гілці однієї позиції: щойно позицій
+        # ставало кілька, вона зникала з екрана підтвердження зовсім.
+        # Антисептирование завжди коштує за куб, незалежно від того, як
+        # продається сам товар.
+        price_line = price_line_text(price_per_unit, ["volume"])
+        if price_line:
+            lines.append(price_line)
         lines.append(f"Оплата: {payload.get('payment_method')}")
         if payload.get("comment"):
             lines.append(f"Комментарий: {payload['comment']}")
