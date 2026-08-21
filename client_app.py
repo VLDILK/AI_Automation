@@ -92,7 +92,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.10"
+__version__ = "0.3.11"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -2023,8 +2023,19 @@ class ClientApp(ctk.CTk):
         top.pack(fill="x", padx=16, pady=(16, 4))
         ctk.CTkLabel(top, text="Канал обновлений", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
 
+        # Вказівка користувача (2026-08-21): "туди додай скрол тільки.
+        # колесом та затисканням миші на повзунок". Вікно обросло полями
+        # (канал, пароль, токен, адреса тунеля, credentials, ключ
+        # управління) - нижні просто не вміщались у висоту вікна.
+        # CTkScrollableFrame - той самий контейнер, що вже прокручує
+        # "Автообновления"/"Резервные копии"/"Персонал": колесо працює над
+        # усією областю, смугу можна тягнути мишею. Заголовок лишається
+        # нерухомим, усередину переїжджає лише вміст.
+        scroll = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, pady=(4, 12))
+
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "«Тестовая» — устанавливает и тестовые, и обычные обновления "
                 "(всегда самое новое). «Стабильная» — только проверенные."
@@ -2032,7 +2043,7 @@ class ClientApp(ctk.CTk):
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 12))
 
-        body = ctk.CTkFrame(window, fg_color=COLOR_CARD, corner_radius=10)
+        body = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=10)
         body.pack(fill="x", padx=16)
 
         channel_var = ctk.StringVar(
@@ -2139,7 +2150,7 @@ class ClientApp(ctk.CTk):
         # токен, що й публікація в gui.py (той має право писати - роздавати
         # його на клієнтські машини небезпечно).
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "GitHub-токен для проверок (необязательно) — поднимает лимит "
                 "с 60 до 5000 запросов в час. Без прав записи."
@@ -2152,7 +2163,7 @@ class ClientApp(ctk.CTk):
         def on_token_changed(*_args):
             self.settings.set("github_read_token", token_var.get().strip())
 
-        token_entry = ctk.CTkEntry(window, textvariable=token_var, placeholder_text="ghp_...", show="•")
+        token_entry = ctk.CTkEntry(scroll, textvariable=token_var, placeholder_text="ghp_...", show="•")
         token_entry.pack(fill="x", padx=16, pady=(0, 16))
 
         # Задача користувача (2026-08-19, друга редакція): "туди нічого
@@ -2166,7 +2177,7 @@ class ClientApp(ctk.CTk):
         # одноразовий ручний крок. Немає файлу = стара поведінка, спільний
         # адрес за замовчуванням.
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "Адрес тунеля этого сервера (необязательно) — .txt-файл с одной строкой-адресом. "
                 "Без файла — общий адрес по умолчанию."
@@ -2186,11 +2197,11 @@ class ClientApp(ctk.CTk):
             self.settings.set("cloudflared_tunnel_hostname_file", selected_file)
             hostname_file_label_var.set(self._cloudflared_tunnel_hostname_file_display())
 
-        ctk.CTkButton(window, text="Выбрать файл с адресом", command=choose_hostname_file).pack(
+        ctk.CTkButton(scroll, text="Выбрать файл с адресом", command=choose_hostname_file).pack(
             fill="x", padx=16, pady=(0, 4)
         )
         ctk.CTkLabel(
-            window, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            scroll, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 6))
 
@@ -2199,7 +2210,7 @@ class ClientApp(ctk.CTk):
         # cloudflared_tunnel_hostname(), тож "вписане" й "прикріплене" не
         # можуть розійтись між собою.
         self._build_override_entry(
-            window,
+            scroll,
             title="Или впишите адрес строкой",
             path=paths.TUNNEL_HOSTNAME_FILE,
             placeholder="bot.example.com",
@@ -2213,7 +2224,7 @@ class ClientApp(ctk.CTk):
         # settings.json, сам файл (виданий окремо, поза оновленнями)
         # користувач кладе на диск один раз вручну.
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "Credentials-файл этого сервера (необязательно) — свой "
                 "cloudflared_tunnel_credentials.json вместо общего из сборки. "
@@ -2234,11 +2245,11 @@ class ClientApp(ctk.CTk):
             self.settings.set("cloudflared_tunnel_credentials_file", selected_file)
             credentials_file_label_var.set(self._cloudflared_tunnel_credentials_file_display())
 
-        ctk.CTkButton(window, text="Выбрать файл credentials", command=choose_credentials_file).pack(
+        ctk.CTkButton(scroll, text="Выбрать файл credentials", command=choose_credentials_file).pack(
             fill="x", padx=16, pady=(0, 4)
         )
         ctk.CTkLabel(
-            window, textvariable=credentials_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            scroll, textvariable=credentials_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 16))
 
@@ -2246,7 +2257,7 @@ class ClientApp(ctk.CTk):
         # вшитий у код обох програм - тобто однаковий у всіх копіях і
         # незмінний без перезбірки.
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "Ключ управления (необязательно) — им домашняя программа подтверждает, "
                 "что это она. ВАЖНО: значение должно совпадать в обеих программах, "
@@ -2255,7 +2266,7 @@ class ClientApp(ctk.CTk):
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 6))
         self._build_override_entry(
-            window,
+            scroll,
             title="Ключ управления",
             path=paths.REMOTE_CONTROL_TOKEN_FILE,
             placeholder="вставьте ключ или прикрепите файл",
