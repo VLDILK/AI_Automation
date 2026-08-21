@@ -92,7 +92,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.8"
+__version__ = "0.3.9"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -2284,10 +2284,12 @@ class ClientApp(ctk.CTk):
     def _onedrive_account_status_text(self):
         email = self._onedrive_shared_email()
         if not email:
-            return "Email не указан — используется угадывание по названию папки."
+            return ("Email не указан — данные хранятся только на этом компьютере.\n"
+                    "В облако ничего не пишется: ни список серверов, ни копии.")
         resolved = servers_registry.find_account_folder(email)
         if resolved is None:
-            return f"Такой аккаунт OneDrive на этом компьютере не найден: {email}"
+            return (f"Такой аккаунт OneDrive на этом компьютере не найден: {email}\n"
+                    "Пока не найден — данные хранятся только локально.")
         return f"Найдено: {resolved}"
 
     def _open_onedrive_account_window(self):

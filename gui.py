@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -2317,7 +2317,10 @@ class ExcelViewerApp:
             return
         folder = standard_menu_cloud.cloud_folder_path(self._onedrive_shared_email())
         if folder is None:
-            text = self._t("OneDrive не найден на этом компьютере")
+            # Найчастіша причина тепер не "OneDrive не встановлено", а
+            # "пошта не вказана" - текст має вести до потрібної кнопки, а
+            # не звинувачувати систему.
+            text = self._t("не используется — не указана «Учётная запись OneDrive»")
         else:
             text = str(folder / "standard_menu.json")
         self._standard_menu_cloud_path_var.set(
@@ -2329,7 +2332,11 @@ class ExcelViewerApp:
         if folder is None:
             messagebox.showerror(
                 self._t("Редактор кнопок"),
-                self._t("OneDrive не найден на этом компьютере."),
+                self._t(
+                    "Облачная папка не используется: не указана «Учётная запись OneDrive».\n\n"
+                    "Укажите email аккаунта OneDrive в настройках — без него всё хранится "
+                    "только на этом компьютере."
+                ),
             )
             return
         try:
@@ -3573,10 +3580,16 @@ class ExcelViewerApp:
     def _onedrive_account_status_text(self):
         email = (self.settings.get("onedrive_shared_email") or "").strip()
         if not email:
-            return self._t("Email не указан — используется угадывание по названию папки.")
+            return self._t(
+                "Email не указан — данные хранятся только на этом компьютере. "
+                "В облако ничего не пишется: ни список серверов, ни копии."
+            )
         resolved = servers_registry.find_account_folder(email)
         if resolved is None:
-            return self._t("Такой аккаунт OneDrive на этом компьютере не найден: {email}").format(email=email)
+            return self._t(
+                "Такой аккаунт OneDrive на этом компьютере не найден: {email}. "
+                "Пока не найден — данные хранятся только локально."
+            ).format(email=email)
         return self._t("Найдено: {path}").format(path=resolved)
 
     # Задача користувача (2026-08-20): той самий механізм, що вже й у

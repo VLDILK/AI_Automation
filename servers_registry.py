@@ -29,18 +29,11 @@ OneDrive - той самий акаунт, який і так уже все ст
 поведінка (вгадування), нічого не ламається для тих, хто це не чіпав."""
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
 _CLOUD_FOLDER_NAME = "AI_Automation_Backups"
 _CLOUD_FILE_NAME = "servers_registry.json"
-
-# Той самий реальний випадок (2026-08-18, standard_menu_cloud.py) - ця
-# машина має ДВІ окремі синхронізовані теки OneDrive під тим самим
-# акаунтом Windows: особисту й робочу (тенантну). AI_Automation_Backups
-# завжди йде в РОБОЧИЙ (тенантний) OneDrive.
-_ONEDRIVE_TENANT_SUFFIX = "OneDrive - Diverus, UAB"
 
 
 # Windows зберігає КОЖЕН залогінений OneDrive-акаунт (особистий,
@@ -96,20 +89,23 @@ def find_account_folder(email):
     return None
 
 
+# Вказівка користувача (2026-08-21): "якщо там є пошта - використовує її,
+# якщо немає - лише локально зберігає".
+#
+# Раніше порожнє поле означало не "без хмари", а ВГАДУВАННЯ: шлях
+# збирався з імені Windows-користувача і зашитої назви теки, а як запасний
+# варіант бралась змінна середовища OneDrive. На машині, де підключено два
+# OneDrive (особистий і тенантний - реальний випадок цього проєкту), таке
+# вгадування мовчки писало б у не ту теку: без помилки, без сліду, просто
+# дані опинялись би там, де їх ніхто не шукає.
+#
+# Тепер обидві гілки перевірні: тека береться ЛИШЕ з реєстру Windows за
+# точною поштою. None означає рівно одне - хмара не використовується, усе
+# лишається локально (усі виклики цього модуля до None готові).
 def _resolve_onedrive_root(email=None):
-    if email:
-        matched = find_account_folder(email)
-        if matched is not None:
-            return matched
-    username = os.environ.get("USERNAME")
-    tenant_path = Path(f"C:/Users/{username}/{_ONEDRIVE_TENANT_SUFFIX}") if username else None
-    if tenant_path is not None and tenant_path.is_dir():
-        return tenant_path
-    env_value = os.environ.get("OneDriveCommercial") or os.environ.get("OneDrive")
-    env_path = Path(env_value) if env_value else None
-    if env_path is not None and env_path.is_dir():
-        return env_path
-    return tenant_path or env_path
+    if not email:
+        return None
+    return find_account_folder(email)
 
 
 def _cloud_file_path(email=None):
