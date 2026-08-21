@@ -63,6 +63,7 @@ from warehouse_data import (
     list_db_snapshots,
     maybe_create_scheduled_snapshot,
     regenerate_excel_after_restore,
+    repair_warehouse_columns,
     restore_db_snapshot,
     _backup_encryption_password,
     _set_backup_encryption_password,
@@ -74,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.97"
+__version__ = "1.1.2"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -633,8 +634,10 @@ class ExcelViewerApp:
         self.webapp_server = WebappServer(
             db_path=self.db_path,
             get_token=lambda: self._read_telegram_token()[0],
-            get_fresh_context=lambda store, is_admin: (
-                self.telegram_worker._webapp_data_browser_context(store, is_admin)
+            get_fresh_context=lambda store, is_admin, telegram_id=None: (
+                self.telegram_worker._webapp_data_browser_context(
+                    store, is_admin, telegram_id=telegram_id
+                )
                 if self.telegram_worker else None
             ),
         )
@@ -770,6 +773,29 @@ class ExcelViewerApp:
                 self._t("Резервные копии"),
                 self._t("Не удалось создать автоматический снимок базы данных: {error}").format(error=snapshot_error),
             )
+        # Про правку самої таблиці користувача мовчати не можна: програма
+        # змінила його файл. Показуємо РІВНО один раз - повторний старт
+        # нічого не дописує, бо колонки вже на місці.
+        plan = getattr(self, "_warehouse_repair_plan", None)
+        if plan:
+            messagebox.showinfo(
+                self._t("Таблиця Excel"),
+                self._t(
+                    "У листі СКЛАД бракувало колонок — програма дописала їх сама:\n{headers}\n\n"
+                    "Заповнено значень: {cells} (порахованих із кількості штук).\n"
+                    "Перед зміною зроблено резервну копію таблиці."
+                ).format(headers="\n".join("• " + header for header in plan["headers"]),
+                         cells=plan["filled_cells"]),
+            )
+        repair_error = getattr(self, "_warehouse_repair_error", None)
+        if repair_error is not None:
+            messagebox.showwarning(
+                self._t("Таблиця Excel"),
+                self._t(
+                    "Не вдалося привести лист СКЛАД до потрібного формату: {error}\n\n"
+                    "Програма працює далі, але позиції в погонных метрах можуть показувати 0 мп."
+                ).format(error=repair_error),
+            )
         self._update_db_snapshot_heartbeat()
         self.root.after(1800000, self._schedule_db_backup_tick)
         self.root.after(1800000, self._schedule_code_backup_tick)
@@ -891,6 +917,21 @@ class ExcelViewerApp:
         # ensure_workbook_has_required_sheets) ПЕРЕД імпортом, щоб
         # СПИСАНИЕ вже існувало на момент import_workbook нижче.
         ensure_workbook_has_required_sheets()
+        # Другий крок самозцілення, ПЕРЕД імпортом: доводимо СКЛАД до
+        # еталонного формату. Реальний випадок (2026-08-21) - бот відмовив
+        # у продажу 36 мп ("Доступно: 1033 шт / 0 мп") при повному складі,
+        # бо в таблиці не було жодної колонки мп: погонні метри не було де
+        # зберігати. Дописані колонки одразу ж і заповнюються ("хай
+        # автоматом перераховує відразу"), тому робити це треба саме до
+        # import_workbook - інакше база прочитала б ще порожні колонки.
+        #
+        # Помилку тут навмисно не даємо вбити старт: без цієї правки
+        # програма просто працюватиме як раніше, а падіння лишило б
+        # користувача перед порожнім splash-вікном.
+        try:
+            self._warehouse_repair_plan = repair_warehouse_columns()
+        except Exception as exc:
+            self._warehouse_repair_error = exc
         workbook = excel_source.open_workbook(data_only=True)
         try:
             (store or self.store).import_workbook(workbook, READ_ONLY_SHEETS)
@@ -1268,6 +1309,7 @@ class ExcelViewerApp:
             try:
                 target = github_releases.download_and_extract_release(
                     entry["release"], destination, target_name="AI_Automation_Home",
+                    token=self._read_github_publish_token() or None,
                 )
             except (RuntimeError, OSError) as exc:
                 # Реальна знахідка (аудит коду, 2026-08-16): download_and_
@@ -1904,6 +1946,29 @@ class ExcelViewerApp:
         align_table_button.pack(anchor="n", fill="x", pady=(0, 12))
         self.align_table_button = align_table_button
 
+        # Задача користувача (2026-08-08, реальний баг живого тестування):
+        # розбіжність "кількість, шт" vs "фізичний вимір" (м3/м2/мп) для
+        # рядка складу вирішується ТІЛЬКИ тут, у GUI — "переходимо загально
+        # на програму де це можливо і зручно робити" (пряма вказівка
+        # користувача, не в бот-чаті).
+        #
+        # Реальний випадок (2026-08-21): бот відмовив у продажу "недостаточно
+        # погонных метров" при 1033 шт на складі - колонка "Остаток, мп" була
+        # порожня. Інструмент існував, але людина його не знайшла: він стояв
+        # ОСТАННІМ у довгій колонці, під сірим написом про час знімка. Тепер
+        # поруч із "Вирівняти таблицю" - обидві правлять ДАНІ складу, а не
+        # налаштовують програму. Назва теж чесніша: та сама кнопка лікує і
+        # кубатуру, і площу, і погонні метри.
+        mismatch_check_button = tk.Button(
+            side_panel,
+            text=self._t("Перевірка залишків (шт / м3 / мп)"),
+            width=20,
+            height=2,
+            command=self.open_quantity_measure_mismatch_dialog,
+        )
+        mismatch_check_button.pack(anchor="n", fill="x", pady=(0, 12))
+
+
         # Задача користувача (2026-08-15): "тепер змінюй це на автоматичне
         # з'єднання між программами" - раніше тут була кнопка "Дистанційне
         # керування" (обрати спільну теку + вставити ключ). Тепер адреса й
@@ -1933,19 +1998,6 @@ class ExcelViewerApp:
         )
         db_snapshot_heartbeat_label.pack(anchor="n", fill="x", pady=(2, 0))
 
-        # Задача користувача (2026-08-08, реальний баг живого тестування):
-        # розбіжність "кількість, шт" vs "фізичний вимір" (м3/м2/мп) для
-        # рядка складу вирішується ТІЛЬКИ тут, у GUI — "переходимо загально
-        # на програму де це можливо і зручно робити" (пряма вказівка
-        # користувача, не в бот-чаті).
-        mismatch_check_button = tk.Button(
-            side_panel,
-            text=self._t("Перевірка залишків (шт/кубатура)"),
-            width=20,
-            height=2,
-            command=self.open_quantity_measure_mismatch_dialog,
-        )
-        mismatch_check_button.pack(anchor="n", fill="x", pady=(12, 0))
 
     def _build_journals_hub_view(self, parent):
         self.journals_hub_frame = tk.Frame(parent)
@@ -4540,10 +4592,50 @@ class ExcelViewerApp:
     def open_quantity_measure_mismatch_dialog(self):
         mismatches = self.store.find_quantity_measure_mismatches()
         if not mismatches:
-            messagebox.showinfo(
-                self._t("Перевірка залишків"),
-                self._t("Розбіжностей кількість/кубатура не знайдено."),
-            )
+            # Три РІЗНІ причини порожнього результату, які раніше зливались
+            # в один заспокійливий текст. Найгірша з них - перша: людина
+            # читає "розбіжностей немає" як "перевірено, усе гаразд", хоча
+            # програма не бачила жодного рядка складу.
+            scan = getattr(self.store, "_last_mismatch_scan", None) or {}
+            if not scan.get("rows"):
+                # Шлях показуємо ПРЯМО в тексті: вибір таблиці в інтерфейсі
+                # прихований (за вказівкою користувача від 2026-08-16), тож
+                # відсилати "подивіться в налаштуваннях" було б відсиланням
+                # у нікуди - саме цю помилку тут і виправлено.
+                mode = self.settings.get("excel_source_mode") or "local"
+                if mode == "local":
+                    source = self.settings.get("excel_local_path") or str(FILE_PATH)
+                    where = self._t(
+                        "Шлях змінюється у файлі system/settings.json, ключ excel_local_path. "
+                        "Після зміни програму треба перезапустити — таблиця читається на старті."
+                    )
+                else:
+                    source = self._t("онлайн-джерело: {name}").format(
+                        name=self.settings.get("excel_online_file_name") or "—")
+                    where = self._t("Джерело налаштоване як онлайн.")
+                messagebox.showwarning(
+                    self._t("Перевірка залишків"),
+                    self._t(
+                        "У цій програмі немає даних складу — перевіряти нічого.\n\n"
+                        "Зараз підключено:\n{source}\n\n"
+                        "У цьому файлі жодного рядка складу. {where}"
+                    ).format(source=source, where=where),
+                )
+            elif scan.get("skipped_no_measure_column"):
+                messagebox.showwarning(
+                    self._t("Перевірка залишків"),
+                    self._t(
+                        "Перевірено рядків: {rows}. Розбіжностей не знайдено, АЛЕ {skipped} рядків "
+                        "пропущено: у таблиці немає колонки виміру (Остаток, мп / м3 / м2) для їхнього "
+                        "типу товару. Поки колонки немає, метри й кубатура для них не рахуються взагалі."
+                    ).format(rows=scan.get("rows"), skipped=scan.get("skipped_no_measure_column")),
+                )
+            else:
+                messagebox.showinfo(
+                    self._t("Перевірка залишків"),
+                    self._t("Перевірено рядків: {rows}. Розбіжностей не знайдено.").format(
+                        rows=scan.get("rows")),
+                )
             return
 
         window = tk.Toplevel(self.root)

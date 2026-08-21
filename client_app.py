@@ -79,6 +79,7 @@ from warehouse_data import (
     create_db_snapshot,
     create_excel_backup,
     list_db_snapshots,
+    repair_warehouse_columns,
     restore_db_snapshot,
     regenerate_excel_after_restore,
 )
@@ -91,7 +92,7 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.3"
+__version__ = "0.3.5"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -306,8 +307,10 @@ class ClientApp(ctk.CTk):
         self.webapp_server = WebappServer(
             db_path=paths.DB_PATH,
             get_token=lambda: self._read_telegram_token()[0],
-            get_fresh_context=lambda store, is_admin: (
-                self.telegram_worker._webapp_data_browser_context(store, is_admin)
+            get_fresh_context=lambda store, is_admin, telegram_id=None: (
+                self.telegram_worker._webapp_data_browser_context(
+                    store, is_admin, telegram_id=telegram_id
+                )
                 if self.telegram_worker else None
             ),
             get_remote_control_token=lambda: paths.remote_control_token(),
@@ -2561,6 +2564,11 @@ class ClientApp(ctk.CTk):
                     destination = Path(paths.BASE_DIR) / "updates"
                     target = github_releases.download_and_extract_release(
                         release, destination, on_progress=report_progress,
+                        # Той самий токен, що вже й для перевірки релізів.
+                        # На публічному репозиторії не змінює нічого; коли
+                        # репозиторій стане приватним - це єдиний спосіб
+                        # узагалі забрати файл.
+                        token=self.settings.get("github_read_token") or None,
                     )
                 except Exception as exc:
                     error = str(exc)
@@ -5178,6 +5186,7 @@ class ClientApp(ctk.CTk):
             try:
                 target = github_releases.download_and_extract_release(
                     entry["release"], destination, on_progress=report_progress,
+                    token=self.settings.get("github_read_token") or None,
                 )
             except (RuntimeError, OSError) as exc:
                 # Той самий фікс, що й у gui.py: download_and_extract_release()
@@ -5411,8 +5420,17 @@ class ClientApp(ctk.CTk):
             # може ним користуватись напряму. Той самий прийом, що вже й у
             # webapp_server.py - окреме, власне з'єднання ЦЬОГО потоку.
             error = None
+            repair_plan = None
             try:
                 ensure_workbook_has_required_sheets()
+                # Другий крок самозцілення, ДО імпорту: доводимо СКЛАД до
+                # еталонного формату. Реальний випадок (2026-08-21) - бот
+                # відмовив у продажу 36 мп ("Доступно: 1033 шт / 0 мп") при
+                # повному складі, бо колонок мп у таблиці не існувало
+                # взагалі. Дописані колонки одразу ж заповнюються, тож
+                # робити це треба саме до import_workbook - інакше база
+                # прочитала б ще порожні колонки.
+                repair_plan = repair_warehouse_columns()
                 workbook = excel_source.open_workbook(data_only=True)
                 try:
                     thread_store = ExcelSqliteStore(paths.DB_PATH)
@@ -5424,16 +5442,33 @@ class ClientApp(ctk.CTk):
                     workbook.close()
             except Exception as exc:
                 error = str(exc)
-            self._run_on_main_thread(lambda: self._on_excel_refresh_finished(error))
+            self._run_on_main_thread(
+                lambda: self._on_excel_refresh_finished(error, repair_plan)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_excel_refresh_finished(self, error):
+    def _on_excel_refresh_finished(self, error, repair_plan=None):
         self._excel_refresh_in_progress = False
         if self.refresh_excel_button is not None:
             self.refresh_excel_button.configure(text="\U0001F504  Обновить эксели", state="normal")
         if error:
             messagebox.showerror("AI Automation", f"Не удалось обновить: {error}")
+            return
+        # Про правку самої таблиці мовчати не можна - програма змінила
+        # файл користувача. Повідомлення з'явиться рівно один раз:
+        # наступне оновлення вже нічого не дописує, бо колонки на місці.
+        if repair_plan:
+            headers = "\n".join("\u2022 " + header for header in repair_plan["headers"])
+            messagebox.showinfo(
+                "AI Automation",
+                "Таблица Excel обновлена.\n\n"
+                "В листе СКЛАД не хватало столбцов — программа добавила их сама:\n"
+                f"{headers}\n\n"
+                f"Заполнено значений: {repair_plan['filled_cells']} "
+                "(рассчитаны из количества штук).\n"
+                "Перед изменением сделана резервная копия таблицы.",
+            )
             return
         messagebox.showinfo("AI Automation", "Таблица Excel обновлена.")
 

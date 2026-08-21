@@ -366,16 +366,57 @@ def release_version(release, tag_prefix):
     return tag[len(tag_prefix):]
 
 
-def find_asset_url(release, name_suffix=".zip"):
+def find_asset(release, name_suffix=".zip"):
+    """Сам об'єкт asset, а не лише посилання: у ньому є ДВА способи забрати
+    файл - публічний browser_download_url і api-посилання "url", яке
+    приймає токен. Другий потрібен, якщо репозиторій колись стане
+    приватним."""
     for asset in (release or {}).get("assets", []):
         if asset.get("name", "").endswith(name_suffix):
-            return asset.get("browser_download_url")
+            return asset
     return None
 
 
-def download_asset(url, destination_path, timeout=300, on_progress=None):
-    """Стрімом, без токена - той самий publicly-fetchable browser_download_url,
-    що працює в будь-якому браузері без входу.
+def find_asset_url(release, name_suffix=".zip"):
+    asset = find_asset(release, name_suffix)
+    return asset.get("browser_download_url") if asset else None
+
+
+class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """GitHub перенаправляє з api-посилання на підписане посилання чужого
+    сховища. Тягнути туди Authorization не можна: сховище відкидає запит із
+    зайвим заголовком, і завантаження падає з незрозумілою помилкою."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_request = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_request is not None:
+            new_request.headers.pop("Authorization", None)
+            new_request.headers.pop("authorization", None)
+        return new_request
+
+
+def _asset_request(url, api_url, token):
+    """Опис ОДНОГО запиту: або api-посилання з токеном, або публічне."""
+    if api_url and token:
+        request = urllib.request.Request(api_url)
+        request.add_header("Authorization", f"Bearer {token}")
+        request.add_header("Accept", "application/octet-stream")
+        request.add_header("User-Agent", _USER_AGENT)
+        return request
+    return urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+
+
+def download_asset(url, destination_path, timeout=300, on_progress=None,
+                   api_url=None, token=None):
+    """Стрімом. Два шляхи до одного файлу:
+
+    1. api_url + token - потрібен, якщо репозиторій приватний. GitHub на
+       такий запит відповідає перенаправленням на підписане посилання; саме
+       тому Authorization не можна лишати на редиректі (чуже сховище
+       відкидає запит із чужим заголовком), і редирект обробляється вручну.
+    2. url (browser_download_url) - публічне посилання, яке працює в
+       будь-якому браузері без входу. Без токена одразу йдемо сюди, тобто
+       на публічному репозиторії поведінка не змінюється взагалі.
 
     on_progress(fraction: float) - опційний колбек для смужки прогресу в
     client_app.py (задача користувача, 2026-08-16: "покажи прогрес
@@ -383,9 +424,11 @@ def download_asset(url, destination_path, timeout=300, on_progress=None):
     Content-Length (завжди так для GitHub release-assets) - без нього
     справжній відсоток порахувати неможливо, тож просто мовчки нічого не
     повідомляємо, а не вигадуємо фальшиве значення."""
-    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    request = _asset_request(url, api_url, token)
+    opener = urllib.request.build_opener(_NoAuthRedirect()) if (api_url and token) else None
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with (opener.open(request, timeout=timeout) if opener
+              else urllib.request.urlopen(request, timeout=timeout)) as response:
             total = response.headers.get("Content-Length")
             total = int(total) if total else None
             downloaded = 0
@@ -420,7 +463,8 @@ def download_asset(url, destination_path, timeout=300, on_progress=None):
         )
 
 
-def download_and_extract_release(release, updates_dir, target_name="AI_Automation_Client", on_progress=None):
+def download_and_extract_release(release, updates_dir, target_name="AI_Automation_Client",
+                                 on_progress=None, token=None):
     """Завантажує .zip-asset релізу й розпаковує в УНІКАЛЬНУ підтеку
     updates_dir - той самий кінцевий вигляд (тека з {target_name}.exe
     всередині), що вже й _handle_push_update_upload (webapp_server.py)
@@ -436,7 +480,8 @@ def download_and_extract_release(release, updates_dir, target_name="AI_Automatio
     жодного самостійного відновлення. Кожен виклик тепер розпаковує у
     ВЛАСНУ, унікальну підтеку - видаляти чужий попередній вміст більше не
     треба, конфлікт структурно неможливий."""
-    asset_url = find_asset_url(release)
+    asset = find_asset(release)
+    asset_url = asset.get("browser_download_url") if asset else None
     if not asset_url:
         raise RuntimeError("В релизе не найден .zip-файл с обновлением.")
     updates_dir = Path(updates_dir)
@@ -444,7 +489,10 @@ def download_and_extract_release(release, updates_dir, target_name="AI_Automatio
     extraction_root = updates_dir / f"download_{uuid.uuid4().hex[:8]}"
     extraction_root.mkdir(parents=True, exist_ok=True)
     tmp_zip_path = extraction_root / "_github_release_download.zip.tmp"
-    download_asset(asset_url, tmp_zip_path, on_progress=on_progress)
+    download_asset(
+        asset_url, tmp_zip_path, on_progress=on_progress,
+        api_url=asset.get("url"), token=token,
+    )
     target_dir = extraction_root / target_name
     try:
         with zipfile.ZipFile(tmp_zip_path) as archive:

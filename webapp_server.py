@@ -895,7 +895,10 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             store = ExcelSqliteStore(self.db_path)
             try:
                 role = perm.normalize_role(store.get_user_role(telegram_id))
-                fresh_ctx = self.get_fresh_context(store, role == perm.ADMIN)
+                # telegram_id передається далі НАВМИСНО: без нього
+                # контекст повертав can_refresh=False, і форма ховала кнопку
+                # "Обновить" одразу після першого ж оновлення.
+                fresh_ctx = self.get_fresh_context(store, role == perm.ADMIN, telegram_id)
             finally:
                 store.close()
             if fresh_ctx is None:

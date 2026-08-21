@@ -28,6 +28,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.filters import AutoFilter
 
 import excel_source
+import xlsx_columns
 import permissions
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
@@ -560,6 +561,258 @@ def _find_header_row(worksheet, sheet_name, fallback=1):
         if worksheet.cell(row=row, column=1).value == "Дата":
             return row
     return fallback
+
+
+# --- Самозцілення СКЛАД: відсутні колонки виміру + порожні значення ---
+# Реальний випадок (2026-08-21): бот відмовив у продажу 36 мп - "на складе
+# недостаточно погонных метров... Доступно: 1033 шт / 0 мп" - при повному
+# складі. Причина не в логіці підрахунку: у таблиці користувача лист СКЛАД
+# закінчувався на "Комментарий" (21 колонка), і ЧОТИРЬОХ колонок мп у ньому
+# не було ніколи. Погонні метри не загубились - їх не було де зберігати,
+# тож перевірка наявності чесно бачила нуль. Звірка залишків теж мовчала
+# "розбіжностей немає": рядок без колонки виміру вона просто пропускала.
+#
+# Вказівка користувача: "хай дописує автоматом колонки в таблиці, щоб під
+# формат було. і хай автоматом перераховує відразу".
+#
+# Порядок усередині кожної четвірки збігається з _WAREHOUSE_QTY_HEADERS:
+# i-та колонка виміру рахується з i-тої колонки штук того самого рядка,
+# тому "Остаток, мп" завжди походить саме з "Остаток, шт", а не з приходу.
+_WAREHOUSE_QTY_HEADERS = (
+    "Начальный остаток, шт",
+    "Приход, шт",
+    "Продано, шт",
+    "Остаток, шт",
+)
+_WAREHOUSE_MEASURE_HEADERS = {
+    "volume": (
+        "Начальный остаток, м3",
+        "Приход, м3",
+        "Продано, м3",
+        "Остаток, м3",
+    ),
+    "area": (
+        "Начальный остаток, м2",
+        "Приход, м2",
+        "Продано, м2",
+        "Остаток, м2",
+    ),
+    "linear": (
+        "Начальный остаток, мп",
+        "Приход, мп",
+        "Продано, мп",
+        "Остаток, мп",
+    ),
+}
+
+
+def _normalized_header_columns(worksheet, header_row=1):
+    # Заголовки порівнюємо через _normalize_phrase, а не дослівно: у живому
+    # файлі трапляється зайвий пробіл чи інший регістр, і дослівне
+    # порівняння вирішило б, що колонки немає, - програма дописала б другу
+    # таку саму поруч.
+    columns = {}
+    for column in range(1, worksheet.max_column + 1):
+        value = worksheet.cell(row=header_row, column=column).value
+        if value in (None, ""):
+            continue
+        key = _normalize_phrase(value)
+        if key and key not in columns:
+            columns[key] = column
+    return columns
+
+
+def missing_warehouse_headers(workbook):
+    # Окремо від самого дописування - щоб викликач устиг зробити бекап ДО
+    # першої зміни книги (той самий порядок, що й у решті самозцілення).
+    if "СКЛАД" not in workbook.sheetnames:
+        return []
+    worksheet = workbook["СКЛАД"]
+    header_row = _find_header_row(worksheet, "СКЛАД")
+    existing = _normalized_header_columns(worksheet, header_row)
+    return [
+        header for header in _WAREHOUSE_SHEET_HEADERS
+        if _normalize_phrase(header) not in existing
+    ]
+
+
+def _style_twin_column(header, existing_columns):
+    # "щоб під формат було": нова колонка успадковує оформлення своєї
+    # двійнички з тієї самої четвірки - "Остаток, мп" бере вигляд у
+    # "Остаток, м3". Так дописане не виглядає голим серед оформленої
+    # таблиці, і числовий формат теж успадковується.
+    for kind, headers in _WAREHOUSE_MEASURE_HEADERS.items():
+        if header not in headers:
+            continue
+        position = headers.index(header)
+        for twin_kind in ("volume", "area", "linear"):
+            if twin_kind == kind:
+                continue
+            twin_header = _WAREHOUSE_MEASURE_HEADERS[twin_kind][position]
+            column = existing_columns.get(_normalize_phrase(twin_header))
+            if column is not None:
+                return column
+        return existing_columns.get(_normalize_phrase(_WAREHOUSE_QTY_HEADERS[position]))
+    return None
+
+
+def plan_warehouse_columns(workbook, values_workbook=None):
+    """Що саме треба дописати в СКЛАД, щоб таблиця стала еталонною.
+
+    Нічого не змінює - лише читає. Повертає None, коли дописувати нічого.
+    Значення рахуються одразу тут ("хай автоматом перераховує відразу"):
+    мп = шт × довжина/1000 через ту саму piece_measure, якою рахує бот, а
+    не через другу копію правила.
+
+    Свідомо плануються ЛИШЕ нові колонки. Порожня клітинка в колонці, яка
+    вже існує, - це розбіжність між кількістю й виміром, а рішення "яке з
+    двох значень правда" належить людині: для цього вже є діалог
+    "Перевірка залишків". Мовчки проставити своє число означало б відповісти
+    за неї.
+    """
+    if "СКЛАД" not in workbook.sheetnames:
+        return None
+    worksheet = workbook["СКЛАД"]
+    header_row = _find_header_row(worksheet, "СКЛАД")
+    existing_columns = _normalized_header_columns(worksheet, header_row)
+    missing = [
+        header for header in _WAREHOUSE_SHEET_HEADERS
+        if _normalize_phrase(header) not in existing_columns
+    ]
+    if not missing:
+        return None
+
+    # Порожній лист openpyxl усе одно показує як max_column=1 - дописування
+    # "після останньої" почалось би з колонки 2 і лишило б порожню першу.
+    previous_last_column = worksheet.max_column if existing_columns else 0
+    next_index = previous_last_column
+    columns = []
+    planned_by_header = {}
+    for header in missing:
+        next_index += 1
+        entry = {
+            "index": next_index,
+            "header": header,
+            "style_from_index": _style_twin_column(header, existing_columns),
+            "values": {},
+        }
+        columns.append(entry)
+        planned_by_header[header] = entry
+
+    values_worksheet = None
+    if values_workbook is not None and "СКЛАД" in values_workbook.sheetnames:
+        values_worksheet = values_workbook["СКЛАД"]
+
+    def column_of(header):
+        return existing_columns.get(_normalize_phrase(header))
+
+    product_column = column_of("Продукт")
+    thickness_column = column_of("Толщина, мм")
+    width_column = column_of("Ширина, мм")
+    length_column = column_of("Длина, мм")
+    if None not in (product_column, thickness_column, width_column, length_column):
+        qty_columns = [column_of(header) for header in _WAREHOUSE_QTY_HEADERS]
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            product = worksheet.cell(row=row, column=product_column).value
+            thickness = worksheet.cell(row=row, column=thickness_column).value
+            width = worksheet.cell(row=row, column=width_column).value
+            length = worksheet.cell(row=row, column=length_column).value
+            if product in (None, "") or thickness in (None, ""):
+                continue
+            if width in (None, "") or length in (None, ""):
+                continue
+            measure_kind = _shared_row_measure_kind(product, thickness, width)
+            if measure_kind is None:
+                continue
+            piece = _shared_piece_measure(thickness, width, length, measure_kind)
+            if piece <= 0:
+                continue
+            for position, measure_header in enumerate(_WAREHOUSE_MEASURE_HEADERS[measure_kind]):
+                entry = planned_by_header.get(measure_header)
+                if entry is None or qty_columns[position] is None:
+                    continue
+                readable, quantity = _readable_number(
+                    worksheet, values_worksheet, row, qty_columns[position]
+                )
+                if not readable:
+                    continue
+                entry["values"][row] = round(quantity * piece, 6)
+
+    return {
+        "header_row": header_row,
+        "previous_last_column": previous_last_column,
+        "columns": columns,
+        "headers": missing,
+        "filled_cells": sum(len(entry["values"]) for entry in columns),
+    }
+
+
+def repair_warehouse_columns():
+    """Доводить СКЛАД до еталонного формату прямо у файлі користувача.
+
+    Реальний випадок (2026-08-21): бот відмовив у продажу 36 мп - "на
+    складе недостаточно погонных метров... Доступно: 1033 шт / 0 мп" - при
+    повному складі. У таблиці лист СКЛАД закінчувався на "Комментарий":
+    чотирьох колонок мп не було ніколи, тож погонні метри не було де
+    зберігати, і перевірка наявності чесно бачила нуль. Звірка залишків теж
+    мовчала "розбіжностей немає" - рядок без колонки виміру вона просто
+    пропускала.
+
+    Вказівка користувача: "хай дописує автоматом колонки в таблиці, щоб під
+    формат було. і хай автоматом перераховує відразу".
+
+    Запис іде байтами архіву (xlsx_columns), а НЕ через openpyxl: інакше
+    зникли б кешовані значення всіх ~14 000 формул книги, і програма
+    осліпла б до наступного відкриття файлу в Excel.
+
+    Повертає опис зробленого або None, якщо дописувати не було чого.
+    """
+    workbook = excel_source.open_workbook()
+    values_workbook = None
+    try:
+        try:
+            # Числа беремо з data_only-копії: у формульному файлі
+            # "Остаток, шт" - це формула, і без кешованого значення її текст
+            # нічого не скаже. Рядки без кешу свідомо лишаться незаповненими
+            # - краще не заповнити, ніж вигадати залишок, на який потім
+            # спиратиметься відмова в продажу.
+            values_workbook = excel_source.open_workbook(data_only=True)
+        except Exception:
+            values_workbook = None
+        plan = plan_warehouse_columns(workbook, values_workbook)
+    finally:
+        if values_workbook is not None:
+            values_workbook.close()
+        workbook.close()
+
+    if not plan:
+        return None
+
+    create_excel_backup()
+    data = excel_source.backup_workbook_bytes()
+    patched = xlsx_columns.append_columns(
+        data,
+        "СКЛАД",
+        plan["header_row"],
+        plan["columns"],
+        plan["previous_last_column"],
+    )
+    excel_source.write_workbook_bytes(patched)
+    return plan
+
+
+def _readable_number(worksheet, values_worksheet, row, column):
+    # Повертає (чи вдалось прочитати, число). Формула без кешованого
+    # значення - це саме "не вдалось": підставити замість неї нуль означало
+    # б вигадати залишок, на який потім спиратиметься відмова в продажу.
+    value = worksheet.cell(row=row, column=column).value
+    if isinstance(value, str) and value.startswith("="):
+        value = values_worksheet.cell(row=row, column=column).value if values_worksheet else None
+        if value in (None, ""):
+            return False, 0.0
+    if value in (None, ""):
+        return True, 0.0
+    return True, _number_value(value)
 
 
 def ensure_workbook_has_required_sheets():
@@ -4059,6 +4312,10 @@ class ExcelSqliteStore:
             "linear": columns.get("balance_linear"),
         }
         mismatches = []
+        # Скільки рядків довелось пропустити через ВІДСУТНЮ колонку виміру.
+        # Раніше це губилось мовчки: таблиця без "Остаток, мп" давала той
+        # самий результат, що й ідеально зведена, - "розбіжностей немає".
+        self._last_mismatch_scan = {"rows": len(rows), "skipped_no_measure_column": 0}
         for row_id, row in rows:
             product = row_value(row, product_idx)
             thickness = row_value(row, thickness_idx)
@@ -4071,6 +4328,7 @@ class ExcelSqliteStore:
                 continue
             measure_idx = measure_balance_columns.get(measure_kind)
             if measure_idx is None:
+                self._last_mismatch_scan["skipped_no_measure_column"] += 1
                 continue
             piece = _shared_piece_measure(thickness, width, length, measure_kind)
             if piece <= 0:
