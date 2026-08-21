@@ -384,3 +384,40 @@ def send_remote_command(action, timeout=10):
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+# Задача користувача (2026-08-20): "хочу інформацію про тунель бачити в
+# домашці". Це - єдиний блок того вікна, що працює БЕЗ токена Cloudflare і
+# на будь-якій машині: програма просто питає адресу кілька разів поспіль і
+# дивиться, скільки РІЗНИХ машин відповіло.
+#
+# Навіщо взагалі опитувати повторно: коли до одного тунелю під'єднані дві
+# машини, Cloudflare роздає запити між ними по колу. Один запит покаже одну
+# з них і виглядатиме цілком нормально - саме тому підміна так довго й
+# лишалась непоміченою. Кілька запитів поспіль показують обидві.
+def probe_responders(hostname, attempts=12, timeout=6):
+    """[{"node", "version", "channel", "hits"}, ...] за спаданням влучань.
+
+    node="" означає "клієнт старіший за той реліз, де додали поле node" -
+    відповіла ІНША машина, але назватись вона ще не вміє. version="" - те
+    саме про поле version (ще старіша збірка). Обидва випадки НЕ є збоєм і
+    навмисно не зливаються з "нет связи", який рахується окремо."""
+    tally = {}
+    failures = 0
+    for _ in range(max(1, attempts)):
+        status = fetch_remote_status_from(hostname, timeout=timeout)
+        if status is None:
+            failures += 1
+            continue
+        key = (
+            (status.get("node") or "").strip(),
+            (status.get("version") or "").strip(),
+            (status.get("update_channel") or "").strip(),
+        )
+        tally[key] = tally.get(key, 0) + 1
+    responders = [
+        {"node": node, "version": version, "channel": channel, "hits": hits}
+        for (node, version, channel), hits in tally.items()
+    ]
+    responders.sort(key=lambda item: item["hits"], reverse=True)
+    return {"responders": responders, "failures": failures, "attempts": max(1, attempts)}

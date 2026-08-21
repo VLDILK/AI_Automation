@@ -48,18 +48,19 @@ _ONEDRIVE_TENANT_SUFFIX = "OneDrive - Diverus, UAB"
 # UserFolder - той самий шлях, яким цього сеансу вручну через PowerShell
 # з'ясували, що "особистий" слот на двох машинах виявився двома різними
 # акаунтами. Пошук за email тут точний, без здогадок по назві теки.
-def find_account_folder(email):
+def list_account_folders():
+    """[(email, Path)] - усі акаунти OneDrive, залогінені на ЦІЙ машині.
+    Windows тримає кожен окремим підключем із парою UserEmail/UserFolder,
+    тож ані вгадувати назву теки, ані знати пошту наперед не потрібно."""
     try:
         import winreg
     except ImportError:
-        return None
-    email_normalized = email.strip().lower()
-    if not email_normalized:
-        return None
+        return []
     try:
         accounts_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\OneDrive\Accounts")
     except OSError:
-        return None
+        return []
+    accounts = []
     try:
         index = 0
         while True:
@@ -77,12 +78,21 @@ def find_account_folder(email):
                     winreg.CloseKey(subkey)
             except OSError:
                 continue
-            if isinstance(user_email, str) and user_email.strip().lower() == email_normalized:
-                folder_path = Path(user_folder)
-                if folder_path.is_dir():
-                    return folder_path
+            folder_path = Path(user_folder) if isinstance(user_folder, str) else None
+            if folder_path is not None and folder_path.is_dir():
+                accounts.append((str(user_email or ""), folder_path))
     finally:
         winreg.CloseKey(accounts_key)
+    return accounts
+
+
+def find_account_folder(email):
+    email_normalized = (email or "").strip().lower()
+    if not email_normalized:
+        return None
+    for account_email, folder in list_account_folders():
+        if account_email.strip().lower() == email_normalized:
+            return folder
     return None
 
 
@@ -121,21 +131,65 @@ def resolved_path_str(email=None):
     return str(path) if path else None
 
 
+def _candidate_files(email=None):
+    """Усі місця, де МОЖЕ лежати реєстр: спершу той, куди пише ця машина,
+    потім теки решти залогінених акаунтів. Порядок не важливий - конфлікти
+    все одно вирішує updated_at, - але дублікати прибираємо, щоб не читати
+    той самий файл двічі."""
+    candidates = []
+    primary = _cloud_file_path(email)
+    if primary is not None:
+        candidates.append(primary)
+    for _account_email, folder in list_account_folders():
+        candidates.append(folder / _CLOUD_FOLDER_NAME / _CLOUD_FILE_NAME)
+    unique = []
+    seen = set()
+    for path in candidates:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _parse_updated_at(value):
+    """Записи без розбірної мітки часу вважаємо найстарішими - інакше
+    зіпсований запис міг би перекрити живий."""
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return datetime.min
+
+
 def read_servers(email=None):
     """{} означає "хмара недоступна, чи файлу там ще немає" - викликач
     (gui.py) має трактувати це як "поки нічого не відомо", не як "серверів
-    справді немає"."""
-    path = _cloud_file_path(email)
-    if path is None or not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    servers = data.get("servers")
-    if not isinstance(servers, dict):
-        return {}
-    return servers
+    справді немає".
+
+    Читаємо реєстри ВСІХ акаунтів OneDrive цієї машини й зливаємо: машини
+    пишуть у різні теки (у кожної своя налаштована пошта), і читання лише
+    з однієї показувало б застарілу або порожню картину."""
+    merged = {}
+    for path in _candidate_files(email):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        servers = data.get("servers")
+        if not isinstance(servers, dict):
+            continue
+        for name, server in servers.items():
+            if not isinstance(server, dict):
+                continue
+            existing = merged.get(name)
+            if existing is None or _parse_updated_at(server.get("updated_at")) >= _parse_updated_at(
+                existing.get("updated_at")
+            ):
+                merged[name] = server
+    return merged
 
 
 # Best-effort, як і standard_menu_cloud.write_cloud_state - якщо OneDrive

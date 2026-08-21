@@ -56,6 +56,11 @@ BACKUP_PASSWORD_PATH = SYSTEM_DIR / "backup_password.txt"
 # у хмару разом із рештою налаштувань. Той самий принцип - окремий файл,
 # НЕ в списку _INCLUDE_FILES config_backup.py (як і backup_password.txt).
 GITHUB_TOKEN_PATH = SYSTEM_DIR / "github_token.txt"
+# Токен Cloudflare для вікна "Тунель" (gui.py) - той самий принцип, що й
+# у GITHUB_TOKEN_PATH вище: окремий файл у SYSTEM_DIR, який уже в
+# .gitignore, а не константа в коді. Потрібні права мінімальні:
+# Zone:DNS:Edit на робочу зону та Account:Cloudflare Tunnel:Read.
+CLOUDFLARE_TOKEN_PATH = SYSTEM_DIR / "cloudflare_token.txt"
 # Задача користувача (2026-08-17): "якщо програма закриється - то щоб
 # запустилась знову... якщо так можна" - watchdog_task.py's періодична
 # перевірка (client_app.py --watchdog-check) відрізняє свідоме "Выход"
