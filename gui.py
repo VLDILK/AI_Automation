@@ -74,7 +74,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.92"
+__version__ = "1.0.95"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -963,13 +963,24 @@ class ExcelViewerApp:
         # прибрано (розділ "Дистанційне керування" туди вже не веде, звідти
         # прибрано разом із переходом на автоматичне з'єднання) - лише
         # пасивний індикатор, без переходу.
-        self.main_menu_status_label = tk.Label(
-            self.main_menu_frame,
-            textvariable=self.telegram_status_text,
-            font=("Segoe UI", 10),
+        self.known_clients_frame = tk.Frame(self.main_menu_frame)
+        self.known_clients_frame.place(relx=0.0, x=16, y=12, anchor="nw")
+        tk.Label(
+            self.known_clients_frame,
+            text=self._t("Известные клиенты"),
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+        self.known_clients_rows = tk.Frame(self.known_clients_frame)
+        self.known_clients_rows.pack(fill="x")
+        tk.Label(
+            self.known_clients_frame,
+            text=self._t("Клик по строке — переключиться"),
+            font=("Segoe UI", 8),
             fg="gray40",
-        )
-        self.main_menu_status_label.place(relx=0.0, x=16, y=12, anchor="nw")
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+        self._refresh_known_clients()
 
         # Задача користувача (2026-08-18): "кнопку зміни теми перенес
         # праворуч... і перероби на тумблер" - справжній повзунок-перемикач
@@ -5350,8 +5361,8 @@ class ExcelViewerApp:
         window = tk.Toplevel(self.root)
         window.title(self._t("Сервери"))
         window.configure(bg=self._SRV_BG)
-        window.transient(self.root)
-        window.grab_set()
+        # Ні transient, ні grab_set: вікно самостійне - має власну кнопку на
+        # панелі задач, не згортається разом із головним і не блокує його.
 
         card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=14)
         card.pack(fill="both", expand=True)
@@ -5497,7 +5508,14 @@ class ExcelViewerApp:
 
             threading.Thread(target=worker, daemon=True).start()
 
+        # Розмір і місце виставляються РІВНО ОДИН раз - коли список уперше
+        # показав вміст. Далі вікно нікуди не переїжджає: пересунули чи
+        # розтягнули - так і лишиться, "Оновити" його більше не чіпає.
+        placement = {"done": False}
+
         def resize_to_content():
+            if placement["done"]:
+                return
             window.update_idletasks()
             width = 360
             height = min(window.winfo_reqheight(), 520)
@@ -5596,6 +5614,7 @@ class ExcelViewerApp:
                     ).pack(anchor="w", pady=8)
                 refresh_statuses(rows_state)
                 resize_to_content()
+                placement["done"] = True
 
             refresh_list.generation = getattr(refresh_list, "generation", 0) + 1
             generation = refresh_list.generation
@@ -5607,7 +5626,9 @@ class ExcelViewerApp:
             threading.Thread(target=worker, daemon=True).start()
 
         bottom = tk.Frame(card, bg=self._SRV_BG)
-        bottom.pack(side="top", fill="x", pady=(10, 0))
+        # Знизу, а не "наступним зверху": вікно більше не росте під вміст,
+        # тож при переповненні за край має виїжджати список, а не кнопки.
+        bottom.pack(side="bottom", fill="x", pady=(10, 0))
         tk.Button(
             bottom, text=self._t("Оновити"), command=refresh_list,
             bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
@@ -5771,7 +5792,8 @@ class ExcelViewerApp:
         window = tk.Toplevel(self.root)
         window.title(self._t("Тунель"))
         window.configure(bg=self._SRV_BG)
-        window.transient(self.root)
+        # Самостійне вікно - див. "Сервери" вище: не згортається разом із
+        # головним і має власну кнопку на панелі задач.
 
         card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=12)
         card.pack(fill="both", expand=True)
@@ -6008,14 +6030,54 @@ class ExcelViewerApp:
             font=("Segoe UI", 9),
         ).pack(side="left", padx=(6, 0))
 
-        body = tk.Frame(card, bg=self._SRV_BG)
         bottom = tk.Frame(card, bg=self._SRV_BG)
         # Ряд кнопок пакується ПЕРШИМ і притискається до низу. Порядок тут
         # принциповий: вікно більше не росте під вміст, тож якщо вміст
         # переросте висоту, за край має виїжджати середина таблиці, а не
         # "Обновить" із "Закрити".
         bottom.pack(side="bottom", fill="x", pady=(14, 0))
-        body.pack(side="top", fill="both", expand=True)
+
+        # Вміст на Canvas - інакше все, що не влізло у вікно фіксованої
+        # висоти, було б просто недосяжним.
+        content_area = tk.Frame(card, bg=self._SRV_BG)
+        content_area.pack(side="top", fill="both", expand=True)
+        scrollbar = tk.Scrollbar(
+            content_area, orient="vertical", bg=self._SRV_ROW_BG, troughcolor=self._SRV_BG,
+            activebackground=self._SRV_ROW_ACTIVE_BG, borderwidth=0, elementborderwidth=1,
+            highlightthickness=0, width=12,
+        )
+        canvas = tk.Canvas(content_area, bg=self._SRV_BG, highlightthickness=0, bd=0)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        body = tk.Frame(canvas, bg=self._SRV_BG)
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def sync_scroll(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Смуга з'являється лише коли є що гортати - постійна смуга у
+            # вікні, яке зазвичай уміщається, лише заважає.
+            needed = body.winfo_reqheight() > canvas.winfo_height()
+            if needed and not scrollbar.winfo_ismapped():
+                scrollbar.pack(side="right", fill="y", before=canvas)
+            elif not needed and scrollbar.winfo_ismapped():
+                scrollbar.pack_forget()
+
+        body.bind("<Configure>", sync_scroll)
+        canvas.bind(
+            "<Configure>",
+            lambda event: (canvas.itemconfigure(body_id, width=event.width), sync_scroll()),
+        )
+
+        def on_wheel(event):
+            if body.winfo_reqheight() <= canvas.winfo_height():
+                return
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind("<Enter>", lambda event: window.bind_all("<MouseWheel>", on_wheel))
+        canvas.bind("<Leave>", lambda event: window.unbind_all("<MouseWheel>"))
+        window.bind("<Destroy>", lambda event: window.unbind_all("<MouseWheel>"), add="+")
 
         state["autosize"] = True
         state["settled"] = 0
@@ -6027,6 +6089,13 @@ class ExcelViewerApp:
             if state.get("autosize"):
                 window.update_idletasks()
                 width = self._TUNNEL_WIDTH
+                # Canvas сам по собі не тягнеться під вміст, тож висоту йому
+                # задаємо явно - рівно стільки, скільки треба вмісту, але не
+                # більше за екран. Далі вікно рахує свою висоту вже від неї.
+                canvas.configure(
+                    height=min(body.winfo_reqheight(), window.winfo_screenheight() - 260)
+                )
+                window.update_idletasks()
                 height = min(window.winfo_reqheight(), window.winfo_screenheight() - 140)
                 root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
                 root_width = self.root.winfo_width()
@@ -9240,6 +9309,7 @@ class ExcelViewerApp:
         self._remote_control_status = None
         self._remote_control_status_failures = 0
         self._remote_control_tick()
+        self.root.after(self._KNOWN_CLIENTS_POLL_INTERVAL_MS, self._known_clients_tick)
 
     _REMOTE_CONTROL_POLL_INTERVAL_MS = 15000
     # Задача користувача (2026-08-17): "чому форма не тримається стабільно
@@ -9268,6 +9338,94 @@ class ExcelViewerApp:
     # що вже виправлений для Персоналу/Журналів (див. коментар вище про
     # _run_on_main_thread), тут просто пропущений. При повільному/недоступному
     # тунелі це блокувало б усе вікно до ~20с щоразу.
+    # Оновлюється рідше за індикатор активного сервера (20с проти 15с) і
+    # ОКРЕМИМ потоком: рядків тут кілька, кожен - свій HTTP-запит, і робити
+    # їх у тіку головного індикатора означало б розтягнути його на секунди.
+    _KNOWN_CLIENTS_POLL_INTERVAL_MS = 20000
+
+    def _known_clients_rows_data(self):
+        """[(ім'я, адреса, тип)] - спершу синтетичний "Рабочий" за адресою
+        за замовчуванням, далі всі зареєстровані машини. Синтетичний рядок
+        обов'язковий: стара збірка себе не реєструє взагалі, і без нього
+        робочої машини на екрані просто не було б."""
+        rows = [(self._t("Рабочий"), paths.CLOUDFLARED_TUNNEL_HOSTNAME, "main")]
+        try:
+            servers = servers_registry.read_servers(self._onedrive_shared_email())
+        except OSError:
+            servers = {}
+        for name, server in sorted(servers.items()):
+            hostname = (server.get("hostname") or "").strip()
+            if hostname:
+                rows.append((name, hostname, server.get("kind") or "main"))
+        return rows
+
+    def _switch_active_server(self, hostname):
+        remote_control_client.set_active_server(hostname)
+        self.settings.set("active_remote_server_hostname", hostname)
+        self.settings.set("active_remote_server_row", "")
+        self._refresh_known_clients()
+
+    def _refresh_known_clients(self):
+        frame = getattr(self, "known_clients_rows", None)
+        if frame is None or not frame.winfo_exists():
+            return
+        self._clear_frame(frame)
+        active = remote_control_client.active_hostname()
+        states = []
+        for name, hostname, kind in self._known_clients_rows_data():
+            row = tk.Frame(frame)
+            row.pack(fill="x", pady=1)
+            dot = tk.Label(row, text="●", font=("Segoe UI", 9), fg="gray40")
+            dot.pack(side="left", padx=(0, 6))
+            title = ("✓ " + name) if hostname == active else name
+            name_label = tk.Label(row, text=title, font=("Segoe UI", 9), anchor="w")
+            name_label.pack(side="left")
+            if kind == "test":
+                tk.Label(
+                    row, text=self._t("тестовый"), font=("Segoe UI", 8),
+                    bg="#fff3d6", fg="#8a5a00", padx=4,
+                ).pack(side="left", padx=(6, 0))
+            state_var = tk.StringVar(value="…")
+            value_label = tk.Label(
+                row, textvariable=state_var, font=("Segoe UI", 9), fg="gray40", anchor="w",
+            )
+            value_label.pack(side="left", padx=(8, 0))
+            for clickable in (row, name_label, value_label):
+                clickable.configure(cursor="hand2")
+                clickable.bind("<Button-1>", lambda event, h=hostname: self._switch_active_server(h))
+            states.append({"hostname": hostname, "dot": dot, "var": state_var})
+        self._apply_theme(frame)
+
+        generation = self._known_clients_generation = getattr(self, "_known_clients_generation", 0) + 1
+
+        def worker():
+            for item in states:
+                status = remote_control_client.fetch_remote_status_from(item["hostname"], timeout=6)
+
+                def apply(item=item, status=status):
+                    if generation != self._known_clients_generation:
+                        return
+                    if not item["dot"].winfo_exists():
+                        return
+                    if status is None:
+                        item["dot"].configure(fg="#B23B3B")
+                        item["var"].set(self._t("нет связи"))
+                        return
+                    item["dot"].configure(fg="#1D9E75")
+                    # Порожня версія = збірка, старша за поле version. Це
+                    # факт, а не збій - той самий напис, що й у "Серверах".
+                    item["var"].set((status.get("version") or "").strip() or self._t("старая"))
+
+                self._run_on_main_thread(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _known_clients_tick(self):
+        if self.is_closing:
+            return
+        self._refresh_known_clients()
+        self.root.after(self._KNOWN_CLIENTS_POLL_INTERVAL_MS, self._known_clients_tick)
+
     def _remote_control_tick(self):
         if self.is_closing:
             return
@@ -9313,8 +9471,6 @@ class ExcelViewerApp:
             self.webapp_status_text.set("")
             if self.telegram_status_label.winfo_exists():
                 self.telegram_status_label.configure(fg="gray40")
-            if self.main_menu_status_label.winfo_exists():
-                self.main_menu_status_label.configure(fg="gray40")
             return
 
         # Задача користувача (2026-08-15): "тепер змінюй це на автоматичне
@@ -9327,8 +9483,6 @@ class ExcelViewerApp:
         status_color = "#1D9E75"
         if self.telegram_status_label.winfo_exists():
             self.telegram_status_label.configure(fg=status_color)
-        if self.main_menu_status_label.winfo_exists():
-            self.main_menu_status_label.configure(fg=status_color)
 
         bot_word = self._t("підключено") if status.get("bot_alive") else self._t("вимкнено")
         form_word = self._t("підключено") if status.get("webapp_alive") else self._t("вимкнено")
