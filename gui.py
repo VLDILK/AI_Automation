@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.6"
+__version__ = "1.1.7"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -9310,14 +9310,48 @@ class ExcelViewerApp:
             role_label = perm.ROLE_LABELS.get(normalized_role, role)
             role_bg, role_fg = self._ROLE_CHIP_COLORS.get(normalized_role, self._ROLE_CHIP_COLORS["guest"])
 
-            label = tk.Label(
-                self.personnel_list_frame,
-                text=f"{index}. {display_name}{username_text} — ID: {telegram_id}",
+            # Вимога користувача (2026-08-21): "додай змогу копіювати
+            # номера ІД як виділяючи, так і щоб поруч була певна кнопка".
+            # Раніше весь рядок був однією tk.Label - а текст у мітці Tk
+            # виділити мишею НЕМОЖЛИВО. Тому рядок розкладено: ім'я
+            # лишається міткою, номер живе в полі лише для читання (на
+            # вигляд той самий текст, але виділяється й копіюється
+            # звичним Ctrl+C), кнопка стоїть одразу за ним.
+            name_cell = tk.Frame(self.personnel_list_frame, bg=theme["panel_bg"])
+            name_cell.grid(row=index, column=0, sticky="ew", padx=(6, 0), pady=5)
+
+            tk.Label(
+                name_cell,
+                text=f"{index}. {display_name}{username_text} — ID:",
                 anchor="w",
                 justify="left",
                 bg=theme["panel_bg"],
+            ).pack(side="left")
+
+            id_text = str(telegram_id)
+            id_entry = tk.Entry(
+                name_cell, width=len(id_text) + 1, relief="flat", bd=0,
+                highlightthickness=0, justify="left",
+                bg=theme["entry_bg"], readonlybackground=theme["entry_bg"], fg=theme["fg"],
             )
-            label.grid(row=index, column=0, sticky="ew", padx=(6, 0), pady=5)
+            id_entry.insert(0, id_text)
+            id_entry.configure(state="readonly")
+            id_entry.pack(side="left", padx=(4, 0))
+
+            copied_var = tk.StringVar(value="")
+            tk.Button(
+                name_cell, text="⧉", font=("Segoe UI", 9), width=2, padx=0, pady=0,
+                cursor="hand2",
+                command=lambda value=id_text, var=copied_var: self._copy_to_clipboard(value, var),
+            ).pack(side="left", padx=(4, 0))
+
+            # Відгук обов'язковий: у буфері обміну зміни не видно, і без
+            # нього кнопка відчувається мертвою. Колір - із
+            # _SEMANTIC_FG_COLORS, такі переживають перемикання теми.
+            tk.Label(
+                name_cell, textvariable=copied_var, font=("Segoe UI", 8),
+                fg="#1D9E75", bg=theme["panel_bg"],
+            ).pack(side="left", padx=(6, 0))
 
             # Задача користувача (2026-08-16): "додай змогу редагувати ролі
             # тут теж... зміна ролі в мене - зміна ролі в клієнті" - бейдж
@@ -9354,6 +9388,22 @@ class ExcelViewerApp:
             )
             last_seen_label.grid(row=index, column=2, sticky="e", padx=(8, 6))
         self._apply_theme(self.personnel_list_frame)
+
+    # Спільний копіювальник: буфер обміну плюс короткий відгук, який
+    # сам згасає. Виділено окремо, бо кнопок копіювання в списку стільки
+    # ж, скільки людей, і кожна має поводитись однаково.
+    def _copy_to_clipboard(self, value, feedback_var=None):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(value)
+        except tk.TclError:
+            # Буфер обміну може бути тимчасово зайнятий іншою програмою -
+            # це не привід ламати вікно списку.
+            return False
+        if feedback_var is not None:
+            feedback_var.set(self._t("скопировано"))
+            self.root.after(1500, lambda: feedback_var.set(""))
+        return True
 
     def _personnel_sort_arrow(self, field):
         if self._personnel_sort_field != field:
