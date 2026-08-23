@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.5"
+__version__ = "1.1.6"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -9616,20 +9616,45 @@ class ExcelViewerApp:
     _KNOWN_CLIENTS_POLL_INTERVAL_MS = 20000
 
     def _known_clients_rows_data(self):
-        """[(ім'я, адреса, тип)] - спершу синтетичний "Рабочий" за адресою
-        за замовчуванням, далі всі зареєстровані машини. Синтетичний рядок
-        обов'язковий: стара збірка себе не реєструє взагалі, і без нього
-        робочої машини на екрані просто не було б."""
-        rows = [(self._t("Рабочий"), paths.cloudflared_tunnel_hostname(), "main")]
+        """[(ім'я, адреса, тип, час останнього сигналу)] - спершу
+        синтетичний "Рабочий" за адресою за замовчуванням, далі всі
+        зареєстровані машини. Синтетичний рядок обов'язковий: стара збірка
+        себе не реєструє взагалі, і без нього робочої машини на екрані
+        просто не було б.
+
+        Час береться з updated_at реєстру - його пише САМ клієнт за своїм
+        годинником, раз на дві хвилини, незалежно від того, увімкнена
+        домашка чи ні. None означає "ця машина себе ще не реєструвала"
+        (клієнт до 0.2.88 такого не вміє), і це не помилка."""
         try:
             servers = servers_registry.read_servers(self._onedrive_shared_email())
         except OSError:
             servers = {}
+        default_hostname = paths.cloudflared_tunnel_hostname()
+        # Якщо робоча машина колись зареєструється під тією самою адресою,
+        # синтетичний рядок підхопить її час, а не лишиться без нього.
+        default_seen = None
+        for server in servers.values():
+            if (server.get("hostname") or "").strip() == default_hostname:
+                default_seen = server.get("updated_at")
+                break
+        rows = [(self._t("Рабочий"), default_hostname, "main", default_seen)]
         for name, server in sorted(servers.items()):
             hostname = (server.get("hostname") or "").strip()
             if hostname:
-                rows.append((name, hostname, server.get("kind") or "main"))
+                rows.append((name, hostname, server.get("kind") or "main", server.get("updated_at")))
         return rows
+
+    # Формат навмисно без секунд: запис іде раз на дві хвилини, плюс
+    # затримка синхронізації OneDrive - секунди створювали б враження
+    # точності, якої тут немає.
+    def _format_last_signal(self, updated_at):
+        if not updated_at:
+            return None
+        moment = servers_registry.parse_updated_at(updated_at)
+        if moment == datetime.min:
+            return None
+        return moment.strftime("%d.%m %H:%M")
 
     def _switch_active_server(self, hostname):
         remote_control_client.set_active_server(hostname)
@@ -9644,7 +9669,7 @@ class ExcelViewerApp:
         self._clear_frame(frame)
         active = remote_control_client.active_hostname()
         states = []
-        for name, hostname, kind in self._known_clients_rows_data():
+        for name, hostname, kind, last_seen in self._known_clients_rows_data():
             row = tk.Frame(frame)
             row.pack(fill="x", pady=1)
             dot = tk.Label(row, text="●", font=("Segoe UI", 9), fg="gray40")
@@ -9665,7 +9690,10 @@ class ExcelViewerApp:
             for clickable in (row, name_label, value_label):
                 clickable.configure(cursor="hand2")
                 clickable.bind("<Button-1>", lambda event, h=hostname: self._switch_active_server(h))
-            states.append({"hostname": hostname, "dot": dot, "var": state_var})
+            states.append({
+                "hostname": hostname, "dot": dot, "var": state_var,
+                "last_seen": self._format_last_signal(last_seen),
+            })
         self._apply_theme(frame)
 
         generation = self._known_clients_generation = getattr(self, "_known_clients_generation", 0) + 1
@@ -9681,7 +9709,15 @@ class ExcelViewerApp:
                         return
                     if status is None:
                         item["dot"].configure(fg="#B23B3B")
-                        item["var"].set(self._t("нет связи"))
+                        # Вибір користувача (варіант 5 з пʼяти показаних):
+                        # час видно ЛИШЕ коли зв'язку немає - поки машина
+                        # відповідає, у рядку корисніша її версія.
+                        if item["last_seen"]:
+                            item["var"].set(
+                                self._t("нет связи с {moment}").format(moment=item["last_seen"])
+                            )
+                        else:
+                            item["var"].set(self._t("нет связи"))
                         return
                     item["dot"].configure(fg="#1D9E75")
                     # Порожня версія = збірка, старша за поле version. Це

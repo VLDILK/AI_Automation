@@ -149,7 +149,7 @@ def _candidate_files(email=None):
     return unique
 
 
-def _parse_updated_at(value):
+def parse_updated_at(value):
     """Записи без розбірної мітки часу вважаємо найстарішими - інакше
     зіпсований запис міг би перекрити живий."""
     try:
@@ -181,7 +181,7 @@ def read_servers(email=None):
             if not isinstance(server, dict):
                 continue
             existing = merged.get(name)
-            if existing is None or _parse_updated_at(server.get("updated_at")) >= _parse_updated_at(
+            if existing is None or parse_updated_at(server.get("updated_at")) >= parse_updated_at(
                 existing.get("updated_at")
             ):
                 merged[name] = server
