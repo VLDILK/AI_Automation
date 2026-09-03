@@ -493,7 +493,6 @@
   // 2112 мп, тож кожна одиниця підсумовується окремо й показується своїм
   // рядком. Порядок сталий (м3, м2, мп), щоб число не стрибало з місця
   // на місце між перемальовками.
-  var STOCK_TOTAL_UNIT_ORDER = ["м3", "м2", "мп"];
 
   function renderStockTotals(rows) {
     var footer = document.getElementById("stock-totals");
@@ -511,23 +510,10 @@
       var unit = row.unit || "";
       byUnit[unit] = (byUnit[unit] || 0) + measure;
     });
-    document.getElementById("stock-total-quantity").textContent = formatNumber(totalQuantity);
-    var measureCell = document.getElementById("stock-total-measure");
-    measureCell.textContent = "";
-    var units = STOCK_TOTAL_UNIT_ORDER.filter(function (unit) { return byUnit[unit]; });
-    Object.keys(byUnit).forEach(function (unit) {
-      // Одиниця, якої немає в сталому порядку (порожня чи нова), теж має
-      // бути видима - інакше частина складу мовчки випала б з підсумку.
-      if (units.indexOf(unit) === -1) {
-        units.push(unit);
-      }
+    renderTableTotals("stock-totals", {
+      "stock-total-quantity": formatNumber(totalQuantity) + " шт",
+      "stock-total-measure": measureTotalLines(byUnit),
     });
-    units.forEach(function (unit) {
-      var line = document.createElement("div");
-      line.textContent = formatNumber(byUnit[unit]) + (unit ? " " + unit : "");
-      measureCell.appendChild(line);
-    });
-    footer.style.display = "";
   }
 
   function renderStockPanel() {
@@ -995,13 +981,56 @@
     });
   }
 
-  function setTotalsLines(elementId, lines) {
-    var el = document.getElementById(elementId);
-    el.textContent = "";
-    lines.forEach(function (line) {
-      var row = document.createElement("div");
-      row.textContent = line;
-      el.appendChild(row);
+  // Один вигляд підсумку на ВСІХ вкладках (вимога користувача
+  // 2026-08-21: "потрібно щоб однаково все виглядало у всіх вкладках").
+  // Значення розкладаються по клітинках, тобто кожне число стоїть під
+  // своєю колонкою, а сам рядок прилипає до низу області прокрутки.
+  function renderTableTotals(footId, valuesByCellId) {
+    var foot = document.getElementById(footId);
+    if (!foot) {
+      return;
+    }
+    Object.keys(valuesByCellId).forEach(function (cellId) {
+      var cell = document.getElementById(cellId);
+      if (!cell) {
+        return;
+      }
+      cell.textContent = "";
+      var value = valuesByCellId[cellId];
+      var lines = Array.isArray(value) ? value : [value];
+      lines.forEach(function (line) {
+        if (line === null || line === undefined || line === "") {
+          return;
+        }
+        var div = document.createElement("div");
+        div.textContent = line;
+        cell.appendChild(div);
+      });
+    });
+    foot.style.display = "";
+  }
+
+  function hideTableTotals(footId) {
+    var foot = document.getElementById(footId);
+    if (foot) {
+      foot.style.display = "none";
+    }
+  }
+
+  // Одиниці не змішуються НІДЕ: в одній колонці поруч живуть 0,645 м3 і
+  // 2112 мп, тож кожна одиниця підсумовується окремо й показується своїм
+  // рядком. Порядок сталий, щоб число не стрибало між перемальовками.
+  var TOTAL_UNIT_ORDER = ["м3", "м2", "мп"];
+
+  function measureTotalLines(byUnit) {
+    var units = TOTAL_UNIT_ORDER.filter(function (unit) { return byUnit[unit]; });
+    Object.keys(byUnit).forEach(function (unit) {
+      if (byUnit[unit] && units.indexOf(unit) === -1) {
+        units.push(unit);
+      }
+    });
+    return units.map(function (unit) {
+      return formatNumber(byUnit[unit]) + (unit ? " " + unit : "");
     });
   }
 
@@ -1046,7 +1075,7 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("sales-totals", []);
+      hideTableTotals("sales-totals-row");
       updateSortArrowsFor("data-sales-sort", state.salesSortKey, state.salesSortDir);
       return;
     }
@@ -1078,16 +1107,19 @@
         clients[row.client] = true;
       }
     });
-    var totalsParts = [formatNumber(totalQuantity) + " шт"];
-    if (totalVolume) totalsParts.push(formatNumber(totalVolume) + " м3");
-    if (totalArea) totalsParts.push(formatNumber(totalArea) + " м2");
-    if (totalLinear) totalsParts.push(formatNumber(totalLinear) + " мп");
-    totalsParts.push(formatNumber(totalAmount) + " MDL");
     var average = rows.length ? Math.round((totalAmount / rows.length) * 100) / 100 : 0;
-    setTotalsLines("sales-totals", [
-      "Итого: " + totalsParts.join(", "),
-      "Средняя сумма продажи: " + formatNumber(average) + " MDL, клиентов: " + Object.keys(clients).length,
-    ]);
+    // Середня сума й кількість клієнтів не лягають у жодну колонку, тож
+    // лишаються другим рядком у клітинці "Итого" - викидати їх заради
+    // симетрії було б гірше, ніж лишити на місці.
+    document.getElementById("sales-total-note").textContent =
+      "средняя " + formatNumber(average) + " MDL · клиентов " + Object.keys(clients).length;
+    renderTableTotals("sales-totals-row", {
+      "sales-total-quantity": formatNumber(totalQuantity) + " шт",
+      "sales-total-measure": measureTotalLines({
+        "м3": totalVolume, "м2": totalArea, "мп": totalLinear,
+      }),
+      "sales-total-amount": formatNumber(totalAmount) + " MDL",
+    });
     updateSortArrowsFor("data-sales-sort", state.salesSortKey, state.salesSortDir);
   }
 
@@ -1111,7 +1143,7 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("antiseptic-totals", []);
+      hideTableTotals("antiseptic-totals-row");
       updateSortArrowsFor("data-antiseptic-sort", state.antisepticSortKey, state.antisepticSortDir);
       return;
     }
@@ -1131,9 +1163,12 @@
       totalVolume += numberValue(row.volume) || 0;
       totalAmount += numberValue(row.total_amount) || 0;
     });
-    setTotalsLines("antiseptic-totals", [
-      "Итого: " + formatNumber(totalVolume) + " м3, " + formatNumber(totalAmount) + " MDL",
-    ]);
+    renderTableTotals("antiseptic-totals-row", {
+      // Антисептирование завжди рахується кубом, незалежно від того, як
+      // продається сам товар.
+      "antiseptic-total-measure": measureTotalLines({ "м3": totalVolume }),
+      "antiseptic-total-amount": formatNumber(totalAmount) + " MDL",
+    });
     updateSortArrowsFor("data-antiseptic-sort", state.antisepticSortKey, state.antisepticSortDir);
   }
 
@@ -1179,7 +1214,7 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("writeoff-totals", []);
+      hideTableTotals("writeoff-totals-row");
       updateSortArrowsFor("data-writeoff-sort", state.writeoffSortKey, state.writeoffSortDir);
       return;
     }
@@ -1201,7 +1236,9 @@
       tbody.appendChild(tr);
       totalQuantity += numberValue(row.quantity) || 0;
     });
-    setTotalsLines("writeoff-totals", ["Итого: " + formatNumber(totalQuantity) + " шт"]);
+    renderTableTotals("writeoff-totals-row", {
+      "writeoff-total-quantity": formatNumber(totalQuantity) + " шт",
+    });
     updateSortArrowsFor("data-writeoff-sort", state.writeoffSortKey, state.writeoffSortDir);
   }
 
@@ -1240,12 +1277,16 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("income-totals", []);
+      hideTableTotals("income-totals-row");
       updateSortArrowsFor("data-income-sort", state.incomeSortKey, state.incomeSortDir);
       return;
     }
     empty.style.display = "none";
     var totalQuantity = 0;
+    // Вимір приходу рахує сервер (income_report_rows) - у самому листі
+    // ПРИХОД МАТЕРИАЛА його немає, а рахувати тут означало б завести ще
+    // одну копію правила "25x50 - це погонні метри".
+    var incomeVolume = 0, incomeArea = 0, incomeLinear = 0;
     rows.forEach(function (row, index) {
       var tr = document.createElement("tr");
       appendRowCells(tr, [
@@ -1256,12 +1297,21 @@
         row.condition || "",
         row.size || "",
         formatNumber(row.quantity),
+        measureCellText(row),
         row.author || "",
       ]);
       tbody.appendChild(tr);
       totalQuantity += numberValue(row.quantity) || 0;
+      incomeVolume += numberValue(row.volume) || 0;
+      incomeArea += numberValue(row.area) || 0;
+      incomeLinear += numberValue(row.linear) || 0;
     });
-    setTotalsLines("income-totals", ["Итого: " + formatNumber(totalQuantity) + " шт"]);
+    renderTableTotals("income-totals-row", {
+      "income-total-quantity": formatNumber(totalQuantity) + " шт",
+      "income-total-measure": measureTotalLines({
+        "м3": incomeVolume, "м2": incomeArea, "мп": incomeLinear,
+      }),
+    });
     updateSortArrowsFor("data-income-sort", state.incomeSortKey, state.incomeSortDir);
   }
 
@@ -1425,12 +1475,12 @@
     tbody.innerHTML = "";
     if (!grouped.length) {
       empty.style.display = "block";
-      setTotalsLines("clients-totals", []);
+      hideTableTotals("clients-totals-row");
       updateSortArrowsFor("data-clients-sort", state.clientsSortKey, state.clientsSortDir);
       return;
     }
     empty.style.display = "none";
-    var totalCount = 0, totalAmount = 0;
+    var totalCount = 0, totalAmount = 0, totalQuantity = 0;
     grouped.forEach(function (bucket, index) {
       var tr = document.createElement("tr");
       appendRowCells(tr, [
@@ -1443,10 +1493,15 @@
       tbody.appendChild(tr);
       totalCount += bucket.count;
       totalAmount += bucket.total_amount;
+      totalQuantity += numberValue(bucket.quantity) || 0;
     });
-    setTotalsLines("clients-totals", [
-      "Итого: " + formatNumber(totalCount) + " прод., " + formatNumber(totalAmount) + " MDL",
-    ]);
+    renderTableTotals("clients-totals-row", {
+      // "Продаж" тут - кількість продажів, а не штук: колонка називається
+      // так само, як у рядках, тож число має стояти саме під нею.
+      "clients-total-count": formatNumber(totalCount),
+      "clients-total-quantity": formatNumber(totalQuantity),
+      "clients-total-amount": formatNumber(totalAmount) + " MDL",
+    });
     updateSortArrowsFor("data-clients-sort", state.clientsSortKey, state.clientsSortDir);
   }
 

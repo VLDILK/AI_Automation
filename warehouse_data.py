@@ -4978,6 +4978,25 @@ def income_report_rows(store):
             "quantity": row_value(values, columns.get("quantity")),
             "manager": row_value(values, columns.get("manager")),
         })
+    # Вимога користувача (2026-08-21, скріншот вкладки "Приход"): "не видно
+    # одиниць вимірювання - додай". У листі ПРИХОД МАТЕРИАЛА виміру немає
+    # взагалі - є лише розміри й кількість, тож рахуємо його тут, тією ж
+    # парою row_measure_kind/piece_measure, якою користуються бот і склад.
+    # Рахувати це в браузері означало б завести ТРЕТЮ копію правила
+    # "25x50 - це погонні метри" (перші дві - utils.py і webapp/app.js).
+    # Поля саме volume/area/linear, а не measure+unit: рівно такий контракт
+    # уже має вкладка "Продажи", і той самий measureCellText (data.js) їх
+    # читає. Свій, окремий формат тут означав би другу гілку показу того
+    # самого числа.
+    for row in result:
+        kind = _shared_row_measure_kind(row.get("product"), row.get("thickness"), row.get("width"))
+        piece = _shared_piece_measure(
+            row.get("thickness"), row.get("width"), row.get("length"), kind
+        ) if kind else 0
+        value = round(piece * _number_value(row.get("quantity")), 6) if piece > 0 else None
+        row["volume"] = value if kind == "volume" else None
+        row["area"] = value if kind == "area" else None
+        row["linear"] = value if kind == "linear" else None
     result.reverse()
     return result
 

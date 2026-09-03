@@ -264,6 +264,19 @@ html, body {
   gap: 0;
 }
 
+/* Усе, крім таблиці, має зберігати свою висоту. За замовчуванням
+   flex-shrink дорівнює 1, тож рядок чипів періоду ("Сегодня/Вчера/...")
+   зіщулювався й обрізався навпіл, щойно таблиця не вміщалась - саме це
+   й сталось на "Продажах" після переходу на висоту вікна. */
+.tab-panel > .data-chips,
+.tab-panel > .size-filter-badge,
+.tab-panel > .data-empty-hint,
+.tab-panel > .data-empty,
+.tab-panel > .data-totals,
+.tab-panel > .threshold-edit {
+  flex: 0 0 auto;
+}
+
 /* Гортається рівно один елемент на вкладці - область таблиці. */
 .tab-panel > .table-scroll {
   flex: 1 1 auto;
