@@ -483,6 +483,53 @@
     });
   }
 
+  // Підсумок рахується з ТОГО САМОГО масиву, який щойно намалював
+  // таблицю - він уже пройшов усі фільтри (чипи продукту, розмір,
+  // одиниця). Окремої "фільтруючої" логіки тут навмисно немає: два
+  // незалежні проходи по фільтрах рано чи пізно розійшлися б, і підсумок
+  // почав би тихо брехати.
+  //
+  // Одиниці не змішуються: у колонці М3/М2/МП поруч живуть 0,645 м3 і
+  // 2112 мп, тож кожна одиниця підсумовується окремо й показується своїм
+  // рядком. Порядок сталий (м3, м2, мп), щоб число не стрибало з місця
+  // на місце між перемальовками.
+  var STOCK_TOTAL_UNIT_ORDER = ["м3", "м2", "мп"];
+
+  function renderStockTotals(rows) {
+    var footer = document.getElementById("stock-totals");
+    if (!footer) {
+      return;
+    }
+    var totalQuantity = 0;
+    var byUnit = {};
+    rows.forEach(function (row) {
+      totalQuantity += numberValue(row.quantity) || 0;
+      var measure = numberValue(row.measure) || 0;
+      if (!measure) {
+        return;
+      }
+      var unit = row.unit || "";
+      byUnit[unit] = (byUnit[unit] || 0) + measure;
+    });
+    document.getElementById("stock-total-quantity").textContent = formatNumber(totalQuantity);
+    var measureCell = document.getElementById("stock-total-measure");
+    measureCell.textContent = "";
+    var units = STOCK_TOTAL_UNIT_ORDER.filter(function (unit) { return byUnit[unit]; });
+    Object.keys(byUnit).forEach(function (unit) {
+      // Одиниця, якої немає в сталому порядку (порожня чи нова), теж має
+      // бути видима - інакше частина складу мовчки випала б з підсумку.
+      if (units.indexOf(unit) === -1) {
+        units.push(unit);
+      }
+    });
+    units.forEach(function (unit) {
+      var line = document.createElement("div");
+      line.textContent = formatNumber(byUnit[unit]) + (unit ? " " + unit : "");
+      measureCell.appendChild(line);
+    });
+    footer.style.display = "";
+  }
+
   function renderStockPanel() {
     renderSizeBadge("size-filter-badge", state.sizeFilter, renderStockPanel);
     renderValueBadge();
@@ -497,6 +544,10 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
+      var emptyFooter = document.getElementById("stock-totals");
+      if (emptyFooter) {
+        emptyFooter.style.display = "none";
+      }
       var reasons = [];
       // Реальний баг (аудит коду, 2026-08-14): обидві функції давно
       // перероблені під параметр sizeFilterState (щоб їх могли
@@ -525,6 +576,7 @@
     }
     empty.style.display = "none";
     emptyHint.style.display = "none";
+    renderStockTotals(rows);
     rows.forEach(function (row, index) {
       var tr = document.createElement("tr");
       var size = [row.thickness, row.width, row.length]
@@ -1526,7 +1578,10 @@
   function switchTab(key) {
     state.activeTab = key;
     TAB_KEYS.forEach(function (tabKey) {
-      document.getElementById(TAB_PANEL_IDS[tabKey]).style.display = tabKey === key ? "block" : "none";
+      // "flex", не "block": інлайновий стиль б'є CSS, а панель мусить
+      // лишатись flex-колонкою - інакше таблиця не розтягнеться на
+      // залишок висоти й прокрутка знову дістанеться всій сторінці.
+      document.getElementById(TAB_PANEL_IDS[tabKey]).style.display = tabKey === key ? "flex" : "none";
     });
     renderSidebar();
   }
