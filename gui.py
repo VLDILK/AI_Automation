@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.13"
+__version__ = "1.1.14"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -989,7 +989,7 @@ class ExcelViewerApp:
             textvariable=self.update_check_result_text,
             font=("Segoe UI", 9), fg="gray40",
             wraplength=220, justify="right",
-        ).place(relx=1.0, x=-16, y=88, anchor="ne")
+        ).place(relx=1.0, x=-16, rely=1.0, y=-8, anchor="se")
 
         # Задача користувача: "додай на головне меню... датчик" статусу
         # віддаленого сервера (client_app.py) - дзеркально до update_button
@@ -1024,117 +1024,42 @@ class ExcelViewerApp:
         # перенеси у налаштування... справа вверху, над кнопкою Команди" -
         # тепер він будується в _build_settings_view (_build_theme_toggle).
 
+        # Задача користувача (2026-09-05): "перенеси ці кнопки праворуч, і
+        # зміни їх стиль" - обраний стиль 01 із пʼяти: плоскі кнопки з
+        # іконкою і текстом ліворуч, рівна колонка праворуч під кнопкою
+        # "Оновлення" (та зʼявляється в тому ж куті на y=12, коли є що
+        # ставити). Заголовок "Головне меню" прибрано на пряме прохання.
+        # Кольори фону/тексту лишаються за _apply_theme (тема), тут - лише
+        # форма: тонка рамка, вирівнювання, іконка. "Вихід" - семантичний
+        # червоний, який тема не перефарбовує (_SEMANTIC_FG_COLORS).
         menu_panel = tk.Frame(self.main_menu_frame)
-        menu_panel.pack(expand=True)
+        menu_panel.place(relx=1.0, x=-16, y=56, anchor="ne")
+        menu_items = [
+            ("\u2699", "Налаштування", self.show_settings, None),
+            ("\u25a4", "Журнали", self.show_journals, None),
+            ("\U0001F464", "Персонал", self.show_personnel, None),
+            ("\u25a6", "Редактор кнопок", self.show_custom_buttons, None),
+            ("\u27f2", "Обновити Excel", self.sync_excel_manually, None),
+            ("\u21ea", "Публікація оновлень", self.open_publish_updates_dialog, None),
+            ("\u25a3", "Сервери", self.open_servers_dialog, None),
+            ("\u26d3", "Тунель", self.open_tunnel_dialog, None),
+            ("\u23fb", "Вихід", self.on_close, "#d1242f"),
+        ]
+        for icon, label, handler, semantic_fg in menu_items:
+            button = tk.Button(
+                menu_panel, text=f"{icon}   {self._t(label)}", anchor="w", width=26,
+                relief="solid", bd=1, padx=12, pady=6, font=("Segoe UI", 10),
+                cursor="hand2", command=handler,
+            )
+            if semantic_fg:
+                button.configure(fg=semantic_fg)
+            button.pack(fill="x", pady=(0, 6))
 
-        title = tk.Label(menu_panel, text=self._t("Головне меню"), font=("Segoe UI", 18, "bold"))
-        title.pack(pady=(0, 24))
-
-        settings_button = tk.Button(
-            menu_panel,
-            text=self._t("Налаштування"),
-            width=28,
-            height=2,
-            command=self.show_settings,
-        )
-        settings_button.pack(pady=8)
-
-        journals_button = tk.Button(
-            menu_panel,
-            text=self._t("Журнали"),
-            width=28,
-            height=2,
-            command=self.show_journals,
-        )
-        journals_button.pack(pady=8)
-
-        # Задача користувача: "винеси кнопку керування персоналом до
-        # головного меню. при відкритті керув. персоналом - має відкриватись
-        # окреме вікно" - той самий tk.Toplevel-патерн, що й "Журнали" вище.
-        personnel_button = tk.Button(
-            menu_panel,
-            text=self._t("Персонал"),
-            width=28,
-            height=2,
-            command=self.show_personnel,
-        )
-        personnel_button.pack(pady=8)
-
-        custom_buttons_button = tk.Button(
-            menu_panel,
-            text=self._t("Редактор кнопок"),
-            width=28,
-            height=2,
-            command=self.show_custom_buttons,
-        )
-        custom_buttons_button.pack(pady=8)
-
-        sync_excel_button = tk.Button(
-            menu_panel,
-            text=self._t("Обновити Excel"),
-            width=28,
-            height=2,
-            command=self.sync_excel_manually,
-        )
-        sync_excel_button.pack(pady=8)
-
-        # Задача користувача (2026-08-19): "винеси кнопку публікації
-        # оновлень на головний екран, замість зарезервованої кнопки" -
-        # той самий "В разработке"-слот, що вже колись зайняла "Персонал"
-        # (коментар вище), тепер займає ця кнопка - перенесена сюди з
-        # side_panel (нижче), не продубльована.
-        publish_updates_button = tk.Button(
-            menu_panel,
-            text=self._t("Публікація оновлень"),
-            width=28,
-            height=2,
-            command=self.open_publish_updates_dialog,
-        )
-        publish_updates_button.pack(pady=8)
-
-        # Задача користувача (2026-08-19): "потрібно бачити всі сервера що
-        # доступні. всі тестові... і всі не тестові" - той самий "головне
-        # меню, спливаюче вікно" підхід, що й "Публікація оновлень" вище.
-        servers_button = tk.Button(
-            menu_panel,
-            text=self._t("Сервери"),
-            width=28,
-            height=2,
-            command=self.open_servers_dialog,
-        )
-        servers_button.pack(pady=8)
-
-        # Задача користувача (2026-08-20): "додай це просто в меню, щоб я
-        # бачив" - другий вхід у те саме вікно, без заходу в "Сервери".
-        tunnel_button = tk.Button(
-            menu_panel,
-            text=self._t("Тунель"),
-            width=28,
-            height=2,
-            command=self.open_tunnel_dialog,
-        )
-        tunnel_button.pack(pady=8)
-
-        exit_button = tk.Button(
-            menu_panel,
-            text=self._t("Вихід"),
-            width=28,
-            height=2,
-            command=self.on_close,
-        )
-        exit_button.pack(pady=8)
-
-        # Задача користувача (2026-08-17): "додай знизу версію програми" -
-        # той самий "ver. X" напис, що вже є в client_app.py (main_frame,
-        # side="bottom") - тут той самий трюк, лише на main_menu_frame
-        # (зовнішній, на всю висоту вікна), а не на menu_panel (внутрішній,
-        # центрований по вертикалі) - інакше напис опинився б одразу під
-        # "Вихід" замість справжнього нижнього краю вікна.
         version_label = tk.Label(
             self.main_menu_frame, text=f"ver. {__version__}",
             font=("Segoe UI", 8), fg="#8c959f",
         )
-        version_label.pack(side="bottom", pady=(0, 8))
+        version_label.place(x=16, rely=1.0, y=-8, anchor="sw")
 
     # ---------- перевірка оновлень (раз в 5 хв) ----------
     # Реальний баг (аудит коду, 2026-08-14): update_manifest_path навмисно
