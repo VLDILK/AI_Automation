@@ -200,18 +200,6 @@ html, body {
   cursor: default;
 }
 
-.save-template-button {
-  display: block;
-  width: 100%;
-  margin-top: 14px;
-  margin-bottom: 16px;
-  padding: 10px;
-  border-radius: 12px;
-  border: 1px solid var(--custom-g3-border, var(--field-border));
-  background: var(--custom-g3-fill, transparent);
-  color: var(--custom-g3-text, var(--tg-link));
-  font-size: 14px;
-}
 
 .row-block {
   background: var(--custom-entry-bg, var(--tg-secondary-bg));

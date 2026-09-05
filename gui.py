@@ -4230,7 +4230,7 @@ class ExcelViewerApp:
             font=("Segoe UI", 8, "bold"),
         ).pack(fill="x", padx=12, pady=(10, 2))
         _entry_preview_group3_buttons = []
-        for button_text in (self._t("Сохранить как шаблон"), self._t("Продолжить продажу")):
+        for button_text in (self._t("Продолжить продажу"),):
             button_wrap = tk.Frame(entry_preview_inner, bg=PREVIEW_BORDER, padx=1, pady=1)
             button_wrap.pack(fill="x", padx=12, pady=2)
             button_label = tk.Label(

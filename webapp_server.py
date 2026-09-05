@@ -987,7 +987,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             finally:
                 store.close()
             return
-        if action not in ("save", "delete_template", "delete_recent", "list"):
+        if action not in ("delete_recent", "list"):
             self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
             return
         token = self.get_token() if self.get_token else None
@@ -1002,38 +1002,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         try:
             role = perm.normalize_role(store.get_user_role(telegram_id))
 
-            if action == "save":
-                kind = payload.get("kind")
-                required_permission = _PERMISSION_BY_KIND.get(kind)
-                operation_id = payload.get("category_operation_id")
-                operation = store.get_operation(operation_id) if operation_id is not None else None
-                # antiseptic (окрема форма антисептирования) переиспользує
-                # РЕАЛЬНІ sale-категорії (Доска AD/KD) - шаблон лише позначає
-                # їх ІНШИМ "кошиком" (kind="antiseptic"), сама категорія в
-                # bot_operations так і лишається kind="sale". Тому тут окремо
-                # приймаємо operation[2]=="sale" за kind=="antiseptic".
-                operation_kind_matches = operation is not None and (
-                    operation[2] == kind or (kind == "antiseptic" and operation[2] == "sale")
-                )
-                if not operation_kind_matches or required_permission is None:
-                    # Реальна категорія (bot_operations.kind) вирішує право
-                    # доступу, а не те, що клієнт заявив у payload - інакше
-                    # хтось із лише income-правом міг би позначити payload
-                    # як kind="income" і зберегти шаблон для sale-категорії.
-                    self._send_json(400, {"ok": False, "error": "Не выбрана категория."})
-                    return
-                if not perm.has_permission(role, required_permission):
-                    self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                    return
-                store.add_operation_template(
-                    kind, operation_id,
-                    breed=payload.get("breed"), thickness=payload.get("thickness"),
-                    width=payload.get("width"), length=payload.get("length"),
-                    client=payload.get("client"), address=payload.get("address"),
-                    payment_method=payload.get("payment_method"),
-                )
-                kind_for_response = kind
-            elif action == "list":
+            if action == "list":
                 # Задача користувача (шаблони): панель раніше вбудовувалась
                 # у сам web_app-URL - реальний баг, який зламав УСІ
                 # sale/income/writeoff-відповіді (URL переріс ліміт розміру
@@ -1050,17 +1019,6 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
                     self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
                     return
                 kind_for_response = kind
-            elif action == "delete_template":
-                template_id = payload.get("template_id")
-                row = store.get_operation_template(template_id) if template_id is not None else None
-                if row is not None:
-                    _row_id, row_kind, _category_operation_id = row
-                    required_permission = _PERMISSION_BY_KIND.get(row_kind)
-                    if required_permission is not None and not perm.has_permission(role, required_permission):
-                        self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                        return
-                    store.delete_operation_template(template_id)
-                kind_for_response = row[1] if row is not None else payload.get("kind")
             else:
                 recent_id = payload.get("recent_id")
                 row = store.get_operation_recent_use(recent_id) if recent_id is not None else None
@@ -1076,9 +1034,8 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             if kind_for_response not in _PERMISSION_BY_KIND:
                 self._send_json(400, {"ok": False, "error": "Неизвестный тип операции."})
                 return
-            templates = operation_template_entries(store, store.list_operation_templates(kind_for_response), "template")
             recent = operation_template_entries(store, store.recent_operation_uses(kind_for_response), "recent")
-            self._send_json(200, {"ok": True, "templates": templates, "recent": recent})
+            self._send_json(200, {"ok": True, "recent": recent})
         finally:
             store.close()
 

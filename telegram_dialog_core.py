@@ -220,14 +220,9 @@ class CoreDialogMixin:
             # pending-операцією) - перевіряється РАНІШЕ звичайного розгалуження
             # нижче, бо збереження шаблону не залежить від того, чи є зараз
             # активна операція.
-            if submitted.get("save_template"):
-                reply = self._save_operation_template_reply(store, context, submitted)
-                return reply
             # Задача користувача: "завжди може видалити історію чи шаблон по
             # 1 рядку" - той самий термінальний "закриває Mini App і одразу
             # перевідкриває форму" патерн, що й save_template вище.
-            if submitted.get("delete_template"):
-                return self._delete_operation_template_reply(store, context, submitted)
             if submitted.get("delete_recent"):
                 return self._delete_operation_recent_use_reply(store, context, submitted)
             if not pending_before:
@@ -1202,42 +1197,6 @@ class CoreDialogMixin:
     def _webapp_operation_template_entries(self, store, rows, source):
         return operation_template_entries(store, rows, source)
 
-    # "Сохранить шаблон" ЗАВЖДИ закриває Mini App (Telegram.WebApp.sendData
-    # так влаштований - жодного проміжного round-trip без закриття не існує),
-    # тому відповідь одразу пропонує ту саму "Заполнить форму..."-кнопку -
-    # людина повертається до порожньої форми, де новий шаблон уже видно
-    # у списку зверху.
-    def _save_operation_template_reply(self, store, context, submitted):
-        kind = submitted.get("kind")
-        permission_by_kind = {
-            "sale": perm.SALE_CREATE,
-            "income": perm.INCOME,
-            "writeoff": perm.WRITEOFF,
-            "antiseptic": perm.SALE_CREATE,
-        }
-        required_permission = permission_by_kind.get(kind)
-        if required_permission is None:
-            return self._with_main_menu("Не удалось сохранить шаблон: неизвестный тип операции.", store)
-        denied = self._require_permission(store, context, required_permission)
-        if denied:
-            return denied
-        operation_id = submitted.get("category_operation_id")
-        operation = store.get_operation(operation_id) if operation_id is not None else None
-        if operation is None:
-            return self._with_main_menu("Не удалось сохранить шаблон: не выбрана категория.", store)
-        store.add_operation_template(
-            kind,
-            operation_id,
-            breed=submitted.get("breed"),
-            thickness=submitted.get("thickness"),
-            width=submitted.get("width"),
-            length=submitted.get("length"),
-            client=submitted.get("client"),
-            address=submitted.get("address"),
-            payment_method=submitted.get("payment_method"),
-        )
-        return self._prepend_reply_text("Шаблон сохранён.", self._reopen_operation_all_in_one_form(store, context, kind))
-
     def _record_webapp_operation_use(self, store, kind, operation_id, payload):
         if operation_id is None:
             return
@@ -1255,11 +1214,15 @@ class CoreDialogMixin:
             payment_method=payload.get("payment_method"),
         )
 
+    # "Сохранить шаблон" ЗАВЖДИ закриває Mini App (Telegram.WebApp.sendData
+    # так влаштований - жодного проміжного round-trip без закриття не існує),
+    # тому відповідь одразу пропонує ту саму "Заполнить форму..."-кнопку -
+    # людина повертається до порожньої форми, де новий шаблон уже видно
+    # у списку зверху.
+    # Рішення користувача (2026-09-06): шаблонів більше нема - у контексті
+    # форми лише «Недавние».
     def _webapp_templates_ctx(self, store, kind):
         return {
-            "templates": self._webapp_operation_template_entries(
-                store, store.list_operation_templates(kind), "template",
-            ),
             "recent": self._webapp_operation_template_entries(
                 store, store.recent_operation_uses(kind), "recent",
             ),
@@ -1269,34 +1232,6 @@ class CoreDialogMixin:
     # термінальний патерн, що й збереження: sendData() закриває Mini App,
     # тому відповідь одразу перевідкриває ту саму форму (вже без видаленого
     # рядка).
-    def _delete_operation_template_reply(self, store, context, submitted):
-        kind = submitted.get("kind")
-        permission_by_kind = {
-            "sale": perm.SALE_CREATE,
-            "income": perm.INCOME,
-            "writeoff": perm.WRITEOFF,
-            "antiseptic": perm.SALE_CREATE,
-        }
-        required_permission = permission_by_kind.get(kind)
-        if required_permission is None:
-            return self._with_main_menu("Не удалось удалить шаблон: неизвестный тип операции.", store)
-        denied = self._require_permission(store, context, required_permission)
-        if denied:
-            return denied
-        template_id = submitted.get("template_id")
-        # Реальна знахідка (аудит коду, 2026-08-16): право на видалення
-        # перевірялось за kind, який НАДІСЛАВ клієнт, а не за реальним
-        # kind рядка в БД - користувач із правом лише на "writeoff" міг
-        # надіслати kind="writeoff" і template_id чужого "sale"-шаблону, і
-        # право пройшло б перевірку вище, хоча реально видаляється чужий
-        # рядок. Звіряємо ще й РЕАЛЬНИЙ kind рядка перед видаленням - той
-        # самий тихий idempotent-паттерн, що й для template_id is None.
-        if template_id is not None:
-            row = store.get_operation_template(template_id)
-            if row is not None and row[1] == kind:
-                store.delete_operation_template(template_id)
-        return self._prepend_reply_text("Шаблон удалён.", self._reopen_operation_all_in_one_form(store, context, kind))
-
     def _delete_operation_recent_use_reply(self, store, context, submitted):
         kind = submitted.get("kind")
         permission_by_kind = {

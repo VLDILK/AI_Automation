@@ -3232,71 +3232,6 @@ class ExcelSqliteStore:
     # панель (шаблони і недавні окремо).
     _OPERATION_TEMPLATE_LIMIT = 3
 
-    def add_operation_template(
-        self, kind, category_operation_id, breed=None, thickness=None, width=None,
-        length=None, client=None, address=None, payment_method=None,
-    ):
-        # Задача користувача: "мають бути лише унікальні шаблони. однакових
-        # там не має бути" - унікальність рахується за тим, що РЕАЛЬНО
-        # показано в рядку панелі (категорія/порода/розмір/спосіб оплати),
-        # а НЕ за клієнтом/адресою - вони в списку взагалі не відображаються,
-        # тож два шаблони, що відрізняються лише невидимим клієнтом,
-        # виглядали б як дублікат. "IS" (не "=") коректно порівнює й NULL.
-        with self.conn:
-            existing = self.conn.execute(
-                """
-                SELECT id FROM operation_templates
-                WHERE kind = ? AND category_operation_id = ?
-                  AND breed IS ? AND thickness IS ? AND width IS ? AND length IS ?
-                  AND payment_method IS ?
-                """,
-                (kind, category_operation_id, breed, thickness, width, length, payment_method),
-            ).fetchone()
-            if existing is not None:
-                return
-            now = datetime.now().isoformat(timespec="seconds")
-            self.conn.execute(
-                """
-                INSERT INTO operation_templates
-                    (kind, category_operation_id, breed, thickness, width, length,
-                     client, address, payment_method, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (kind, category_operation_id, breed, thickness, width, length, client, address, payment_method, now),
-            )
-            # Задача користувача: рівно 5 рядків на панель — найстаріший
-            # шаблон цього kind мовчки поступається місцем новому 6-му,
-            # без окремого видалення користувачем (той самий "FIFO-вітрина"
-            # принцип, що й у db-знімків/резервних копій).
-            excess_ids = [
-                row[0]
-                for row in self.conn.execute(
-                    "SELECT id FROM operation_templates WHERE kind = ? ORDER BY created_at DESC, id DESC",
-                    (kind,),
-                ).fetchall()[self._OPERATION_TEMPLATE_LIMIT:]
-            ]
-            if excess_ids:
-                placeholders = ",".join("?" for _ in excess_ids)
-                self.conn.execute(f"DELETE FROM operation_templates WHERE id IN ({placeholders})", excess_ids)
-
-    def list_operation_templates(self, kind, limit=_OPERATION_TEMPLATE_LIMIT):
-        return self.conn.execute(
-            """
-            SELECT id, category_operation_id, breed, thickness, width, length, client, address, payment_method
-            FROM operation_templates WHERE kind = ? ORDER BY created_at DESC, id DESC LIMIT ?
-            """,
-            (kind, limit),
-        ).fetchall()
-
-    def delete_operation_template(self, template_id):
-        with self.conn:
-            self.conn.execute("DELETE FROM operation_templates WHERE id = ?", (template_id,))
-
-    # "5 останніх створених" — жива історія подань мега-форми, наповнюється
-    # автоматично (record_operation_use), не користувачем. Дедуплікація —
-    # у Python (recent_operation_uses), не в SQL: ключ поєднує кілька NULL-
-    # придатних полів (client/payment_method відсутні для income/writeoff),
-    # а SQLite DISTINCT трактує NULL непередбачувано для такого випадку.
     def record_operation_use(
         self, kind, category_operation_id, breed=None, thickness=None, width=None,
         length=None, client=None, address=None, payment_method=None,
@@ -3351,12 +3286,6 @@ class ExcelSqliteStore:
             if len(unique) >= limit:
                 break
         return unique
-
-    def get_operation_template(self, template_id):
-        return self.conn.execute(
-            "SELECT id, kind, category_operation_id FROM operation_templates WHERE id = ?",
-            (template_id,),
-        ).fetchone()
 
     def get_operation_recent_use(self, use_id):
         return self.conn.execute(

@@ -1362,21 +1362,15 @@
     // кнопка "Заполнить форму" (telegram_dialog_core.py:
     // _delete_operation_template_reply/_reopen_operation_all_in_one_form) -
     // один тап замість нуля, але без загадкового initData.
+    // Рішення користувача (2026-09-06): шаблонів більше нема - видаляються
+    // лише записи «Недавние».
     function deleteTemplateEntry(entry) {
       var state = categoryState[String(entry.category_operation_id)];
       var kind = state ? state.kind : null;
-      var isRecent = entry.source === "recent";
-      var confirmText = (isRecent ? "Удалить запись из истории: " : "Удалить шаблон: ") +
+      var confirmText = "Удалить запись из истории: " +
         templateRowText(entry, 0).replace(/^1\.\s*/, "") + "?";
       confirmWithTelegram(confirmText, function () {
-        var payload = { kind: kind };
-        if (isRecent) {
-          payload.delete_recent = true;
-          payload.recent_id = entry.id;
-        } else {
-          payload.delete_template = true;
-          payload.template_id = entry.id;
-        }
+        var payload = { kind: kind, delete_recent: true, recent_id: entry.id };
         // Реальний ризик (аудит коду, 2026-08-14): на відміну від
         // sendPayload/actuallySendSinglePayload, тут не було перевірки "чи
         // взагалі є tg" - при відкритті сторінки поза Telegram (локальний
@@ -1440,29 +1434,15 @@
     // "Сохранить как шаблон" перенесено донизу форми (перед "Продолжить
     // продажу") - фактична вставка в DOM відбувається нижче, поруч з
     // addPositionButton; тут кнопка лише створюється.
-    var saveTemplateButton = document.createElement("button");
-    saveTemplateButton.type = "button";
-    saveTemplateButton.className = "save-template-button";
-    saveTemplateButton.textContent = "Сохранить как шаблон";
-
-    // Задача користувача: "коли я беру зберегти шаблон і мене викидує з
-    // операції - жах, прибери це... той шаблон відразу має бути у
-    // відповідній строці" - панель перемальовується НА МІСЦІ (без sendData,
-    // без закриття Mini App) щоразу, коли з'являється/зникає перший/
-    // останній рядок; порожня панель взагалі не займає місця в формі.
-    // Панель шаблонів лишається зверху (біля статусу "Сохранено") - вона
-    // потрібна для швидкого заповнення форми ДО введення даних, на відміну
-    // від самої кнопки збереження, яка природньо йде в кінці.
     var templatePanel = document.createElement("div");
     templatePanel.className = "template-panel";
     var templatePanelInserted = false;
-    function renderTemplatePanel(templates, recent) {
-      templates = templates || [];
+    // Рішення користувача (2026-09-06): шаблонів більше нема - лише «Недавние».
+    function renderTemplatePanel(_templates, recent) {
       recent = recent || [];
       templatePanel.innerHTML = "";
-      var hasAny = templates.length || recent.length;
+      var hasAny = recent.length;
       if (hasAny) {
-        templatePanel.appendChild(buildTemplateColumn("Шаблоны", templates));
         templatePanel.appendChild(buildTemplateColumn("Недавние", recent));
       }
       if (hasAny && !templatePanelInserted) {
@@ -1479,56 +1459,6 @@
     // recent усередині.
     renderTemplatePanel(ctx.templates || [], ctx.recent || []);
 
-    saveTemplateButton.addEventListener("click", function () {
-      var key = categorySelect.value;
-      var state = categoryState[key];
-      if (!state || state.kind === "service") {
-        errorEl.textContent = "Шаблоны недоступны для антисептирования.";
-        return;
-      }
-      var breed = state.flatInputs.breed ? readFieldValue(state.flatInputs.breed) : "";
-      var thickness = state.rowInputs.thickness ? readFieldValue(state.rowInputs.thickness) : "";
-      var width = state.rowInputs.width ? readFieldValue(state.rowInputs.width) : "";
-      var length = state.rowInputs.length ? readFieldValue(state.rowInputs.length) : "";
-      if (!thickness || !width || !length) {
-        errorEl.textContent = "Заполните размер (толщина/ширина/длина), прежде чем сохранять шаблон.";
-        return;
-      }
-      errorEl.textContent = "";
-      var templatePayload = {
-        save_template: true,
-        kind: state.kind,
-        category_operation_id: Number(key),
-        breed: breed,
-        thickness: thickness,
-        width: width,
-        length: length,
-      };
-      if (commonInputs.client) {
-        templatePayload.client = readFieldValue(commonInputs.client);
-      }
-      if (commonInputs.address) {
-        templatePayload.address = readFieldValue(commonInputs.address);
-      }
-      if (commonInputs.payment_method) {
-        templatePayload.payment_method = readFieldValue(commonInputs.payment_method);
-      }
-      // Задача користувача: "зберіг шаблон, викинуло до бота, відразу
-      // питання повернутись - так і погнали" - sendData() гарантовано
-      // працює (Telegram сам авторизує через chat_id, не потребує initData,
-      // який виявився порожнім на реальних пристроях). Бот одразу відповідає
-      // "Шаблон сохранён." + кнопкою "Заполнить форму" (уже наявний,
-      // перевірений код: _save_operation_template_reply→
-      // _reopen_operation_all_in_one_form).
-      // Той самий guard "чи взагалі є tg", що вже має sendPayload вище
-      // (аудит коду, 2026-08-14) - без нього поза Telegram кнопка кидала б
-      // непіймане TypeError замість зрозумілого fallback.
-      if (tg) {
-        tg.sendData(JSON.stringify(templatePayload));
-      } else {
-        window.alert(JSON.stringify(templatePayload));
-      }
-    });
 
     // Задача користувача (реальний скріншот): "тут коли натискаю, має не
     // переходити назад у чат, а має видати спливаюче вікно підтвердження...
@@ -2391,7 +2321,6 @@
     measureContainer.parentNode.insertBefore(addPositionButton, measureContainer.nextSibling);
     // "Сохранить как шаблон" тепер одразу ПЕРЕД "Продолжить продажу" (за
     // проханням користувача перенести кнопку донизу форми).
-    measureContainer.parentNode.insertBefore(saveTemplateButton, addPositionButton);
 
     // Задача користувача: "змісти кнопку антисептирование вище ціни, між
     // штуками і ціною" - antisepticWrap (чекбокс + розкривний блок) тепер
@@ -2465,8 +2394,8 @@
     var positionTotalLine = document.createElement("div");
     positionTotalLine.className = "position-total-line";
     positionTotalLine.style.display = "none";
-    measureContainer.parentNode.insertBefore(goodsSumLine, saveTemplateButton);
-    measureContainer.parentNode.insertBefore(positionTotalLine, saveTemplateButton);
+    measureContainer.parentNode.insertBefore(goodsSumLine, addPositionButton);
+    measureContainer.parentNode.insertBefore(positionTotalLine, addPositionButton);
 
     relocateAntisepticWrap = function (key) {
       var state = categoryState[key];
