@@ -896,3 +896,93 @@ html, body {
   color: var(--tg-hint);
   white-space: normal;
 }
+
+
+/* «Адрес выгрузки» (2026-09-05): підпис над полем, одне поле зі стрілкою
+   справа (перемикач підказок), список збігів під полем. Селектори точніші
+   за .field/.field label/.field input, бо ті - горизонтальний ряд. */
+.field.suggest-field {
+  display: block;
+}
+
+.field.suggest-field label {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  margin-bottom: 6px;
+}
+
+.field.suggest-field .suggest-control {
+  display: flex;
+  align-items: stretch;
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  background: var(--tg-bg);
+  overflow: hidden;
+  min-height: 42px;
+}
+
+.field.suggest-field .suggest-control:focus-within {
+  border-color: var(--tg-button);
+}
+
+.field.suggest-field .suggest-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 10px;
+  font-size: 17px;
+  color: var(--tg-text);
+  text-align: left;
+  min-height: 0;
+}
+
+.field.suggest-field .suggest-input:focus {
+  outline: none;
+  border: 0;
+}
+
+.field.suggest-field .suggest-arrow {
+  flex: 0 0 42px;
+  width: 42px;
+  border: 0;
+  border-left: 1.5px solid var(--field-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--tg-link, #5aa0f0);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.field.suggest-field .suggest-arrow.suggest-arrow-off {
+  color: var(--tg-hint);
+}
+
+.field.suggest-field .suggest-list {
+  margin-top: 6px;
+  border: 1px solid var(--field-border);
+  border-radius: 10px;
+  background: var(--tg-secondary-bg, var(--tg-bg));
+  overflow: hidden;
+}
+
+.field.suggest-field .suggest-item {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--field-border);
+  font-size: 15px;
+  color: var(--tg-text);
+  cursor: pointer;
+}
+
+.field.suggest-field .suggest-item:last-child {
+  border-bottom: 0;
+}
+
+.field.suggest-field .suggest-item:hover {
+  background: color-mix(in srgb, var(--tg-button) 18%, transparent);
+}

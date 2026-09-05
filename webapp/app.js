@@ -388,6 +388,146 @@
   // значение..." в самому select-і. Обирає людина сама: тапнути список чи
   // просто написати. Взаємовиключність (обрано select -> стирається manual,
   // і навпаки) - лише щоб не виникало питання "яке з двох значень рахувати".
+  // Рішення користувача (2026-09-05): «Адрес выгрузки» - одне поле зі
+  // стрілкою справа. ▾ - під час набору знизу адреси, де якесь слово
+  // починається на введене; ▴ - підказок нема. Стан стрілки - свій у кожного
+  // (хмарне сховище Telegram, запасний варіант - памʼять форми на цьому
+  // пристрої), типово ▾. Нова адреса просто лишається в полі - бот її не
+  // перепитує, вона йде в продаж і наступного разу вже в підказках.
+  var SUGGEST_STATE_KEY = "address_suggest_enabled";
+
+  function cloudStorageAvailable() {
+    return !!(tg && tg.CloudStorage && typeof tg.isVersionAtLeast === "function" && tg.isVersionAtLeast("6.9"));
+  }
+
+  function readSuggestState(callback) {
+    var local = null;
+    try {
+      local = window.localStorage.getItem(SUGGEST_STATE_KEY);
+    } catch (err) {
+      local = null;
+    }
+    callback(local === null ? true : local === "1");
+    if (!cloudStorageAvailable()) {
+      return;
+    }
+    try {
+      tg.CloudStorage.getItem(SUGGEST_STATE_KEY, function (error, value) {
+        if (error || value === undefined || value === null || value === "") {
+          return;
+        }
+        var enabled = value === "1";
+        try {
+          window.localStorage.setItem(SUGGEST_STATE_KEY, enabled ? "1" : "0");
+        } catch (err) {}
+        callback(enabled);
+      });
+    } catch (err) {}
+  }
+
+  function writeSuggestState(enabled) {
+    var text = enabled ? "1" : "0";
+    try {
+      window.localStorage.setItem(SUGGEST_STATE_KEY, text);
+    } catch (err) {}
+    if (!cloudStorageAvailable()) {
+      return;
+    }
+    try {
+      tg.CloudStorage.setItem(SUGGEST_STATE_KEY, text, function () {});
+    } catch (err) {}
+  }
+
+  function buildSuggestField(field, wrap, container) {
+    wrap.classList.add("suggest-field");
+    var control = document.createElement("div");
+    control.className = "suggest-control";
+    var input = document.createElement("input");
+    input.type = "text";
+    input.name = field.key;
+    input.autocomplete = "off";
+    input.className = "suggest-input";
+    var arrow = document.createElement("button");
+    arrow.type = "button";
+    arrow.className = "suggest-arrow";
+    var list = document.createElement("div");
+    list.className = "suggest-list";
+    list.style.display = "none";
+    control.appendChild(input);
+    control.appendChild(arrow);
+    wrap.appendChild(control);
+    wrap.appendChild(list);
+    container.appendChild(wrap);
+
+    var options = (field.options || []).map(function (value) { return String(value); });
+    var enabled = true;
+
+    function matches(text) {
+      var needle = text.trim().toLowerCase();
+      if (!needle) {
+        return [];
+      }
+      return options.filter(function (option) {
+        var lower = option.toLowerCase();
+        if (lower.indexOf(needle) === 0) {
+          return true;
+        }
+        return lower.split(/[\s,.;:/\-]+/).some(function (word) {
+          return word !== "" && word.indexOf(needle) === 0;
+        });
+      }).slice(0, 8);
+    }
+
+    function render() {
+      arrow.textContent = enabled ? "\u25BE" : "\u25B4";
+      arrow.classList.toggle("suggest-arrow-off", !enabled);
+      arrow.title = enabled ? "Подсказки адресов включены" : "Подсказки адресов выключены";
+      if (!enabled || document.activeElement !== input) {
+        list.style.display = "none";
+        return;
+      }
+      var found = matches(input.value);
+      list.innerHTML = "";
+      found.forEach(function (option) {
+        var item = document.createElement("div");
+        item.className = "suggest-item";
+        item.textContent = option;
+        item.addEventListener("mousedown", function (event) {
+          event.preventDefault();
+        });
+        item.addEventListener("click", function () {
+          input.value = option;
+          list.style.display = "none";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          list.style.display = "none";
+        });
+        list.appendChild(item);
+      });
+      list.style.display = found.length ? "" : "none";
+    }
+
+    input.addEventListener("input", render);
+    input.addEventListener("focus", render);
+    input.addEventListener("blur", function () {
+      setTimeout(function () {
+        if (document.activeElement !== input) {
+          list.style.display = "none";
+        }
+      }, 150);
+    });
+    arrow.addEventListener("click", function () {
+      enabled = !enabled;
+      writeSuggestState(enabled);
+      render();
+    });
+    readSuggestState(function (state) {
+      enabled = state;
+      render();
+    });
+    return input;
+  }
+
   function buildFieldElement(field, container) {
     var wrap = document.createElement("div");
     wrap.className = "field";
@@ -397,6 +537,10 @@
     label.textContent = field.label + (field.required === false ? "" : " *");
     applyFieldLabelStyle(label, field.key);
     wrap.appendChild(label);
+
+    if (field.key === "address") {
+      return buildSuggestField(field, wrap, container);
+    }
 
     var widthClass = widthClassFor(field);
     var input;
