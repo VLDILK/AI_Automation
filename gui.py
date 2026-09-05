@@ -76,7 +76,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.19"
+__version__ = "1.1.20"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1762,123 +1762,12 @@ class ExcelViewerApp:
         # над кнопкою "Команди" (раніше висів на головному екрані).
         self._build_theme_toggle(side_panel)
 
-        commands_button = tk.Button(
-            side_panel,
-            text=self._t("Команди"),
-            width=20,
-            height=2,
-            command=self.show_commands,
-        )
-        commands_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        payment_methods_button = tk.Button(
-            side_panel,
-            text=self._t("Способи оплати"),
-            width=20,
-            height=2,
-            command=self.show_payment_methods,
-        )
-        payment_methods_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        display_format_button = tk.Button(
-            side_panel,
-            text=self._t("Формат отображения"),
-            width=20,
-            height=2,
-            command=self.open_display_format_dialog,
-        )
-        display_format_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        button_style_button = tk.Button(
-            side_panel,
-            text=self._t("Формат кнопок"),
-            width=20,
-            height=2,
-            command=self.open_button_style_dialog,
-        )
-        button_style_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        webapp_style_button = tk.Button(
-            side_panel,
-            text=self._t("Оформлення форми Telegram"),
-            width=20,
-            height=2,
-            command=self.open_webapp_style_dialog,
-        )
-        webapp_style_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        request_mode_button = tk.Button(
-            side_panel,
-            text=self._t("Режим обработки запросов"),
-            width=20,
-            height=2,
-            command=self.open_request_processing_mode_dialog,
-        )
-        request_mode_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        # Задача користувача (2026-08-19): "додай кнопку системні команди
-        # чат-боту... галочки на ввімкнення" - /status, /sheets, /first,
-        # /chatid (DEBUG_TOOLS-команди, telegram_dialog_core.py) - можна
-        # вимкнути поштучно, без зміни коду.
-        system_commands_button = tk.Button(
-            side_panel,
-            text=self._t("Системные команды чат-бота"),
-            width=20,
-            height=2,
-            command=self.open_system_commands_dialog,
-        )
-        system_commands_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        # Задача користувача (2026-08-16): "сховай це поки і скрізь це
-        # відключи це важливо" - кнопка "Таблиця Excel" (вибір локального/
-        # онлайн джерела) прибрана з UI. Єдина точка виклику
-        # open_excel_source_dialog в усьому файлі (перевірено грепом) -
-        # прибираючи саме цю кнопку, диспетчер лишається структурно
-        # недосяжним "скрізь", без потреби чіпати сам метод чи
-        # excel_source_status_text. Тимчасово ("поки") - лишено як
-        # закоментований блок нижче для швидкого повернення.
-        # excel_source_button = tk.Button(
-        #     side_panel, text=self._t("Таблиця Excel"), width=20, height=2,
-        #     command=self.open_excel_source_dialog,
-        # )
-        # excel_source_button.pack(anchor="n", fill="x")
-        # excel_source_status_label = tk.Label(
-        #     side_panel, textvariable=self.excel_source_status_text, anchor="w",
-        #     justify="left", wraplength=200, fg="gray40", font=("Segoe UI", 8),
-        # )
-        # excel_source_status_label.pack(anchor="n", fill="x", pady=(2, 12))
-
-        align_table_button = tk.Button(
-            side_panel,
-            text=self._t("Вирівняти таблицю"),
-            width=20,
-            height=2,
-            command=self.align_excel_table,
-        )
-        align_table_button.pack(anchor="n", fill="x", pady=(0, 12))
-        self.align_table_button = align_table_button
-
-        # Задача користувача (2026-08-08, реальний баг живого тестування):
-        # розбіжність "кількість, шт" vs "фізичний вимір" (м3/м2/мп) для
-        # рядка складу вирішується ТІЛЬКИ тут, у GUI — "переходимо загально
-        # на програму де це можливо і зручно робити" (пряма вказівка
-        # користувача, не в бот-чаті).
-        #
-        # Реальний випадок (2026-08-21): бот відмовив у продажу "недостаточно
-        # погонных метров" при 1033 шт на складі - колонка "Остаток, мп" була
-        # порожня. Інструмент існував, але людина його не знайшла: він стояв
-        # ОСТАННІМ у довгій колонці, під сірим написом про час знімка. Тепер
-        # поруч із "Вирівняти таблицю" - обидві правлять ДАНІ складу, а не
-        # налаштовують програму. Назва теж чесніша: та сама кнопка лікує і
-        # кубатуру, і площу, і погонні метри.
-        mismatch_check_button = tk.Button(
-            side_panel,
-            text=self._t("Перевірка залишків (шт / м3 / мп)"),
-            width=20,
-            height=2,
-            command=self.open_quantity_measure_mismatch_dialog,
-        )
-        mismatch_check_button.pack(anchor="n", fill="x", pady=(0, 12))
+        # Задача користувача (2026-09-05): "ці всі кнопки не потрібні більше,
+        # видали їх" - Команди, Способи оплати, Формат отображения, Формат
+        # кнопок, Оформлення форми Telegram, Режим обработки запросов,
+        # Системные команды чат-бота, Вирівняти таблицю, Перевірка залишків.
+        # Самі екрани й методи лишаються в коді (open_*/show_*), без кнопок.
+        self.align_table_button = None
 
 
         # Задача користувача (2026-08-15): "тепер змінюй це на автоматичне
@@ -8057,7 +7946,8 @@ class ExcelViewerApp:
         # роботи - той самий фон-потік + _run_on_main_thread паттерн, що вже
         # використовується для решти файлового I/O в цьому класі (коментар
         # вище про "локальный файл, це швидко" не враховував великі таблиці).
-        self.align_table_button.config(state="disabled")
+        if self.align_table_button is not None:
+            self.align_table_button.config(state="disabled")
 
         def worker():
             error = None
@@ -8067,7 +7957,8 @@ class ExcelViewerApp:
                 error = str(exc)
 
             def finish():
-                self.align_table_button.config(state="normal")
+                if self.align_table_button is not None:
+                    self.align_table_button.config(state="normal")
                 if error:
                     messagebox.showerror(self._t("Вирівняти таблицю"), error)
                 else:
