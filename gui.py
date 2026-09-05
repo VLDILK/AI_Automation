@@ -28,7 +28,7 @@ import urllib.request
 import webbrowser
 from tkinter import ttk, messagebox, filedialog, simpledialog, colorchooser
 from tkinter import font as tkfont
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 
 import excel_source
@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.12"
+__version__ = "1.1.13"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -973,14 +973,12 @@ class ExcelViewerApp:
         # bg/fg/highlight-параметрах. tk.Label замість tk.Button повністю
         # усуває будь-яке нативне промальовування кнопки Windows - лишається
         # голий прямокутник, який сам контролює кожен піксель.
-        self.check_update_button = tk.Label(
-            self.main_menu_frame,
-            text="⟳",
-            font=("Segoe UI", 12),
-            cursor="hand2",
-        )
-        self.check_update_button.bind("<Button-1>", lambda _event: self._manual_check_for_update())
-        self.check_update_button.place(relx=1.0, x=-16, y=52, anchor="ne", width=32, height=32)
+        # Задача користувача (2026-09-05): "з домашки видали кнопку оновлення"
+        # - ручна перевірка "⟳" з головного екрана прибрана: домашку
+        # перезбирає й перезапускає ШІ напряму, кнопка лише займала кут.
+        # _manual_check_for_update лишається для планової перевірки; кнопка
+        # "Оновлення" вище й далі зʼявляється сама, коли є що ставити.
+        self.check_update_button = None
 
         # Задача користувача (2026-08-15): "не має видвати спливаюче
         # вікно-повідомлення... просто тихесенько під кнопкою" - текст під
@@ -1015,13 +1013,6 @@ class ExcelViewerApp:
         ).pack(fill="x", pady=(0, 4))
         self.known_clients_rows = tk.Frame(self.known_clients_frame)
         self.known_clients_rows.pack(fill="x")
-        tk.Label(
-            self.known_clients_frame,
-            text=self._t("Клик по строке — переключиться"),
-            font=("Segoe UI", 8),
-            fg="gray40",
-            anchor="w",
-        ).pack(fill="x", pady=(4, 0))
         self._refresh_known_clients()
 
         # Задача користувача (2026-08-18): "кнопку зміни теми перенес
@@ -1029,18 +1020,9 @@ class ExcelViewerApp:
         # (Canvas, не tk.Button). Задача користувача (наступного дня):
         # "тумблер теми змісти нижче на 150 пікселів" - тепер нижче "⟳"
         # (check_update_button, y=52), а не над ним.
-        theme_toggle_row = tk.Frame(self.main_menu_frame)
-        theme_toggle_row.place(relx=1.0, x=-16, y=162, anchor="ne")
-        self.theme_toggle_label = tk.Label(
-            theme_toggle_row, text=self._t("Тёмная тема"), font=("Segoe UI", 9),
-        )
-        self.theme_toggle_label.pack(side="left", padx=(0, 6))
-        self.theme_toggle_switch = tk.Canvas(
-            theme_toggle_row, width=44, height=22, highlightthickness=0, bd=0, cursor="hand2",
-        )
-        self.theme_toggle_switch.bind("<Button-1>", lambda _event: self._on_theme_toggle())
-        self.theme_toggle_switch.pack(side="left")
-        self._draw_theme_toggle_switch()
+        # Задача користувача (2026-09-05): "тумблер перемикання теми -
+        # перенеси у налаштування... справа вверху, над кнопкою Команди" -
+        # тепер він будується в _build_settings_view (_build_theme_toggle).
 
         menu_panel = tk.Frame(self.main_menu_frame)
         menu_panel.pack(expand=True)
@@ -1681,6 +1663,20 @@ class ExcelViewerApp:
         self.prev_page_button.pack(side="right", padx=4)
 
     # --- Екран налаштувань: режим ШИ, формат дати, довідка ---
+    def _build_theme_toggle(self, parent):
+        theme_toggle_row = tk.Frame(parent)
+        theme_toggle_row.pack(anchor="e", pady=(0, 12))
+        self.theme_toggle_label = tk.Label(
+            theme_toggle_row, text=self._t("Тёмная тема"), font=("Segoe UI", 9),
+        )
+        self.theme_toggle_label.pack(side="left", padx=(0, 6))
+        self.theme_toggle_switch = tk.Canvas(
+            theme_toggle_row, width=44, height=22, highlightthickness=0, bd=0, cursor="hand2",
+        )
+        self.theme_toggle_switch.bind("<Button-1>", lambda _event: self._on_theme_toggle())
+        self.theme_toggle_switch.pack(side="left")
+        self._draw_theme_toggle_switch()
+
     def _build_settings_view(self):
         self.settings_frame = tk.Frame(self.root)
 
@@ -1850,6 +1846,10 @@ class ExcelViewerApp:
             command=lambda: self._on_remote_command_clicked("restart_form"),
         )
         restart_webapp_form_button.pack(side="left")
+
+        # Задача користувача (2026-09-05): тумблер теми - тут, справа вгорі,
+        # над кнопкою "Команди" (раніше висів на головному екрані).
+        self._build_theme_toggle(side_panel)
 
         commands_button = tk.Button(
             side_panel,
@@ -9684,24 +9684,36 @@ class ExcelViewerApp:
     # їх у тіку головного індикатора означало б розтягнути його на секунди.
     _KNOWN_CLIENTS_POLL_INTERVAL_MS = 20000
 
-    def _known_clients_rows_data(self):
-        """[(ім'я, адреса, тип, час останнього сигналу)] - спершу
-        синтетичний "Рабочий" за адресою за замовчуванням, далі всі
-        зареєстровані машини. Синтетичний рядок обов'язковий: стара збірка
-        себе не реєструє взагалі, і без нього робочої машини на екрані
-        просто не було б.
+    # Задача користувача (2026-09-05): "в домашці погано працює відображення
+    # коли клієнт останній раз був у мережі. тестовий показує завжди одну
+    # цифру, а про робочу - взагалі нічого". Причина (перевірено живим
+    # /control/status тестового): клієнти НЕ пишуть у реєстр servers_registry
+    # ("register_this_server вернул False" - без пошти OneDrive нікуди), а
+    # домашка читала 16-денну локальну копію; коли ж звʼязок був - показувала
+    # лише версію без часу взагалі. Тепер час останнього контакту домашка
+    # веде САМА - з власних опитувань (кожні _KNOWN_CLIENTS_POLL_INTERVAL_MS),
+    # у settings.json на кожен hostname; реєстр - лише запасне джерело, коли
+    # він раптом новіший. Обраний варіант 03 із пʼяти: таблиця
+    # Клиент | Версия | Бот | Форма | Последний сигнал; онлайн - просто
+    # "Онлайн" без часу, підказка "Клик по строке" прибрана (клік працює).
+    _KNOWN_CLIENTS_LAST_CONTACT_KEY = "known_clients_last_contact"
+    _KNOWN_CLIENTS_LAST_VERSION_KEY = "known_clients_last_version"
+    # Задача користувача (2026-09-05): "чому читає ім'я пристрою у тесті, а у
+    # основній - просто Рабочий... виправ щоб і в робочому показувало назву
+    # машини". Імʼя машини клієнт і так віддає в живому статусі (поле node,
+    # звичайний platform.node()) - домашка його запамʼятовує, і "Рабочий"
+    # лишається лише доти, доки контакту ще жодного разу не було.
+    _KNOWN_CLIENTS_LAST_NODE_KEY = "known_clients_last_node"
 
-        Час береться з updated_at реєстру - його пише САМ клієнт за своїм
-        годинником, раз на дві хвилини, незалежно від того, увімкнена
-        домашка чи ні. None означає "ця машина себе ще не реєструвала"
-        (клієнт до 0.2.88 такого не вміє), і це не помилка."""
+    def _known_clients_rows_data(self):
+        """[(ім'я, адреса, тип, час із реєстру)] - спершу синтетичний
+        "Рабочий" за адресою за замовчуванням (стара збірка себе не реєструє
+        взагалі), далі всі зареєстровані машини."""
         try:
             servers = servers_registry.read_servers(self._onedrive_shared_email())
         except OSError:
             servers = {}
         default_hostname = paths.cloudflared_tunnel_hostname()
-        # Якщо робоча машина колись зареєструється під тією самою адресою,
-        # синтетичний рядок підхопить її час, а не лишиться без нього.
         default_seen = None
         for server in servers.values():
             if (server.get("hostname") or "").strip() == default_hostname:
@@ -9710,19 +9722,53 @@ class ExcelViewerApp:
         rows = [(self._t("Рабочий"), default_hostname, "main", default_seen)]
         for name, server in sorted(servers.items()):
             hostname = (server.get("hostname") or "").strip()
-            if hostname:
+            if hostname and hostname != default_hostname:
                 rows.append((name, hostname, server.get("kind") or "main", server.get("updated_at")))
         return rows
 
-    # Формат навмисно без секунд: запис іде раз на дві хвилини, плюс
-    # затримка синхронізації OneDrive - секунди створювали б враження
-    # точності, якої тут немає.
-    def _format_last_signal(self, updated_at):
-        if not updated_at:
-            return None
-        moment = servers_registry.parse_updated_at(updated_at)
-        if moment == datetime.min:
-            return None
+    def _known_clients_memory(self, key):
+        value = self.settings.get(key)
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _remember_client_contact(self, hostname, version, node=None):
+        """Вдалий контакт - у памʼять домашки. Пишеться не частіше, ніж раз
+        на хвилину на машину, щоб не переписувати settings.json щодвадцять
+        секунд."""
+        now = datetime.now().replace(microsecond=0).isoformat()
+        contacts = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_CONTACT_KEY)
+        versions = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_VERSION_KEY)
+        nodes = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_NODE_KEY)
+        changed = False
+        if str(contacts.get(hostname) or "")[:16] != now[:16]:
+            contacts[hostname] = now
+            changed = True
+        if version and versions.get(hostname) != version:
+            versions[hostname] = version
+            changed = True
+        if node and nodes.get(hostname) != node:
+            nodes[hostname] = node
+            changed = True
+        if changed:
+            self.settings.set(self._KNOWN_CLIENTS_LAST_CONTACT_KEY, contacts)
+            self.settings.set(self._KNOWN_CLIENTS_LAST_VERSION_KEY, versions)
+            self.settings.set(self._KNOWN_CLIENTS_LAST_NODE_KEY, nodes)
+
+    def _last_contact_for(self, hostname, registry_updated_at):
+        own = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_CONTACT_KEY).get(hostname)
+        moments = [
+            servers_registry.parse_updated_at(value) for value in (own, registry_updated_at) if value
+        ]
+        moments = [moment for moment in moments if moment != datetime.min]
+        return max(moments) if moments else None
+
+    def _format_last_signal(self, moment):
+        if moment is None:
+            return "—"
+        today = date.today()
+        if moment.date() == today:
+            return self._t("сегодня") + " " + moment.strftime("%H:%M")
+        if moment.date() == today - timedelta(days=1):
+            return self._t("вчера") + " " + moment.strftime("%H:%M")
         return moment.strftime("%d.%m %H:%M")
 
     def _switch_active_server(self, hostname):
@@ -9737,35 +9783,67 @@ class ExcelViewerApp:
             return
         self._clear_frame(frame)
         active = remote_control_client.active_hostname()
+        versions_memory = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_VERSION_KEY)
+        nodes_memory = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_NODE_KEY)
+
+        for column, text in enumerate(("", "Клиент", "Версия", "Бот", "Форма", "Последний сигнал")):
+            tk.Label(
+                frame, text=self._t(text) if text else "", font=("Segoe UI", 8, "bold"),
+                fg="gray40", anchor="w",
+            ).grid(row=0, column=column, sticky="w", padx=(0, 10), pady=(0, 2))
+
         states = []
-        for name, hostname, kind, last_seen in self._known_clients_rows_data():
-            row = tk.Frame(frame)
-            row.pack(fill="x", pady=1)
-            dot = tk.Label(row, text="●", font=("Segoe UI", 9), fg="gray40")
-            dot.pack(side="left", padx=(0, 6))
-            title = ("✓ " + name) if hostname == active else name
-            name_label = tk.Label(row, text=title, font=("Segoe UI", 9), anchor="w")
-            name_label.pack(side="left")
-            if kind == "test":
-                tk.Label(
-                    row, text=self._t("тестовый"), font=("Segoe UI", 8),
-                    bg="#fff3d6", fg="#8a5a00", padx=4,
-                ).pack(side="left", padx=(6, 0))
-            state_var = tk.StringVar(value="…")
-            value_label = tk.Label(
-                row, textvariable=state_var, font=("Segoe UI", 9), fg="gray40", anchor="w",
+        for index, (name, hostname, kind, registry_seen) in enumerate(self._known_clients_rows_data(), start=1):
+            dot = tk.Label(frame, text="●", font=("Segoe UI", 9), fg="gray40")
+            dot.grid(row=index, column=0, sticky="w", padx=(0, 4))
+            name_cell = tk.Frame(frame)
+            name_cell.grid(row=index, column=1, sticky="w", padx=(0, 10))
+            # Імʼя машини, якщо домашка його вже чула; інакше імʼя з реєстру
+            # або синтетичне "Рабочий" - до першого контакту.
+            shown_name = nodes_memory.get(hostname) or name
+            name_label = tk.Label(
+                name_cell, text=("✓ " + shown_name) if hostname == active else shown_name,
+                font=("Segoe UI", 9), anchor="w",
             )
-            value_label.pack(side="left", padx=(8, 0))
-            for clickable in (row, name_label, value_label):
-                clickable.configure(cursor="hand2")
-                clickable.bind("<Button-1>", lambda event, h=hostname: self._switch_active_server(h))
+            name_label.pack(side="left")
+            badge = None
+            if kind == "test":
+                badge = tk.Label(
+                    name_cell, text=self._t("тест"), font=("Segoe UI", 8), bg="#fff3d6", fg="#8a5a00", padx=4,
+                )
+                badge.pack(side="left", padx=(6, 0))
+            version_var = tk.StringVar(value=versions_memory.get(hostname) or "—")
+            version_label = tk.Label(frame, textvariable=version_var, font=("Consolas", 9), anchor="w")
+            version_label.grid(row=index, column=2, sticky="w", padx=(0, 10))
+            bot_label = tk.Label(frame, text="—", font=("Segoe UI", 9), fg="gray40", anchor="w")
+            bot_label.grid(row=index, column=3, sticky="w", padx=(0, 10))
+            form_label = tk.Label(frame, text="—", font=("Segoe UI", 9), fg="gray40", anchor="w")
+            form_label.grid(row=index, column=4, sticky="w", padx=(0, 10))
+            signal_var = tk.StringVar(
+                value=self._format_last_signal(self._last_contact_for(hostname, registry_seen))
+            )
+            signal_label = tk.Label(frame, textvariable=signal_var, font=("Segoe UI", 9), fg="gray40", anchor="w")
+            signal_label.grid(row=index, column=5, sticky="w")
+            clickable = [dot, name_cell, name_label, version_label, bot_label, form_label, signal_label]
+            if badge is not None:
+                clickable.append(badge)
+            for widget in clickable:
+                widget.configure(cursor="hand2")
+                widget.bind("<Button-1>", lambda event, h=hostname: self._switch_active_server(h))
             states.append({
-                "hostname": hostname, "dot": dot, "var": state_var,
-                "last_seen": self._format_last_signal(last_seen),
+                "hostname": hostname, "registry_seen": registry_seen, "dot": dot,
+                "version": version_var, "bot": bot_label, "form": form_label, "signal": signal_var,
+                "name_label": name_label, "is_active": hostname == active,
             })
         self._apply_theme(frame)
 
         generation = self._known_clients_generation = getattr(self, "_known_clients_generation", 0) + 1
+
+        def alive_mark(label, alive):
+            if alive is None:
+                label.configure(text="—", fg="gray40")
+            else:
+                label.configure(text="●", fg="#1D9E75" if alive else "#B23B3B")
 
         def worker():
             for item in states:
@@ -9778,20 +9856,22 @@ class ExcelViewerApp:
                         return
                     if status is None:
                         item["dot"].configure(fg="#B23B3B")
-                        # Вибір користувача (варіант 5 з пʼяти показаних):
-                        # час видно ЛИШЕ коли зв'язку немає - поки машина
-                        # відповідає, у рядку корисніша її версія.
-                        if item["last_seen"]:
-                            item["var"].set(
-                                self._t("нет связи с {moment}").format(moment=item["last_seen"])
-                            )
-                        else:
-                            item["var"].set(self._t("нет связи"))
+                        alive_mark(item["bot"], None)
+                        alive_mark(item["form"], None)
+                        item["signal"].set(
+                            self._format_last_signal(self._last_contact_for(item["hostname"], item["registry_seen"]))
+                        )
                         return
+                    version = (status.get("version") or "").strip() or self._t("старая")
                     item["dot"].configure(fg="#1D9E75")
-                    # Порожня версія = збірка, старша за поле version. Це
-                    # факт, а не збій - той самий напис, що й у "Серверах".
-                    item["var"].set((status.get("version") or "").strip() or self._t("старая"))
+                    item["version"].set(version)
+                    alive_mark(item["bot"], status.get("bot_alive") if "bot_alive" in status else None)
+                    alive_mark(item["form"], status.get("webapp_alive") if "webapp_alive" in status else None)
+                    item["signal"].set(self._t("Онлайн"))
+                    node = (status.get("node") or "").strip()
+                    if node:
+                        item["name_label"].configure(text=("✓ " + node) if item["is_active"] else node)
+                    self._remember_client_contact(item["hostname"], version, node)
 
                 self._run_on_main_thread(apply)
 
