@@ -775,3 +775,17 @@ html, body {
 .exchange-summary-title.take {
   color: #2C7A57;
 }
+
+/* Коментар на екрані перевірки обміну - окремий блок зі своїм заголовком
+   і відступом, щоб не зливався з "Получаем" (зауваження користувача
+   2026-09-05 із живого тесту). */
+.exchange-summary-title.comment {
+  color: var(--tg-hint);
+  margin-top: 12px;
+}
+
+.exchange-summary-comment {
+  padding: 6px 10px;
+  border-left: 3px solid var(--field-border);
+  color: var(--tg-text);
+}

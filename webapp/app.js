@@ -3110,7 +3110,9 @@
             text += ", " + dims;
           }
           if (row.quantity) {
-            text += " × " + row.quantity;
+            // Зауваження користувача (2026-09-05, живий тест): "додай до
+            // цифр з штуками - шт" - і в кошику, і на екрані перевірки.
+            text += " × " + row.quantity + " шт";
           }
           var measureText = computeMeasureText(cat && cat.product, row.thickness, row.width, row.length, row.quantity);
           if (measureText) {
@@ -3322,8 +3324,16 @@
       section("Отдаём", "give", giveItems);
       section("Получаем", "take", takeItems);
       if (comment) {
+        // Зауваження користувача (2026-09-05): "коментар виділи, щоб не
+        // зливався із отриманням" - окремий блок зі своїм заголовком і
+        // відступом, як у "Отдаём"/"Получаем".
+        var commentHeading = document.createElement("div");
+        commentHeading.className = "exchange-summary-title comment";
+        commentHeading.textContent = "Комментарий";
+        wrap.appendChild(commentHeading);
         var commentLine = document.createElement("div");
-        commentLine.textContent = "Комментарий: " + comment;
+        commentLine.className = "exchange-summary-comment";
+        commentLine.textContent = comment;
         wrap.appendChild(commentLine);
       }
       return wrap;
