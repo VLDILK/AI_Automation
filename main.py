@@ -39,6 +39,7 @@ from warehouse_data import (
     sync_sheets_to_excel,
 )
 from telegram_dialog import TelegramApiError, TelegramDialogMixin
+import single_instance
 
 TELEGRAM_POLL_TIMEOUT = 5
 
@@ -629,6 +630,14 @@ def _show_startup_splash(root):
 
 if __name__ == "__main__":
     from gui import ExcelViewerApp
+
+    # Задача користувача (2026-09-05): "заборонити програмі повторний запуск
+    # копії, якщо вже на даному ПК є запущена ця програма" - ДО будь-якого
+    # вікна й до відкриття бази: друга копія лише каже про себе, піднімає
+    # вікно першої й виходить (single_instance.py).
+    if not single_instance.is_free(single_instance.HOME_LOCK_NAME):
+        single_instance.report_second_copy()
+        raise SystemExit(0)
 
     root = tk.Tk()
     root.withdraw()

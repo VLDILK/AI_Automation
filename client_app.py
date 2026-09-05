@@ -85,6 +85,7 @@ from warehouse_data import (
 )
 import webapp_server
 from webapp_server import WebappServer
+import single_instance
 
 # Задача користувача: "потрібно ще все інше доробити" (Журналы/Персонал -
 # після stub-заглушок) - короткі російські назви днів тижня для форматування
@@ -5917,12 +5918,25 @@ def _run_watchdog_check():
         # перевірка коректно перезапустить.
         marker.unlink(missing_ok=True)
         return
-    subprocess.Popen([str(exe_path)])
+    # --from-watchdog: якщо tasklist вище копію все ж пропустив (вузьке
+    # вікно між двома перевірками), нова копія впреться в замок
+    # single_instance і має вийти МОВЧКИ - вікно "уже запущена" посеред
+    # екрана без жодного кліку людини було б несподіванкою, а не поясненням.
+    subprocess.Popen([str(exe_path), "--from-watchdog"])
 
 
 if __name__ == "__main__":
     if "--watchdog-check" in sys.argv:
         _run_watchdog_check()
     else:
+        # Задача користувача (2026-09-05): "заборонити програмі повторний
+        # запуск копії, якщо вже на даному ПК є запущена ця програма" - ДО
+        # будь-якого вікна, тунелю й бази: друга копія каже про себе,
+        # піднімає вікно першої й виходить (single_instance.py). Перевірка
+        # сторожа (--watchdog-check вище) замок НЕ бере - інакше щохвилини
+        # вважала б програму запущеною сама через себе.
+        if not single_instance.is_free(single_instance.CLIENT_LOCK_NAME):
+            single_instance.report_second_copy(silent="--from-watchdog" in sys.argv)
+            raise SystemExit(0)
         app = ClientApp()
         app.mainloop()
