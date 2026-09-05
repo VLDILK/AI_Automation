@@ -1006,20 +1006,27 @@ def apply_workbook_repairs(plan, settings=None, include_warehouse=True):
             report["sheets"].append(sheet_name)
             touched = True
 
+    # Кілька нових колонок в одному листі (KD за номіналом: чотири в ПРОДАЖА)
+    # мають той самий previous_last_column з плану - пишуться ОДНИМ викликом
+    # із послідовними номерами, інакше лягали б одна поверх одної.
+    columns_by_sheet = {}
     for item in plan["columns"]:
-        previous = item["previous_last_column"]
+        columns_by_sheet.setdefault(item["sheet"], []).append(item)
+    for sheet_name, items in columns_by_sheet.items():
+        previous = items[0]["previous_last_column"]
         data = xlsx_columns.append_columns(
-            data, item["sheet"], item["header_row"],
+            data, sheet_name, items[0]["header_row"],
             [{
-                "index": previous + 1,
+                "index": previous + 1 + offset,
                 "header": item["header"],
                 "style_from_index": previous or None,
                 "values": {},
                 "width": _planned_column_width(item["header"], settings),
-            }],
+            } for offset, item in enumerate(items)],
             previous,
         )
-        report["columns"].append((item["sheet"], item["header"]))
+        for item in items:
+            report["columns"].append((item["sheet"], item["header"]))
         touched = True
 
     if include_warehouse and plan["warehouse"]:
@@ -4918,6 +4925,11 @@ WRITEOFF_SHEET_NAME = "СПИСАНИЕ"
 # блоку належить рядок, а "Обмен №" звʼязує всі рядки однієї операції.
 # Гроші й контрагент сюди СВІДОМО не закладені - користувач на це ще не
 # відповів; коли відповість, колонки допише той самий механізм звірки.
+# KD за номіналом: перемикач клієнта "Показывать группе расчёт при списании
+# другого размера". None/True - група бачить те саме, що автор; False - копія
+# для групи без підміни розміру й без доходу по перерахунку.
+GROUP_SEES_SIZE_RECALC_SETTING = "group_sees_size_recalc"
+
 EXCHANGE_SHEET_NAME = "ОБМЕН"
 # Задача користувача: "нащо в стовбцю дата час з секундами? прибери. лівіше
 # додай окрему колонку точний час" - "Дата" лишається чистою датою (як і
@@ -4950,6 +4962,12 @@ _WRITEOFF_SHEET_HEADERS = [
 _REQUIRED_OPERATION_AUTHOR_COLUMNS = [
     (WRITEOFF_SHEET_NAME, "Менеджер"),
     (SALES_SHEET_NAME, "Менеджер (итог)"),
+    # KD за номіналом (рішення 2026-09-05): чотири колонки "як продано" і
+    # "Доход по пересчету" у наявний лист ПРОДАЖА - через ту саму звірку.
+    (SALES_SHEET_NAME, "Продано как"),
+    (SALES_SHEET_NAME, "Объем как продано, м3"),
+    (SALES_SHEET_NAME, "Сумма как продано, MDL"),
+    (SALES_SHEET_NAME, "Доход по пересчету, MDL"),
     (ANTISEPTIC_SHEET_NAME, "Ответственный"),
     (INCOME_SHEET_NAME, "Менеджер"),
 ]
@@ -4989,6 +5007,13 @@ _SALES_SHEET_HEADERS = [
     "Расчетный метраж, мп",
     "Итоговый метраж, мп",
     "Адрес выгрузки",
+    # KD за номіналом (рішення 2026-09-05): основні колонки - фактичний
+    # списаний розмір і сума за ним; ці чотири - як продано клієнту й
+    # різниця. Валюта в заголовку, як у інших листах. Без підміни - порожні.
+    "Продано как",
+    "Объем как продано, м3",
+    "Сумма как продано, MDL",
+    "Доход по пересчету, MDL",
 ]
 
 # АНТИСЕПТИРОВАНИЕ: реальний файл має інформаційний KPI-блок (формули)
@@ -5541,17 +5566,22 @@ def execute_operation_write(store, operation_id, item, row_values, columns, shee
             add_to_row_value(row_values, column_index, amount)
 
 
-def income_item_size(item):
-    text = (
+def plain_item_size(item):
+    """Розмір "50x150x6000" без жодних суфіксів."""
+    return (
         f"{_display_bot_number(item['thickness'])}x"
         f"{_display_bot_number(item['width'])}x"
         f"{_display_bot_number(item['length'])}"
     )
+
+
+def income_item_size(item):
+    text = plain_item_size(item)
     # KD за номіналом (ТЗ пункт 2): продали 50x150, списали обраний 47x150 -
     # людина має бачити обидва розміри скрізь, де показується позиція.
     if item.get("stock_thickness") is not None:
         text += (
-            f" (со склада {_display_bot_number(item['stock_thickness'])}x"
+            f" (списывается {_display_bot_number(item['stock_thickness'])}x"
             f"{_display_bot_number(item['stock_width'])}x"
             f"{_display_bot_number(item['stock_length'])})"
         )
@@ -5666,6 +5696,10 @@ def sales_columns(headers):
         "sku": ["Код позиции (SKU)", "SKU"],
         "comment": ["Комментарий"],
         "manual_manager": ["Менеджер вручную"],
+        "sold_as": ["Продано как"],
+        "sold_as_volume": ["Объем как продано, м3"],
+        "sold_as_amount": ["Сумма как продано, MDL"],
+        "recalc_income": ["Доход по пересчету, MDL"],
     }
     normalized_headers = {
         _normalize_phrase(header): index
@@ -5687,6 +5721,11 @@ def sales_columns(headers):
 
 def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map, now, document_number=None):
     headers = store.get_headers(SALES_SHEET_NAME)
+    # KD за номіналом: у листі - фактичний списаний розмір, його вимір і сума
+    # за ним ("прибуток - за 47x150"); введений (номінальний) - у колонках
+    # "Продано как" / "Сумма как продано" / "Доход по пересчету".
+    sold_as = item if item.get("stock_thickness") is not None else None
+    item = _stock_view(item)
     values = [""] * len(headers)
     columns = sales_columns(headers)
     user = payload.get("user") or {}
@@ -5746,7 +5785,7 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
 
     price_per_unit = payload.get("price_per_unit")
     set_value(values, columns.get("price_per_unit"), price_per_unit)
-    total_amount = payload.get("total_amount")
+    total_amount = None if sold_as is not None else payload.get("total_amount")
     if total_amount in (None, "") and price_per_unit not in (None, ""):
         if is_linear:
             measure_for_price = item.get("linear")
@@ -5772,6 +5811,26 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
     if payload.get("comment"):
         comment_parts.append(payload["comment"])
     set_value(values, columns.get("comment"), " | ".join(part for part in comment_parts if part))
+    if sold_as is not None:
+        if is_linear:
+            nominal_measure = sold_as.get("linear")
+        elif is_area:
+            nominal_measure = sold_as.get("area")
+        elif is_volume:
+            nominal_measure = sold_as.get("volume")
+        else:
+            nominal_measure = sold_as.get("quantity")
+        set_value(values, columns.get("sold_as"), plain_item_size(sold_as))
+        if is_volume and not is_area and not is_linear:
+            set_value(values, columns.get("sold_as_volume"), sold_as.get("volume"))
+        if price_per_unit not in (None, ""):
+            sold_as_amount = _priced_amount(price_per_unit, nominal_measure)
+            set_value(values, columns.get("sold_as_amount"), sold_as_amount)
+            set_value(
+                values,
+                columns.get("recalc_income"),
+                round(_number_value(sold_as_amount) - _number_value(total_amount), 2),
+            )
     return values
 
 
@@ -6024,6 +6083,23 @@ def _next_document_number(store, sheet_name, current_count_fallback):
 # адреса, коментар, назва товару/породи), яке потрапляє в ці 4 функції.
 def _esc(value):
     return html.escape(str(value)) if value is not None else ""
+
+
+def sale_recalc_income(position):
+    """Дохід по перерахунку позиції (KD за номіналом): ціна × (введений вимір
+    − фактично списаний). 0, якщо підміни розміру не було."""
+    price = _number_value(position.get("price_per_unit"))
+    if price <= 0:
+        return 0.0
+    total = 0.0
+    for item in position.get("rows") or []:
+        if item.get("stock_thickness") is None:
+            continue
+        measure_kind = item_measure_kind(item)
+        if measure_kind is None:
+            continue
+        total += price * (_number_value(item.get(measure_kind)) - _number_value(item.get("stock_" + measure_kind)))
+    return round(total, 2)
 
 
 def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
@@ -6308,12 +6384,14 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                 "payload": position_payload,
                 "rows": [],
                 "total_amount": 0.0,
+                "recalc_income": 0.0,
                 "antiseptic_volume": 0.0,
                 "antiseptic_sum": 0.0,
             })
         group = groups[group_index_by_key[key]]
         group["rows"].extend(position["rows"])
         group["total_amount"] += _number_value(position.get("total_amount"))
+        group["recalc_income"] += sale_recalc_income(position_payload)
         antiseptic_addon = position.get("antiseptic")
         has_antiseptic = isinstance(antiseptic_addon, dict) and antiseptic_addon.get("volume") and antiseptic_addon.get("price_per_unit")
         if has_antiseptic:
@@ -6322,116 +6400,130 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
             group["antiseptic_volume"] += antiseptic_volume
             group["antiseptic_sum"] += round(antiseptic_volume * antiseptic_price, 2)
 
-    lines = ["Продажа записана:"]
-    index = 0
-    grand_total = 0.0
-    grand_total_goods = 0.0
-    grand_total_antiseptic = 0.0
-    for group_number, group in enumerate(groups, start=1):
-        position_payload = group["payload"]
-        if group_number > 1:
-            lines.append("")
-        header_parts = [_esc(display_product_name(position_payload)), _esc(position_payload.get("breed"))]
-        if position_payload.get("condition"):
-            header_parts.append(_esc(position_payload["condition"]))
-        lines.append(f"Позиция: {' / '.join(part for part in header_parts if part)}")
-        for item in group["rows"]:
-            index += 1
-            measure_kind = item_measure_kind(item)
-            if item.get("row_id") is None:
-                # Рядок-послуга — розмірів немає, показуємо назву товару/послуги
-                # замість "толщинаxширинаxдлина", без мінуса (склад не списаний).
-                position_label = _esc(sheet_product_name(position_payload))
-                if measure_kind is None:
-                    lines.append(f"{index}. {position_label}: {_display_bot_number(item.get('quantity'))} шт")
+    # KD за номіналом: той самий звіт у двох версіях - повна для автора і
+    # для групи (full_info=False: без підміни розміру й доходу по
+    # перерахунку); яку слати в групу, вирішує перемикач клієнта.
+    def build_lines(full_info):
+        lines = ["Продажа записана:"]
+        index = 0
+        grand_total = 0.0
+        grand_total_goods = 0.0
+        grand_total_antiseptic = 0.0
+        grand_recalc = 0.0
+        for group_number, group in enumerate(groups, start=1):
+            position_payload = group["payload"]
+            if group_number > 1:
+                lines.append("")
+            header_parts = [_esc(display_product_name(position_payload)), _esc(position_payload.get("breed"))]
+            if position_payload.get("condition"):
+                header_parts.append(_esc(position_payload["condition"]))
+            lines.append(f"Позиция: {' / '.join(part for part in header_parts if part)}")
+            for item in group["rows"]:
+                index += 1
+                measure_kind = item_measure_kind(item)
+                if item.get("row_id") is None:
+                    # Рядок-послуга — розмірів немає, показуємо назву товару/послуги
+                    # замість "толщинаxширинаxдлина", без мінуса (склад не списаний).
+                    position_label = _esc(sheet_product_name(position_payload))
+                    if measure_kind is None:
+                        lines.append(f"{index}. {position_label}: {_display_bot_number(item.get('quantity'))} шт")
+                    else:
+                        measure_value = item.get(measure_kind)
+                        measure_unit = ITEM_MEASURE_UNIT[measure_kind]
+                        lines.append(
+                            f"{index}. {position_label}: "
+                            f"{_display_bot_number(item.get('quantity'))} шт, "
+                            f"{_display_bot_number(measure_value)} {measure_unit}"
+                        )
                 else:
-                    measure_value = item.get(measure_kind)
-                    measure_unit = ITEM_MEASURE_UNIT[measure_kind]
-                    lines.append(
-                        f"{index}. {position_label}: "
-                        f"{_display_bot_number(item.get('quantity'))} шт, "
-                        f"{_display_bot_number(measure_value)} {measure_unit}"
+                    row_values = row_values_by_row_id.get(item["row_id"])
+                    # KD за номіналом: автор бачить "50x150x6000 (списывается
+                    # 47x150x6000)" і списаний вимір; копія для групи при
+                    # вимкненому перемикачі - лише введений розмір і його вимір,
+                    # без залишку (він стосується рядка 47, якого група не бачить).
+                    substituted = item.get("stock_thickness") is not None
+                    shown_item = item
+                    measure_value = item.get(measure_kind) if measure_kind else None
+                    remaining_suffix = (
+                        f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
+                        if row_values is not None
+                        else ""
                     )
-            else:
-                row_values = row_values_by_row_id.get(item["row_id"])
-                # KD за номіналом (ТЗ пункт 2): зі складу пішов обʼєм ФАКТИЧНОГО
-                # рядка - показати його поряд, щоб "-0,3 м3" за номіналом не
-                # сперечалось із залишком у дужках.
-                stock_measure = item.get("stock_" + measure_kind) if measure_kind else None
-                stock_note = (
-                    f"со склада -{_display_bot_number(stock_measure)} {ITEM_MEASURE_UNIT[measure_kind]}; "
-                    if stock_measure is not None and item.get("stock_thickness") is not None
-                    else ""
-                )
-                remaining_suffix = (
-                    f" ({stock_note}Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
-                    if row_values is not None
-                    else ""
-                )
-                if measure_kind is None:
-                    lines.append(
-                        f"{index}. {_esc(income_item_size(item))}: -"
-                        f"{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
-                    )
-                else:
-                    measure_value = item.get(measure_kind)
-                    measure_unit = ITEM_MEASURE_UNIT[measure_kind]
-                    lines.append(
-                        f"{index}. {_esc(income_item_size(item))}: -"
-                        f"{_display_bot_number(item['quantity'])} шт, -"
-                        f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
-                    )
-        # Та сама ціна, що й на екрані підтвердження - щоб підсумкове
-        # повідомлення не втрачало те, що людина щойно бачила.
-        price_line = price_line_text(
-            position_payload.get("price_per_unit"),
-            [item_measure_kind(item) for item in group["rows"]],
-        )
-        if price_line:
-            lines.append(f"  {_esc(price_line)}")
-        goods_total = round(group["total_amount"], 2)
-        antiseptic_sum = round(group["antiseptic_sum"], 2)
-        if antiseptic_sum:
-            if goods_total:
-                lines.append(f"  <b>Сумма за товар: {_display_bot_number(goods_total)} MDL</b>")
-            lines.append("  Дополнительная услуга:")
-            lines.append(
-                f"  Антисептирование: {_display_bot_number(round(group['antiseptic_volume'], 2))} м3 — "
-                f"{_display_bot_number(antiseptic_sum)} MDL"
+                    if substituted and not full_info:
+                        shown_item = {key: value for key, value in item.items() if not key.startswith("stock_")}
+                        remaining_suffix = ""
+                    elif substituted and measure_kind:
+                        measure_value = item.get("stock_" + measure_kind, measure_value)
+                    if measure_kind is None:
+                        lines.append(
+                            f"{index}. {_esc(income_item_size(shown_item))}: -"
+                            f"{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+                        )
+                    else:
+                        measure_unit = ITEM_MEASURE_UNIT[measure_kind]
+                        lines.append(
+                            f"{index}. {_esc(income_item_size(shown_item))}: -"
+                            f"{_display_bot_number(item['quantity'])} шт, -"
+                            f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
+                        )
+            price_line = price_line_text(
+                position_payload.get("price_per_unit"),
+                [item_measure_kind(item) for item in group["rows"]],
             )
-            lines.append(f"  <b>Сумма позиции: {_display_bot_number(round(goods_total + antiseptic_sum, 2))} MDL</b>")
-        elif goods_total:
-            lines.append(f"  <b>Сумма позиции: {_display_bot_number(goods_total)} MDL</b>")
-        grand_total += goods_total + antiseptic_sum
-        grand_total_goods += goods_total
-        grand_total_antiseptic += antiseptic_sum
-    lines.append("")
-    client = payload.get("client")
-    if client:
-        lines.append(f"Клиент: {_esc(client)}")
-    address = payload.get("address")
-    if address:
-        lines.append(f"Адрес выгрузки: {_esc(address)}")
-    payment_method = normalize_payment_method(store, payload.get("payment_method"))
-    if payment_method:
-        lines.append(f"Оплата: {_esc(payment_method)}")
-    if grand_total:
+            if price_line:
+                lines.append(f"  {_esc(price_line)}")
+            goods_total = round(group["total_amount"], 2)
+            antiseptic_sum = round(group["antiseptic_sum"], 2)
+            if antiseptic_sum:
+                if goods_total:
+                    lines.append(f"  <b>Сумма за товар: {_display_bot_number(goods_total)} MDL</b>")
+                lines.append("  Дополнительная услуга:")
+                lines.append(
+                    f"  Антисептирование: {_display_bot_number(round(group['antiseptic_volume'], 2))} м3 — "
+                    f"{_display_bot_number(antiseptic_sum)} MDL"
+                )
+                lines.append(f"  <b>Сумма позиции: {_display_bot_number(round(goods_total + antiseptic_sum, 2))} MDL</b>")
+            elif goods_total:
+                lines.append(f"  <b>Сумма позиции: {_display_bot_number(goods_total)} MDL</b>")
+            recalc_income = round(group["recalc_income"], 2)
+            if full_info and recalc_income:
+                lines.append(f"  Доход по пересчету: +{_display_bot_number(recalc_income)} MDL")
+            grand_recalc += recalc_income
+            grand_total += goods_total + antiseptic_sum
+            grand_total_goods += goods_total
+            grand_total_antiseptic += antiseptic_sum
         lines.append("")
-        # Задача користувача: "хочу бачити загалом за антисепт і загалом за
-        # товар, а вже в кінці итог" - той самий принцип, що й у
-        # _sale_preview (telegram_dialog_income_sale_flow.py): "Сумма за
-        # Антисептирование" лише коли вона реально є, "Сумма за товар"
-        # завжди поруч з підсумковим "Итого по всей продаже".
-        if grand_total_antiseptic:
-            lines.append(f"<b>Сумма за Антисептирование: {_display_bot_number(round(grand_total_antiseptic, 2))} MDL</b>")
-        lines.append(f"<b>Сумма за товар: {_display_bot_number(round(grand_total_goods, 2))} MDL</b>")
-        lines.append(f"<b>Итого по всей продаже: {_display_bot_number(round(grand_total, 2))} MDL</b>")
-    lines.append("")
-    lines.append("✅ Выполнено.")
-    if excel_warning:
+        client = payload.get("client")
+        if client:
+            lines.append(f"Клиент: {_esc(client)}")
+        address = payload.get("address")
+        if address:
+            lines.append(f"Адрес выгрузки: {_esc(address)}")
+        payment_method = normalize_payment_method(store, payload.get("payment_method"))
+        if payment_method:
+            lines.append(f"Оплата: {_esc(payment_method)}")
+        if grand_total:
+            lines.append("")
+            # Задача користувача: "хочу бачити загалом за антисепт і загалом за
+            # товар, а вже в кінці итог" - той самий принцип, що й у
+            # _sale_preview (telegram_dialog_income_sale_flow.py): "Сумма за
+            # Антисептирование" лише коли вона реально є, "Сумма за товар"
+            # завжди поруч з підсумковим "Итого по всей продаже".
+            if grand_total_antiseptic:
+                lines.append(f"<b>Сумма за Антисептирование: {_display_bot_number(round(grand_total_antiseptic, 2))} MDL</b>")
+            if full_info and grand_recalc:
+                lines.append(f"Сумма по факту: {_display_bot_number(round(grand_total_goods - grand_recalc, 2))} MDL")
+                lines.append(f"Доход по пересчету: +{_display_bot_number(round(grand_recalc, 2))} MDL")
+            lines.append(f"<b>Сумма за товар: {_display_bot_number(round(grand_total_goods, 2))} MDL</b>")
+            lines.append(f"<b>Итого по всей продаже: {_display_bot_number(round(grand_total, 2))} MDL</b>")
         lines.append("")
-        lines.append(_esc(excel_warning))
-    return {"ok": True, "message": "\n".join(lines)}
+        lines.append("✅ Выполнено.")
+        if excel_warning:
+            lines.append("")
+            lines.append(_esc(excel_warning))
+        return "\n".join(lines)
+
+    return {"ok": True, "message": build_lines(True), "group_message": build_lines(False)}
 
 
 def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):

@@ -22,6 +22,7 @@ from utils import (
     _number_value,
 )
 from warehouse_data import (
+    GROUP_SEES_SIZE_RECALC_SETTING,
     ITEM_MEASURE_UNIT,
     apply_exchange_operation,
     display_product_name,
@@ -2250,6 +2251,22 @@ class CoreDialogMixin:
     # обрано/порожній/зіпсований - тихо повертається до старого
     # захардкодженого paths.REPORT_BROADCAST_CHAT_ID, щоб нічого не
     # зламалось для тих, хто ще не встиг обрати файл.
+    def _group_sees_size_recalc(self):
+        """Перемикач клієнта "Показывать группе расчёт при списании другого
+        размера" (KD за номіналом). Вимкнено - копія в групу без підміни
+        розміру й без доходу по перерахунку; автор бачить усе завжди."""
+        try:
+            settings = SettingsStore(self.settings_path)
+        except OSError:
+            return True
+        value = settings.get(GROUP_SEES_SIZE_RECALC_SETTING)
+        return True if value is None else bool(value)
+
+    def _report_text_for_group(self, result):
+        if self._group_sees_size_recalc() or not result.get("group_message"):
+            return result["message"]
+        return result["group_message"]
+
     def _report_broadcast_chat_id(self):
         try:
             settings = SettingsStore(self.settings_path)

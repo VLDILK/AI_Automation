@@ -859,3 +859,13 @@ html, body {
   font-size: 12px;
   color: var(--tg-hint);
 }
+
+.stock-chooser-remain {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--tg-hint, #8ea0b3);
+}
+
+.stock-chooser-remain.stock-chooser-short {
+  color: #e5484d;
+}

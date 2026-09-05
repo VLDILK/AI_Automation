@@ -13,6 +13,7 @@ from utils import (
     price_line_text,
 )
 from warehouse_data import (
+    sale_recalc_income,
     BOT_MESSAGE_DEFAULTS,
     INCOME_QUANTITY_TOLERANCE,
     INCOME_VOLUME_TOLERANCE,
@@ -1850,6 +1851,8 @@ class IncomeSaleFlowDialogMixin:
             if antiseptic_write_errors:
                 result = dict(result)
                 result["message"] = result["message"] + "\n\n" + "\n\n".join(antiseptic_write_errors)
+                if result.get("group_message"):
+                    result["group_message"] = result["group_message"] + "\n\n" + "\n\n".join(antiseptic_write_errors)
             # Задача користувача (2026-08-17): дубль звіту в окрему групу -
             # покриває і продаж, і прихід (обидва проходять через цю саму
             # гілку), разом з будь-яким дописаним вище "antiseptic"-хвостом.
@@ -1857,7 +1860,7 @@ class IncomeSaleFlowDialogMixin:
             # "бугалтера тільки на продаж, антисептирование не потрібно").
             # Ця сама гілка обслуговує й прихід, тому перевірка обов'язкова.
             self._notify_report_broadcast(
-                context, result["message"],
+                context, self._report_text_for_group(result),
                 accountant_tail=(
                     self._efactura_accountant_tail(write_payload.get("payment_method"))
                     if operation_type == "stock_sale" else ""
@@ -3957,6 +3960,10 @@ class IncomeSaleFlowDialogMixin:
         position_total = self._sale_total_amount(position)
         if position_total:
             lines.append(f"   Сумма: {_display_bot_number(position_total)} MDL")
+        # KD за номіналом: різниця між сумою за введений і за списаний розмір.
+        recalc_income = sale_recalc_income(position)
+        if recalc_income:
+            lines.append(f"   Доход по пересчету: +{_display_bot_number(recalc_income)} MDL")
         position_antiseptic_sum = 0
         position_antiseptic = position.get("antiseptic")
         if isinstance(position_antiseptic, dict) and position_antiseptic.get("volume") and position_antiseptic.get("price_per_unit"):
@@ -4033,6 +4040,11 @@ class IncomeSaleFlowDialogMixin:
             totals_lines = []
             if total_antiseptic_sum:
                 totals_lines.append(f"Сумма за Антисептирование: {_display_bot_number(round(total_antiseptic_sum, 2))} MDL")
+            # KD за номіналом: при кількох позиціях - ще й загалом у підсумку.
+            total_recalc = round(sum(sale_recalc_income(item) for item in completed_positions + [payload]), 2)
+            if total_recalc:
+                totals_lines.append(f"Сумма по факту: {_display_bot_number(round(total_goods_sum - total_recalc, 2))} MDL")
+                totals_lines.append(f"Доход по пересчету: +{_display_bot_number(total_recalc)} MDL")
             totals_lines.append(f"Сумма за товар: {_display_bot_number(round(total_goods_sum, 2))} MDL")
             totals_lines.append(f"Итого: {_display_bot_number(grand_total)} MDL")
             sections.append(totals_lines)

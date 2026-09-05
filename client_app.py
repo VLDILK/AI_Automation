@@ -62,6 +62,7 @@ import standard_menu_cloud
 import update_check
 from settings import SettingsStore
 from warehouse_data import (
+    GROUP_SEES_SIZE_RECALC_SETTING,
     ExcelSqliteStore,
     CUSTOM_BUTTON_ACTIONS,
     TABLE_FORMAT_COLOR_KEY,
@@ -3033,6 +3034,28 @@ class ClientApp(ctk.CTk):
             wraplength=260,
         ).pack(fill="x", padx=(14, 10), pady=(0, 6))
         ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+        # KD за номіналом (рішення користувача 2026-09-05): автор продажу
+        # бачить повний розрахунок завжди, а чи бачить його група - перемикач.
+        recalc_row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        recalc_row.pack(fill="x", padx=1, pady=(0, 1))
+        recalc_left = ctk.CTkFrame(recalc_row, fg_color="transparent")
+        recalc_left.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        ctk.CTkLabel(
+            recalc_left, text="Показывать группе расчёт при списании другого размера",
+            font=("", 13), text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            recalc_left,
+            text="В копии отчёта для группы: какой размер списан, сумма по факту и доход по пересчету. "
+                 "Автор продажи видит это всегда",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+        self._group_recalc_switch_var = ctk.IntVar(value=1 if self._group_sees_size_recalc() else 0)
+        ctk.CTkSwitch(
+            recalc_row, text="", variable=self._group_recalc_switch_var, onvalue=1, offvalue=0,
+            command=self._on_group_recalc_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
         self._build_row_button(card, "power", self._bot_toggle_label(), self._on_bot_toggle_row_clicked)
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
@@ -5546,6 +5569,13 @@ class ClientApp(ctk.CTk):
 
     def _on_excel_remind_toggle_clicked(self):
         self.settings.set(EXCEL_CHECK_REMIND_EVERY_START_KEY, bool(self._excel_remind_switch_var.get()))
+
+    def _group_sees_size_recalc(self):
+        value = self.settings.get(GROUP_SEES_SIZE_RECALC_SETTING)
+        return True if value is None else bool(value)
+
+    def _on_group_recalc_toggle_clicked(self):
+        self.settings.set(GROUP_SEES_SIZE_RECALC_SETTING, bool(self._group_recalc_switch_var.get()))
 
     def _ask_excel_repairs(self, plan, lines, signature, source):
         window = ctk.CTkToplevel(self)

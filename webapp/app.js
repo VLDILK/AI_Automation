@@ -794,12 +794,16 @@
     var select = document.createElement("select");
     select.className = "field-wide";
     wrap.appendChild(select);
+    var remain = document.createElement("div");
+    remain.className = "stock-chooser-remain";
+    wrap.appendChild(remain);
     var hint = document.createElement("div");
     hint.className = "stock-chooser-hint";
     wrap.appendChild(hint);
     container.appendChild(wrap);
 
     var lastEnteredKey = null;
+    var userChose = false;
 
     function entered() {
       return [rowInputs.thickness, rowInputs.width, rowInputs.length].map(function (input) {
@@ -815,17 +819,52 @@
       });
     }
 
+    function numberOf(value) {
+      return Number(String(value === undefined || value === null ? "" : value).replace(",", ".")) || 0;
+    }
+
+    // Рішення користувача (2026-09-05): у списку лише розміри з тією самою
+    // довжиною, що введена; рівно введеного нема (для нього галочка); зверху
+    // найближчі - спершу та сама ширина, далі найменша різниця товщини.
+    function choosable(options, dims, enteredKey) {
+      var length = dims[2];
+      var list = options.filter(function (combo) {
+        if (combo[1] + "|" + combo[2] + "|" + combo[3] === enteredKey) {
+          return false;
+        }
+        return !length || String(combo[3]) === String(length);
+      });
+      var thickness = numberOf(dims[0]);
+      var width = numberOf(dims[1]);
+      list.sort(function (a, b) {
+        var aWidth = numberOf(a[2]) === width ? 0 : 1;
+        var bWidth = numberOf(b[2]) === width ? 0 : 1;
+        if (aWidth !== bWidth) {
+          return aWidth - bWidth;
+        }
+        var aThick = Math.abs(numberOf(a[1]) - thickness);
+        var bThick = Math.abs(numberOf(b[1]) - thickness);
+        if (aThick !== bThick) {
+          return aThick - bThick;
+        }
+        return Math.abs(numberOf(a[2]) - width) - Math.abs(numberOf(b[2]) - width);
+      });
+      return list;
+    }
+
     function refresh() {
       var dims = entered();
       var enteredKey = dims.join("|");
-      var options = optionsForBreed();
-      var exists = options.some(function (combo) {
+      var stockOptions = optionsForBreed();
+      var exists = stockOptions.some(function (combo) {
         return combo[1] + "|" + combo[2] + "|" + combo[3] === enteredKey;
       });
+      var options = choosable(stockOptions, dims, enteredKey);
       var complete = dims.every(function (value) { return value !== ""; });
       if (complete && enteredKey !== lastEnteredKey) {
         checkbox.checked = exists;
         lastEnteredKey = enteredKey;
+        userChose = false;
       }
       var previous = select.value;
       select.innerHTML = "";
@@ -836,24 +875,38 @@
         select.appendChild(option);
       });
       var values = options.map(function (combo) { return combo[1] + "|" + combo[2] + "|" + combo[3]; });
-      if (values.indexOf(previous) !== -1 && !exists) {
+      if (userChose && values.indexOf(previous) !== -1) {
         select.value = previous;
-      } else if (exists) {
-        select.value = enteredKey;
       } else if (options.length) {
         select.selectedIndex = 0;
       }
       var show = !checkbox.checked;
       selectLabel.style.display = show ? "" : "none";
       select.style.display = show ? "" : "none";
-      if (show && !options.length) {
-        hint.textContent = "\u041d\u0430 \u0441\u043a\u043b\u0430\u0434\u0435 \u043d\u0435\u0442 \u043f\u043e\u0437\u0438\u0446\u0438\u0439 \u044d\u0442\u043e\u0439 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0439 \u043f\u043e\u0440\u043e\u0434\u044b.";
+      if (show && !options.length && stockOptions.length && dims[2] !== "") {
+        hint.textContent = "На складе нет других размеров с длиной " + dims[2] + ".";
+      } else if (show && !options.length) {
+        hint.textContent = "На складе нет позиций этой категории для выбранной породы.";
       } else if (show && complete && !exists) {
         hint.textContent = "\u0412\u0432\u0435\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u0440\u0430\u0437\u043c\u0435\u0440\u0430 \u043d\u0430 \u0441\u043a\u043b\u0430\u0434\u0435 \u043d\u0435\u0442 \u2014 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435, \u0447\u0442\u043e \u0441\u043f\u0438\u0441\u0430\u0442\u044c.";
       } else {
         hint.textContent = "";
       }
       hint.style.display = hint.textContent ? "" : "none";
+      var quantity = rowInputs.quantity ? numberOf(readFieldValue(rowInputs.quantity)) : 0;
+      var chosen = options.filter(function (combo) {
+        return combo[1] + "|" + combo[2] + "|" + combo[3] === select.value;
+      })[0];
+      if (show && chosen && quantity > 0) {
+        var left = numberOf(chosen[4]) - quantity;
+        remain.textContent = left >= 0
+          ? "Останется " + formatServerNumber(left) + " шт"
+          : "Не хватает " + formatServerNumber(-left) + " шт";
+        remain.classList.toggle("stock-chooser-short", left < 0);
+        remain.style.display = "";
+      } else {
+        remain.style.display = "none";
+      }
     }
 
     function value() {
@@ -868,23 +921,31 @@
 
     function restore(row) {
       lastEnteredKey = null;
+      userChose = false;
       refresh();
       if (row && row.stock_thickness !== undefined && row.stock_thickness !== null) {
         checkbox.checked = false;
         lastEnteredKey = entered().join("|");
+        userChose = true;
         refresh();
         select.value = [row.stock_thickness, row.stock_width, row.stock_length].map(formatServerNumber).join("|");
+        refresh();
       }
     }
 
     function reset() {
       lastEnteredKey = null;
+      userChose = false;
       checkbox.checked = true;
       refresh();
     }
 
     checkbox.addEventListener("change", refresh);
-    [rowInputs.thickness, rowInputs.width, rowInputs.length].forEach(function (input) {
+    select.addEventListener("change", function () {
+      userChose = true;
+      refresh();
+    });
+    [rowInputs.thickness, rowInputs.width, rowInputs.length, rowInputs.quantity].forEach(function (input) {
       if (!input) { return; }
       input.addEventListener("change", refresh);
       input.addEventListener("input", refresh);
@@ -1391,7 +1452,7 @@
           if (dimValues.every(function (v) { return v !== null; })) {
             lines.push("Размер: " + dimValues.join("x"));
             if (row && row.stock_thickness !== undefined && row.stock_thickness !== null) {
-              lines.push("\u0421\u043e \u0441\u043a\u043b\u0430\u0434\u0430: " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length);
+              lines.push("Списывается: " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length);
             }
           } else {
             DIMENSION_FIELD_KEYS.forEach(function (dimKey, index) {
@@ -1405,6 +1466,7 @@
           return;
         }
         var value = row && field.per_row ? row[field.key] : values[field.key];
+        var recalcText = null;
         if (value !== undefined && value !== null && value !== "") {
           var lineText = field.label + ": " + value;
           if (field.key === "quantity") {
@@ -1438,8 +1500,19 @@
             if (totalAmount !== null && priceNum > 0 && totalAmount > 0) {
               lineText += " — Сумма: " + formatMoney(priceNum * totalAmount) + " MDL";
             }
+            // KD за номіналом: різниця між сумою за введений і за списаний розмір.
+            if (row && row.stock_thickness !== undefined && row.stock_thickness !== null && priceKind && priceNum > 0 && totalAmount !== null) {
+              var factMeasure = pieceMeasure(row.stock_thickness, row.stock_width, row.stock_length, priceKind) * numberOrZero(quantityRawValue);
+              var recalcIncome = priceNum * (totalAmount - factMeasure);
+              if (recalcIncome > 0.005) {
+                recalcText = "Доход по пересчету: +" + formatMoney(recalcIncome) + " MDL";
+              }
+            }
           }
           lines.push(lineText);
+          if (recalcText) {
+            lines.push(recalcText);
+          }
         }
       });
       return lines;
@@ -1472,6 +1545,30 @@
     // підсумок" - antisepticAddon (необов'язковий) додає ОКРЕМИЙ блок після
     // усіх товарних позицій, не замінюючи їх (та сама причина, чому це
     // взагалі виправляється - раніше кошик просто губився).
+    // KD за номіналом: дохід по перерахунку позиції = ціна × (вимір введеного
+    // розміру − вимір списаного) × штук, по всіх рядках із підміною.
+    function computePositionRecalc(key, values) {
+      var cat = categories.filter(function (c) { return String(c.key) === key; })[0];
+      var price = numberOrZero(values.price_per_unit);
+      if (price <= 0 || !values.rows) {
+        return 0;
+      }
+      var total = 0;
+      values.rows.forEach(function (row) {
+        if (!row || row.stock_thickness === undefined || row.stock_thickness === null) {
+          return;
+        }
+        var kind = rowMeasureKind(cat && cat.product, row.thickness, row.width);
+        if (!kind) {
+          return;
+        }
+        var nominal = pieceMeasure(row.thickness, row.width, row.length, kind);
+        var fact = pieceMeasure(row.stock_thickness, row.stock_width, row.stock_length, kind);
+        total += price * (nominal - fact) * numberOrZero(row.quantity);
+      });
+      return total;
+    }
+
     function computePositionTotal(key, values) {
       var cat = categories.filter(function (c) { return String(c.key) === key; })[0];
       var row = values.rows && values.rows[0];
@@ -1522,8 +1619,10 @@
       var goodsTotal = 0;
       var antisepticTotal = 0;
       var anyAntiseptic = false;
+      var recalcTotal = 0;
       positions.forEach(function (position) {
         goodsTotal += computePositionTotal(String(position.category_operation_id), position);
+        recalcTotal += computePositionRecalc(String(position.category_operation_id), position);
         var lines = describePosition(String(position.category_operation_id), position);
         if (!lines.length) {
           return;
@@ -1572,6 +1671,16 @@
         container.appendChild(antisepticTotalRow);
       }
       if (showTotals) {
+        if (recalcTotal > 0.005) {
+          var factTotalRow = document.createElement("div");
+          factTotalRow.className = "confirm-common";
+          factTotalRow.textContent = "Сумма по факту: " + formatMoney(goodsTotal - recalcTotal) + " MDL";
+          container.appendChild(factTotalRow);
+          var recalcTotalRow = document.createElement("div");
+          recalcTotalRow.className = "confirm-common";
+          recalcTotalRow.textContent = "Доход по пересчету: +" + formatMoney(recalcTotal) + " MDL";
+          container.appendChild(recalcTotalRow);
+        }
         var goodsTotalRow = document.createElement("div");
         goodsTotalRow.className = "confirm-common";
         goodsTotalRow.textContent = "Сумма по товару: " + formatMoney(goodsTotal) + " MDL";
@@ -1898,7 +2007,7 @@
       if (!row || row.stock_thickness === undefined || row.stock_thickness === null) {
         return "";
       }
-      return " (\u0441\u043e \u0441\u043a\u043b\u0430\u0434\u0430 " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length + ")";
+      return " (списывается " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length + ")";
     }
     function positionSummaryText(key, values) {
       var cat = categories.filter(function (c) {
