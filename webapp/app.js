@@ -2889,12 +2889,22 @@
         select.appendChild(option);
       });
       categoryWrap.appendChild(select);
-      block.appendChild(categoryWrap);
 
+      // Зауваження користувача (2026-09-05, живий тест): "обмін і отримання
+      // займають критично багато місця... спочатку це має бути в згорнутому
+      // вигляді. коли тисну "додати" в один із розділів - тоді тільки має
+      // відобразитись поле вводу". Поля живуть у fieldsWrap, прихованому,
+      // доки не натиснуть "+ Добавить" саме в цьому блоці; щойно позиція
+      // лягла в кошик - ховаються знову (обраний варіант 01).
+      var fieldsWrap = document.createElement("div");
+      fieldsWrap.className = "exchange-fields";
+      fieldsWrap.style.display = "none";
+      fieldsWrap.appendChild(categoryWrap);
       var identityContainer = document.createElement("div");
       var measureContainer = document.createElement("div");
-      block.appendChild(identityContainer);
-      block.appendChild(measureContainer);
+      fieldsWrap.appendChild(identityContainer);
+      fieldsWrap.appendChild(measureContainer);
+      block.appendChild(fieldsWrap);
 
       var state = {};
       cats.forEach(function (cat) {
@@ -2952,11 +2962,37 @@
         showCategory(select.value);
       }
 
-      var addButton = document.createElement("button");
-      addButton.type = "button";
-      addButton.className = "add-position-button";
-      addButton.textContent = addLabel;
-      block.appendChild(addButton);
+      var actions = document.createElement("div");
+      actions.className = "exchange-fields-actions";
+      var cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.className = "exchange-fields-btn";
+      cancelButton.textContent = "Отмена";
+      var commitButton = document.createElement("button");
+      commitButton.type = "button";
+      commitButton.className = "exchange-fields-btn primary";
+      commitButton.textContent = "Добавить";
+      actions.appendChild(cancelButton);
+      actions.appendChild(commitButton);
+      fieldsWrap.appendChild(actions);
+
+      var openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "add-position-button";
+      openButton.textContent = addLabel;
+      block.appendChild(openButton);
+
+      function fieldsOpen() {
+        return fieldsWrap.style.display !== "none";
+      }
+      function openFields() {
+        fieldsWrap.style.display = "";
+        openButton.style.display = "none";
+      }
+      function closeFields() {
+        fieldsWrap.style.display = "none";
+        openButton.style.display = "";
+      }
 
       var cart = [];
 
@@ -3231,6 +3267,7 @@
         }
         cart.push(makeItem(key, result.values));
         clearInputs(key);
+        closeFields();
         renderCart();
         haptic("success");
       }
@@ -3241,6 +3278,7 @@
           return;
         }
         cart.splice(index, 1);
+        openFields();
         select.value = item.key;
         select.dispatchEvent(new Event("change", { bubbles: true }));
         populate(item.key, item.position);
@@ -3254,11 +3292,24 @@
         renderCart();
       }
 
-      addButton.addEventListener("click", addCurrent);
+      openButton.addEventListener("click", function () {
+        errorEl.textContent = "";
+        openFields();
+        fieldsWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+      commitButton.addEventListener("click", addCurrent);
+      cancelButton.addEventListener("click", function () {
+        clearInputs(select.value);
+        errorEl.textContent = "";
+        closeFields();
+      });
 
       // Усе, що є в блоці зараз: кошик плюс заповнена, але ще не додана
       // позиція. Наполовину заповнена - помилка, нічого не стирається.
       function finalize() {
+        if (!fieldsOpen()) {
+          return cart.slice();
+        }
         var key = select.value;
         var result = collect(key);
         if (!result.ok) {

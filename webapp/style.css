@@ -789,3 +789,36 @@ html, body {
   border-left: 3px solid var(--field-border);
   color: var(--tg-text);
 }
+
+/* Згорнуті блоки обміну (варіант 01, 2026-09-05): поля вводу приховані,
+   доки не натиснуть "+ Добавить" саме в цьому блоці, і ховаються знову,
+   щойно позиція лягла в кошик. */
+.exchange-fields {
+  border-top: 1px dashed var(--field-border);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.exchange-fields-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.exchange-fields-btn {
+  flex: 1;
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 10px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  cursor: pointer;
+}
+
+.exchange-fields-btn.primary {
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  border-color: var(--tg-button);
+}

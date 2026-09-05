@@ -1542,6 +1542,14 @@ class CoreDialogMixin:
         common_ctx = self._webapp_form_context(
             store, None, self._WEBAPP_ALL_IN_ONE_EXCHANGE_COMMON_KEYS, {}, "Обмен"
         )
+        # Спільне поле "comment" успадковує підпис списання ("Причина
+        # списания") - для обміну це не про причину. Зауваження користувача
+        # (2026-09-05): коментар необовʼязковий; є - показується, нема -
+        # ні слова, ні порожнього місця.
+        for field in common_ctx["fields"]:
+            if field.get("key") == "comment":
+                field["label"] = "Комментарий (необязательно)"
+                field["required"] = False
         ctx = {
             "mode": "all_in_one",
             "kind": "exchange",
