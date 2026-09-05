@@ -6,6 +6,7 @@ import sqlite3
 
 import permissions as perm
 from utils import (
+    piece_measure,
     _display_bot_number,
     _normalize_phrase,
     _number_value,
@@ -3485,6 +3486,9 @@ class IncomeSaleFlowDialogMixin:
                 _number_value(item.get("thickness")),
                 _number_value(item.get("width")),
                 _number_value(item.get("length")),
+                _number_value(item.get("stock_thickness")),
+                _number_value(item.get("stock_width")),
+                _number_value(item.get("stock_length")),
             )
             existing_index = index_by_key.get(key)
             if existing_index is None:
@@ -3543,7 +3547,30 @@ class IncomeSaleFlowDialogMixin:
             item["create_new"] = True
         return None
 
+    # KD за номіналом (ТЗ пункт 2): фактичний складський розмір із форми
+    # (stock_thickness/width/length) отримує свій вимір тим самим правилом,
+    # що й введений, - саме він списується зі СКЛАД. Ціна й лист ПРОДАЖА
+    # лишаються за введеним (номінальним) розміром. Збіг із введеним -
+    # ключі прибираються, поведінка звичайна.
+    def _apply_stock_size_overrides(self, payload):
+        for item in payload.get("rows") or []:
+            if any(item.get(key) is None for key in ("stock_thickness", "stock_width", "stock_length")):
+                continue
+            same = all(
+                self._number_equal(item.get(key), item.get("stock_" + key)) for key in ("thickness", "width", "length")
+            )
+            if same:
+                for key in ("stock_thickness", "stock_width", "stock_length", "stock_volume", "stock_area", "stock_linear"):
+                    item.pop(key, None)
+                continue
+            measure_key = self._row_measure_kind(payload, item)
+            if measure_key is None:
+                continue
+            piece = piece_measure(item["stock_thickness"], item["stock_width"], item["stock_length"], measure_key)
+            item["stock_" + measure_key] = round(piece * _number_value(item.get("quantity")), 6)
+
     def _resolve_sale_rows(self, store, payload):
+        self._apply_stock_size_overrides(payload)
         # Той самий фікс, що й _resolve_income_rows вище — продаж не
         # створює нових рядків складу, але кілька позицій з ОДНАКОВИМ
         # розміром у ОДНІЙ продажі й без об'єднання незалежно перевіряли б
@@ -3812,10 +3839,12 @@ class IncomeSaleFlowDialogMixin:
             row_condition = row_value(row, columns.get("condition")) or product_suffix_type
             if not self._text_equal(row_condition, payload.get("condition")):
                 return False
+        # KD за номіналом (ТЗ пункт 2): на складі шукається ФАКТИЧНИЙ розмір,
+        # якщо людина обрала його у формі; інакше - введений.
         return (
-            self._number_equal(row_value(row, columns["thickness"]), item["thickness"])
-            and self._number_equal(row_value(row, columns["width"]), item["width"])
-            and self._number_equal(row_value(row, columns["length"]), item["length"])
+            self._number_equal(row_value(row, columns["thickness"]), item.get("stock_thickness", item["thickness"]))
+            and self._number_equal(row_value(row, columns["width"]), item.get("stock_width", item["width"]))
+            and self._number_equal(row_value(row, columns["length"]), item.get("stock_length", item["length"]))
         )
 
     # Задача користувача (2026-08-14): "щоб міг продовжувати приход і
@@ -4058,7 +4087,8 @@ class IncomeSaleFlowDialogMixin:
                     "balance_measure": balance_measure,
                     "measure_unit": measure_unit,
                 }
-            if measure_key is not None and _number_value(item.get(measure_key)) > balance_measure + INCOME_VOLUME_TOLERANCE:
+            requested_measure = item.get("stock_" + measure_key, item.get(measure_key)) if measure_key else None
+            if measure_key is not None and _number_value(requested_measure) > balance_measure + INCOME_VOLUME_TOLERANCE:
                 return {
                     "kind": measure_key,
                     "row_index": row_index,

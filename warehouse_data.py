@@ -5542,11 +5542,39 @@ def execute_operation_write(store, operation_id, item, row_values, columns, shee
 
 
 def income_item_size(item):
-    return (
+    text = (
         f"{_display_bot_number(item['thickness'])}x"
         f"{_display_bot_number(item['width'])}x"
         f"{_display_bot_number(item['length'])}"
     )
+    # KD за номіналом (ТЗ пункт 2): продали 50x150, списали обраний 47x150 -
+    # людина має бачити обидва розміри скрізь, де показується позиція.
+    if item.get("stock_thickness") is not None:
+        text += (
+            f" (со склада {_display_bot_number(item['stock_thickness'])}x"
+            f"{_display_bot_number(item['stock_width'])}x"
+            f"{_display_bot_number(item['stock_length'])})"
+        )
+    return text
+
+
+def _stock_view(item):
+    """Копія позиції з ФАКТИЧНИМ складським розміром і його виміром (KD за
+    номіналом), або та сама позиція, якщо фактичний = введеному."""
+    if item.get("stock_thickness") is None:
+        return item
+    view = dict(item)
+    view["thickness"] = item["stock_thickness"]
+    view["width"] = item["stock_width"]
+    view["length"] = item["stock_length"]
+    for measure_key in ("volume", "area", "linear"):
+        stock_value = item.get("stock_" + measure_key)
+        if stock_value is not None:
+            view[measure_key] = stock_value
+    view.pop("stock_thickness", None)
+    view.pop("stock_width", None)
+    view.pop("stock_length", None)
+    return view
 
 
 # "area"/"linear" (мп, розміри 25x50/30x50/50x50) взаємовиключні з "volume"
@@ -6066,6 +6094,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                     "message": "Не удалось записать продажу: должна быть указана цена за единицу или сумма.",
                 }
             for item in position["rows"]:
+                stock_item = _stock_view(item)
                 row_id = item.get("row_id")
                 if row_id is None:
                     # Рядок-послуга (наприклад антисептирование без конкретної
@@ -6146,7 +6175,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                         }
                 else:
                     balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
-                    if _number_value(item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
+                    if _number_value(stock_item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
                         return {
                             "ok": False,
                             "message": (
@@ -6162,7 +6191,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                 # жорстко закодована поведінка (товар поза 4 категоріями).
                 operation_id = resolve_operation_for_payload(store, "start_sale", "sale", position_payload)
                 if operation_id is not None:
-                    execute_operation_write(store, operation_id, item, row_values, columns)
+                    execute_operation_write(store, operation_id, stock_item, row_values, columns)
                 else:
                     add_to_row_value(row_values, columns["sold_qty"], item["quantity"])
                     add_to_row_value(row_values, columns["balance_qty"], -_number_value(item["quantity"]))
@@ -6181,8 +6210,8 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                     # рядок" приходу вже мають цей самий guard
                     # (item.get("volume") is not None) - тут його бракувало.
                     elif item.get("volume") is not None:
-                        add_to_row_value(row_values, columns["sold_volume"], item["volume"])
-                        add_to_row_value(row_values, columns["balance_volume"], -_number_value(item["volume"]))
+                        add_to_row_value(row_values, columns["sold_volume"], stock_item["volume"])
+                        add_to_row_value(row_values, columns["balance_volume"], -_number_value(stock_item["volume"]))
 
         # Один номер документа на ВЕСЬ продаж (усі позиції/розміри однієї
         # операції), а не по одному на кожен рядок листа — рахується
@@ -6206,6 +6235,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
             position_payload = {**payload, **position}
             rows_in_position = position["rows"]
             for item in rows_in_position:
+                stock_item = _stock_view(item)
                 row_values = row_values_by_row_id.get(item.get("row_id"))
                 item_payload = position_payload
                 if len(rows_in_position) > 1:
@@ -6242,11 +6272,11 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                         "product": sheet_product_name(position_payload),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
-                        "thickness": item.get("thickness"),
-                        "width": item.get("width"),
-                        "length": item.get("length"),
+                        "thickness": stock_item.get("thickness"),
+                        "width": stock_item.get("width"),
+                        "length": stock_item.get("length"),
                         "quantity": item.get("quantity"),
-                        "volume": item.get("volume"),
+                        "volume": stock_item.get("volume"),
                         "area": item.get("area"),
                         "linear": item.get("linear"),
                         "sheet_row_id": item.get("row_id"),
@@ -6324,8 +6354,17 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                     )
             else:
                 row_values = row_values_by_row_id.get(item["row_id"])
+                # KD за номіналом (ТЗ пункт 2): зі складу пішов обʼєм ФАКТИЧНОГО
+                # рядка - показати його поряд, щоб "-0,3 м3" за номіналом не
+                # сперечалось із залишком у дужках.
+                stock_measure = item.get("stock_" + measure_kind) if measure_kind else None
+                stock_note = (
+                    f"со склада -{_display_bot_number(stock_measure)} {ITEM_MEASURE_UNIT[measure_kind]}; "
+                    if stock_measure is not None and item.get("stock_thickness") is not None
+                    else ""
+                )
                 remaining_suffix = (
-                    f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
+                    f" ({stock_note}Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
                     if row_values is not None
                     else ""
                 )

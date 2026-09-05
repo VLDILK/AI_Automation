@@ -767,6 +767,138 @@
     return MEASURE_FIELD_KEYS.indexOf(field.key) !== -1;
   }
 
+  // KD за номіналом (ТЗ пункт 2, 2026-09-05). Рішення користувача: жодної
+  // таблиці відповідностей - фактичний складський розмір обирається щоразу;
+  // галочка "Продать как введённый размер" повертає звичайну поведінку, і
+  // поки вона стоїть, рядка "Списать со склада" нема взагалі. Список - усі
+  // розміри складу для обраної породи (dimension_combos: [порода, товщина,
+  // ширина, довжина, залишок]). Якщо введеного розміру на складі нема -
+  // галочка знімається сама, щоб список зʼявився одразу.
+  function buildStockChooser(container, rowInputs, breedInput, combos) {
+    var wrap = document.createElement("div");
+    wrap.className = "field stock-chooser";
+    var checkLabel = document.createElement("label");
+    checkLabel.className = "stock-chooser-check";
+    var checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkLabel.appendChild(checkbox);
+    var checkText = document.createElement("span");
+    checkText.textContent = "Продать как введённый размер";
+    checkLabel.appendChild(checkText);
+    wrap.appendChild(checkLabel);
+    var selectLabel = document.createElement("div");
+    selectLabel.className = "stock-chooser-label";
+    selectLabel.textContent = "Списать со склада";
+    wrap.appendChild(selectLabel);
+    var select = document.createElement("select");
+    select.className = "field-wide";
+    wrap.appendChild(select);
+    var hint = document.createElement("div");
+    hint.className = "stock-chooser-hint";
+    wrap.appendChild(hint);
+    container.appendChild(wrap);
+
+    var lastEnteredKey = null;
+
+    function entered() {
+      return [rowInputs.thickness, rowInputs.width, rowInputs.length].map(function (input) {
+        var value = input ? readFieldValue(input) : "";
+        return value === "" || value === null || value === undefined ? "" : formatServerNumber(value);
+      });
+    }
+
+    function optionsForBreed() {
+      var breed = breedInput ? readFieldValue(breedInput) : null;
+      return (combos || []).filter(function (combo) {
+        return !breed || combo[0] === breed;
+      });
+    }
+
+    function refresh() {
+      var dims = entered();
+      var enteredKey = dims.join("|");
+      var options = optionsForBreed();
+      var exists = options.some(function (combo) {
+        return combo[1] + "|" + combo[2] + "|" + combo[3] === enteredKey;
+      });
+      var complete = dims.every(function (value) { return value !== ""; });
+      if (complete && enteredKey !== lastEnteredKey) {
+        checkbox.checked = exists;
+        lastEnteredKey = enteredKey;
+      }
+      var previous = select.value;
+      select.innerHTML = "";
+      options.forEach(function (combo) {
+        var option = document.createElement("option");
+        option.value = combo[1] + "|" + combo[2] + "|" + combo[3];
+        option.textContent = combo[1] + "\u00d7" + combo[2] + "\u00d7" + combo[3] + " \u2014 " + combo[4] + " \u0448\u0442";
+        select.appendChild(option);
+      });
+      var values = options.map(function (combo) { return combo[1] + "|" + combo[2] + "|" + combo[3]; });
+      if (values.indexOf(previous) !== -1 && !exists) {
+        select.value = previous;
+      } else if (exists) {
+        select.value = enteredKey;
+      } else if (options.length) {
+        select.selectedIndex = 0;
+      }
+      var show = !checkbox.checked;
+      selectLabel.style.display = show ? "" : "none";
+      select.style.display = show ? "" : "none";
+      if (show && !options.length) {
+        hint.textContent = "\u041d\u0430 \u0441\u043a\u043b\u0430\u0434\u0435 \u043d\u0435\u0442 \u043f\u043e\u0437\u0438\u0446\u0438\u0439 \u044d\u0442\u043e\u0439 \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u0438 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0439 \u043f\u043e\u0440\u043e\u0434\u044b.";
+      } else if (show && complete && !exists) {
+        hint.textContent = "\u0412\u0432\u0435\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u0440\u0430\u0437\u043c\u0435\u0440\u0430 \u043d\u0430 \u0441\u043a\u043b\u0430\u0434\u0435 \u043d\u0435\u0442 \u2014 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435, \u0447\u0442\u043e \u0441\u043f\u0438\u0441\u0430\u0442\u044c.";
+      } else {
+        hint.textContent = "";
+      }
+      hint.style.display = hint.textContent ? "" : "none";
+    }
+
+    function value() {
+      if (checkbox.checked || !select.value) {
+        return null;
+      }
+      var parts = select.value.split("|").map(function (part) {
+        return Number(String(part).replace(",", "."));
+      });
+      return { thickness: parts[0], width: parts[1], length: parts[2] };
+    }
+
+    function restore(row) {
+      lastEnteredKey = null;
+      refresh();
+      if (row && row.stock_thickness !== undefined && row.stock_thickness !== null) {
+        checkbox.checked = false;
+        lastEnteredKey = entered().join("|");
+        refresh();
+        select.value = [row.stock_thickness, row.stock_width, row.stock_length].map(formatServerNumber).join("|");
+      }
+    }
+
+    function reset() {
+      lastEnteredKey = null;
+      checkbox.checked = true;
+      refresh();
+    }
+
+    checkbox.addEventListener("change", refresh);
+    [rowInputs.thickness, rowInputs.width, rowInputs.length].forEach(function (input) {
+      if (!input) { return; }
+      input.addEventListener("change", refresh);
+      input.addEventListener("input", refresh);
+      if (input.manualInput) {
+        input.manualInput.addEventListener("input", refresh);
+      }
+    });
+    if (breedInput) {
+      breedInput.addEventListener("change", refresh);
+    }
+    refresh();
+    return { value: value, restore: restore, reset: reset, refresh: refresh };
+  }
+
   function mainAllInOne(ctx) {
     var categories = ctx.categories || [];
     // Задача користувача: "антисептирование - це додаткова послуга", не
@@ -827,6 +959,7 @@
       });
 
       var rowInputs = {};
+      var stockChooser = null;
       var rowBlock = null;
       if (perRow.length) {
         rowBlock = document.createElement("div");
@@ -851,6 +984,9 @@
           wireAntisepticVolumeHint(rowInputs);
         } else {
           wireMeasureHint(rowInputs, cat.product);
+          if (cat.kind === "sale" && cat.condition === "KD") {
+            stockChooser = buildStockChooser(measureBlock, rowInputs, flatInputs.breed, cat.dimension_combos);
+          }
         }
       }
 
@@ -864,6 +1000,7 @@
         measureBlock: measureBlock,
         rowBlock: rowBlock,
         kind: cat.kind,
+        stockChooser: stockChooser,
       };
     });
 
@@ -1253,6 +1390,9 @@
           });
           if (dimValues.every(function (v) { return v !== null; })) {
             lines.push("Размер: " + dimValues.join("x"));
+            if (row && row.stock_thickness !== undefined && row.stock_thickness !== null) {
+              lines.push("\u0421\u043e \u0441\u043a\u043b\u0430\u0434\u0430: " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length);
+            }
           } else {
             DIMENSION_FIELD_KEYS.forEach(function (dimKey, index) {
               if (dimValues[index] === null) {
@@ -1650,6 +1790,14 @@
           }
         });
         if (filledAny) {
+          if (state.stockChooser) {
+            var stock = state.stockChooser.value();
+            if (stock && (stock.thickness !== Number(row.thickness) || stock.width !== Number(row.width) || stock.length !== Number(row.length))) {
+              row.stock_thickness = stock.thickness;
+              row.stock_width = stock.width;
+              row.stock_length = stock.length;
+            }
+          }
           values.rows = [row];
         }
       }
@@ -1690,6 +1838,9 @@
           input.manualInput.value = "";
         }
       });
+      if (state.stockChooser) {
+        state.stockChooser.reset();
+      }
     }
 
     function buildPosition(key, values) {
@@ -1730,9 +1881,9 @@
       var available = findComboBalance(
         combos,
         values.breed,
-        formatServerNumber(row.thickness),
-        formatServerNumber(row.width),
-        formatServerNumber(row.length)
+        formatServerNumber(row.stock_thickness !== undefined ? row.stock_thickness : row.thickness),
+        formatServerNumber(row.stock_width !== undefined ? row.stock_width : row.width),
+        formatServerNumber(row.stock_length !== undefined ? row.stock_length : row.length)
       );
       if (available === null) {
         return { ok: true };
@@ -1743,6 +1894,12 @@
       return { ok: true };
     }
 
+    function stockSuffix(row) {
+      if (!row || row.stock_thickness === undefined || row.stock_thickness === null) {
+        return "";
+      }
+      return " (\u0441\u043e \u0441\u043a\u043b\u0430\u0434\u0430 " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length + ")";
+    }
     function positionSummaryText(key, values) {
       var cat = categories.filter(function (c) {
         return String(c.key) === key;
@@ -1767,6 +1924,7 @@
         if (measureText) {
           sizeText += " — " + measureText;
         }
+        sizeText += stockSuffix(row);
       } else if (values.volume) {
         sizeText = values.volume + " м3";
       }
@@ -1847,6 +2005,9 @@
       Object.keys(state.flatInputs).forEach(function (flatKey) {
         setFieldValue(state.flatInputs[flatKey], position[flatKey]);
       });
+      if (state.stockChooser) {
+        state.stockChooser.restore(row);
+      }
     }
 
     // Реальний баг (живий продакшн): "жму продолжить, потім повертаюсь
