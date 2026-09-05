@@ -161,12 +161,13 @@ CUSTOM_BUTTON_ACTIONS = [
     {"code": "start_low_stock_report", "section": "данные", "label": "Показать отчёт по низкому остатку"},
     {"code": "start_writeoff", "section": "списание", "label": "Начать списание товара"},
     {"code": "start_writeoff_form", "section": "списание", "label": "Начать списание одной формой"},
+    {"code": "start_exchange_form", "section": "обмен", "label": "Начать обмен одной формой"},
     {"code": "start_data_browser_form", "section": "данные", "label": "Показать данные одной формой"},
     {"code": "start_calculator", "section": "прочее", "label": "Открыть калькулятор"},
     {"code": "show_help", "section": "прочее", "label": "Показать справку"},
 ]
 
-CUSTOM_BUTTON_SECTIONS = ["приход", "реализация", "данные", "списание", "прочее"]
+CUSTOM_BUTTON_SECTIONS = ["приход", "реализация", "данные", "списание", "обмен", "прочее"]
 
 # Мітки, які кастомна кнопка НЕ може перевикористати (колізія з уже
 # захардкодженими кнопками головного меню бота). Жодна з 5 колишніх
@@ -215,6 +216,11 @@ BUILTIN_MIGRATED_CUSTOM_BUTTONS = [
     {"migration_key": "antiseptic_form", "label": "АНТИСЕПТИРОВАНИЕ (форма)", "action_code": "start_antiseptic_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "writeoff", "label": "СПИСАНИЕ", "action_code": "start_writeoff", "layout": "full", "parent_migration_key": None},
     {"migration_key": "writeoff_form", "label": "СПИСАНИЕ (форма)", "action_code": "start_writeoff_form", "layout": "full", "parent_migration_key": None},
+    # Задача користувача (2026-09-05, ТЗ пункт 1): "ОБМЕН" - лише формою,
+    # чатового близнюка без форми немає ("стару систему... ніколи не
+    # будемо"). Сіється в кінець меню, якщо кнопки ще нема; розкладення
+    # решти кнопок не чіпається - переставити можна в редакторі.
+    {"migration_key": "exchange_form", "label": "ОБМЕН (форма)", "action_code": "start_exchange_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "data_browser_form", "label": "ДАННЫЕ (форма)", "action_code": "start_data_browser_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "data_menu", "label": "ДАННЫЕ", "action_code": None, "layout": "full", "parent_migration_key": None},
     {"migration_key": "stock_report_section", "label": "СКЛАД", "action_code": "start_stock_report", "layout": "full", "parent_migration_key": "data_menu"},
@@ -278,6 +284,10 @@ BOT_MESSAGE_DEFAULTS = {
     "start_writeoff_form": (
         "Списание одной формой. Нажмите кнопку ниже и заполните всё сразу — "
         "категория и размеры."
+    ),
+    "start_exchange_form": (
+        "Обмен одной формой. Нажмите кнопку ниже и заполните два блока — "
+        "что отдаём и что получаем взамен."
     ),
     "start_data_browser_form": "Данные склада одной формой.",
     "start_calculator": "Что посчитать?",
@@ -2086,6 +2096,12 @@ class ExcelSqliteStore:
         # (стор._sync_warehouse_item/apply_writeoff_operation), тож єдиний
         # запис аудиту - саме цей рядок stock_movements.
         self._ensure_column("stock_movements", "reason", "TEXT")
+        # Задача користувача (2026-09-05, ТЗ пункт 1): "вся операция должна
+        # сохраняться в истории как один обмен, а не как несколько
+        # отдельных операций" - раніше журнал знав лише окремі рядки без
+        # жодного звʼязку між ними. Номер документа ("Обмен №7") звʼязує
+        # всі рядки однієї операції; це ж фундамент для пунктів 7, 9, 12.
+        self._ensure_column("stock_movements", "document", "TEXT")
         # Шаблони/недавні мега-форми (Задача користувача: "в історії
         # зберігається все... окрім ціни, штук") спершу забули адресу
         # вивантаження - вона теж мала зберігатись разом з клієнтом/оплатою.
@@ -4073,9 +4089,10 @@ class ExcelSqliteStore:
             INSERT INTO stock_movements (
                 movement_type, source, telegram_user_id, username, full_name,
                 product, breed, condition, thickness, width, length,
-                quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at
+                quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at,
+                document
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("movement_type", "income"),
@@ -4097,6 +4114,7 @@ class ExcelSqliteStore:
                 movement.get("sheet_row_id"),
                 movement.get("original_text"),
                 movement.get("created_at", datetime.now().isoformat(timespec="seconds")),
+                movement.get("document"),
             ),
         )
         if not was_in_transaction:
@@ -7011,6 +7029,307 @@ def antiseptic_sheet_values(store, payload, now):
         comment_parts.append(payload["comment"])
     set_value(values, columns.get("comment"), " | ".join(comment_parts))
     return values
+
+
+# --- Обмін (ТЗ пункт 1, 2026-09-05) ---
+# "Отдаём" списується зі складу за тими ж перевірками, що й списання;
+# "Получаем" приходується як прихід - у наявний рядок або в новий (відповідь
+# користувача 3: новий розмір дозволений). Усі перевірки обох блоків ідуть
+# ДО першого запису, самі записи - в одній транзакції: впала хоч одна -
+# не записано нічого (ТЗ пункт 12). Лист ОБМЕН отримує по рядку на позицію,
+# колонка "Отдаём / Получаем" каже, до якого блоку належить рядок, "Обмен №"
+# звʼязує всі рядки однієї операції; той самий номер лягає в
+# stock_movements.document - тому в історії це ОДИН обмін.
+EXCHANGE_GIVE_LABEL = "Отдаём"
+EXCHANGE_TAKE_LABEL = "Получаем"
+
+
+class _ExchangeAbort(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def _header_index_map(headers, names):
+    normalized_headers = {
+        _normalize_phrase(header): index
+        for index, header in enumerate(headers)
+        if header is not None
+    }
+    return {
+        target: next(
+            (
+                normalized_headers[_normalize_phrase(candidate)]
+                for candidate in candidates
+                if _normalize_phrase(candidate) in normalized_headers
+            ),
+            None,
+        )
+        for target, candidates in names.items()
+    }
+
+
+def exchange_columns(headers):
+    return _header_index_map(headers, {
+        "date": ["Дата"],
+        "time": ["Время"],
+        "document": ["Обмен №", "Документ"],
+        "side": ["Отдаём / Получаем", "Отдаем / Получаем"],
+        "product": ["Продукт"],
+        "breed": ["Порода"],
+        "condition": ["Состояние"],
+        "thickness": ["Толщина, мм", "Толщина"],
+        "width": ["Ширина, мм", "Ширина"],
+        "length": ["Длина, мм", "Длинна, мм", "Длина", "Длинна"],
+        "quantity": ["Количество, шт"],
+        "volume": ["Итоговый объем, м3"],
+        "area": ["Итоговая площадь, м2"],
+        "linear": ["Расчетный метраж, мп"],
+        "manager": ["Менеджер"],
+        "comment": ["Комментарий"],
+    })
+
+
+def exchange_sheet_values(store, position_payload, item, side_label, now, document_number):
+    headers = store.get_headers(EXCHANGE_SHEET_NAME)
+    values = [""] * len(headers)
+    columns = exchange_columns(headers)
+    moment = datetime.fromisoformat(now)
+    set_value(values, columns.get("date"), moment.date())
+    set_value(values, columns.get("time"), moment.time())
+    set_value(values, columns.get("document"), document_number)
+    set_value(values, columns.get("side"), side_label)
+    set_value(values, columns.get("product"), sheet_product_name(position_payload))
+    set_value(values, columns.get("breed"), position_payload.get("breed"))
+    set_value(values, columns.get("condition"), position_payload.get("condition"))
+    set_value(values, columns.get("thickness"), item.get("thickness"))
+    set_value(values, columns.get("width"), item.get("width"))
+    set_value(values, columns.get("length"), item.get("length"))
+    set_value(values, columns.get("quantity"), item.get("quantity"))
+    set_value(values, columns.get("volume"), item.get("volume"))
+    set_value(values, columns.get("area"), item.get("area"))
+    set_value(values, columns.get("linear"), item.get("linear"))
+    user = position_payload.get("user") or {}
+    set_value(values, columns.get("manager"), user.get("full_name") or user.get("username"))
+    set_value(values, columns.get("comment"), position_payload.get("comment"))
+    return values
+
+
+def _exchange_item_error(prefix, item):
+    return "Не удалось записать обмен: %s.\nПозиция: %s" % (prefix, income_item_size(item))
+
+
+def _check_exchange_give_balance(item, row_values, columns):
+    balance_qty = _number_value(row_value(row_values, columns["balance_qty"]))
+    if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
+        raise _ExchangeAbort(
+            "Не удалось записать обмен: на складе недостаточно штук для блока «Отдаём».\n"
+            "Позиция: %s. Доступно: %s шт." % (income_item_size(item), _display_bot_number(balance_qty))
+        )
+    measure_kind = item_measure_kind(item)
+    if measure_kind is None:
+        return
+    balance_column = columns.get("balance_" + measure_kind)
+    balance_measure = _number_value(row_value(row_values, balance_column)) if balance_column is not None else 0.0
+    if _number_value(item.get(measure_kind)) > balance_measure + INCOME_VOLUME_TOLERANCE:
+        raise _ExchangeAbort(
+            "Не удалось записать обмен: на складе недостаточно %s для блока «Отдаём».\n"
+            "Позиция: %s. Доступно: %s %s."
+            % (
+                {"volume": "объёма", "area": "площади", "linear": "погонных метров"}[measure_kind],
+                income_item_size(item), _display_bot_number(balance_measure), ITEM_MEASURE_UNIT[measure_kind],
+            )
+        )
+
+
+def _exchange_measure_delta(row_values, columns, item, sign, prefix):
+    """Ручний запис у рядок СКЛАД, коли для операції немає конфігурації полів."""
+    add_to_row_value(row_values, columns[prefix + "_qty"], sign * _number_value(item["quantity"]))
+    measure_kind = item_measure_kind(item)
+    if measure_kind is None:
+        return
+    column = columns.get(prefix + "_" + measure_kind)
+    if column is not None:
+        add_to_row_value(row_values, column, sign * _number_value(item[measure_kind]))
+
+
+def _new_warehouse_row_for_exchange(headers, columns, position_payload, item):
+    values = [""] * len(headers)
+    sheet_product = sheet_product_name(position_payload)
+    set_value(values, columns.get("product"), sheet_product)
+    set_value(values, columns.get("breed"), position_payload.get("breed"))
+    set_value(values, columns.get("condition"), position_payload.get("condition"))
+    set_value(values, columns.get("thickness"), item["thickness"])
+    set_value(values, columns.get("width"), item["width"])
+    set_value(values, columns.get("length"), item["length"])
+    measure_kind = item_measure_kind(item)
+    set_value(values, columns.get("unit"), ITEM_MEASURE_UNIT[measure_kind] if measure_kind else "шт")
+    set_value(values, columns.get("sku"), "%s|%s|%s" % (sheet_product, position_payload.get("breed"), income_item_size(item)))
+    return values
+
+
+def _exchange_report_line(index, head, item, sign, row_values, columns, note=""):
+    measure_kind = item_measure_kind(item)
+    text = "%d. %s%s: %s%s шт" % (
+        index, (head + " ") if head else "", _esc(income_item_size(item)), sign, _display_bot_number(item["quantity"]),
+    )
+    if measure_kind is not None:
+        text += ", %s%s %s" % (sign, _display_bot_number(item.get(measure_kind)), ITEM_MEASURE_UNIT[measure_kind])
+    if row_values is not None:
+        text += " (Осталось: %s)" % _esc(_remaining_balance_text(row_values, columns, measure_kind))
+    if note:
+        text += " " + note
+    return text
+
+
+def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
+    """Проводить обмін: "Отдаём" зі складу, "Получаем" на склад, один документ.
+
+    payload: user, comment, give=[позиція...], take=[позиція...]; позиція -
+    product/breed/condition + rows[{thickness,width,length,quantity,
+    volume|area|linear,row_id}] - те саме, що прихід/списання з форми.
+    """
+    give = payload.get("give") or []
+    take = payload.get("take") or []
+    if not give:
+        return {"ok": False, "message": "Не удалось записать обмен: блок «Отдаём» пуст."}
+    if not take:
+        return {"ok": False, "message": "Не удалось записать обмен: блок «Получаем» пуст."}
+    if not store.get_headers(EXCHANGE_SHEET_NAME):
+        return {
+            "ok": False,
+            "message": (
+                "Не удалось записать обмен: в таблице ещё нет листа ОБМЕН.\n"
+                "Нажмите «Обновить эксели» в программе, подтвердите добавление листа и повторите обмен."
+            ),
+        }
+    for position in list(give) + list(take):
+        for item in position.get("rows") or []:
+            if _number_value(item.get("quantity")) <= 0:
+                return {"ok": False, "message": "Не удалось записать обмен: количество не может быть отрицательным или равным нулю."}
+            measure_kind = item_measure_kind(item)
+            if measure_kind is not None and _number_value(item.get(measure_kind)) <= 0:
+                return {"ok": False, "message": "Не удалось записать обмен: объём/площадь/погонные метры не могут быть отрицательными или равными нулю."}
+
+    now = datetime.now().isoformat(timespec="seconds")
+    headers, columns, _rows = warehouse_rows(store)
+    user = payload.get("user") or {}
+    common = {key: value for key, value in payload.items() if key not in ("give", "take")}
+    give_done = []
+    take_done = []
+    document_number = None
+    try:
+        with store.conn:
+            store.conn.execute("BEGIN IMMEDIATE")
+            row_values_by_row_id = {}
+
+            # Отдаём: перевірка й списання позиція за позицією В ПАМʼЯТІ -
+            # так одна й та сама позиція у двох рядках перевіряється
+            # сукупно; на диск нічого не потрапляє до самого кінця.
+            for position in give:
+                position_payload = {**common, **position}
+                operation_id = resolve_operation_for_payload(store, "start_writeoff", "writeoff", position_payload)
+                for item in position.get("rows") or []:
+                    row_id = item.get("row_id")
+                    row_values = row_values_by_row_id.get(row_id) if row_id is not None else None
+                    if row_values is None and row_id is not None:
+                        row_values = store.get_row(row_id)
+                    if not row_values:
+                        raise _ExchangeAbort(_exchange_item_error("позиция для блока «Отдаём» не найдена на складе", item))
+                    row_values_by_row_id[row_id] = row_values
+                    _check_exchange_give_balance(item, row_values, columns)
+                    if operation_id is not None:
+                        execute_operation_write(store, operation_id, item, row_values, columns)
+                    else:
+                        _exchange_measure_delta(row_values, columns, item, -1, "balance")
+                    give_done.append((position_payload, item, row_values))
+
+            # Получаем: наявний рядок або новий.
+            for position in take:
+                position_payload = {**common, **position}
+                operation_id = resolve_operation_for_payload(store, "start_income", "income", position_payload)
+                for item in position.get("rows") or []:
+                    row_id = item.get("row_id")
+                    if row_id:
+                        row_values = row_values_by_row_id.get(row_id) or store.get_row(row_id)
+                        if not row_values:
+                            raise _ExchangeAbort(_exchange_item_error("позиция для блока «Получаем» больше не найдена на складе", item))
+                        row_values_by_row_id[row_id] = row_values
+                        if operation_id is not None:
+                            execute_operation_write(store, operation_id, item, row_values, columns)
+                        else:
+                            _exchange_measure_delta(row_values, columns, item, 1, "income")
+                            _exchange_measure_delta(row_values, columns, item, 1, "balance")
+                        take_done.append((position_payload, item, row_values, False))
+                    else:
+                        values = _new_warehouse_row_for_exchange(headers, columns, position_payload, item)
+                        if operation_id is not None:
+                            execute_operation_write(store, operation_id, item, values, columns)
+                        else:
+                            _exchange_measure_delta(values, columns, item, 1, "income")
+                            _exchange_measure_delta(values, columns, item, 1, "balance")
+                        sheet_row_id = store.add_row("СКЛАД", values)
+                        item["row_id"] = sheet_row_id
+                        row_values_by_row_id[sheet_row_id] = values
+                        take_done.append((position_payload, item, values, True))
+
+            for row_id, row_values in row_values_by_row_id.items():
+                store.update_row(row_id, row_values)
+
+            existing_count = len(store.fetch_rows(EXCHANGE_SHEET_NAME, 100000, 0))
+            document_number = "Обмен №%d" % _next_document_number(store, EXCHANGE_SHEET_NAME, existing_count)
+            for side_label, movement_type, done in (
+                (EXCHANGE_GIVE_LABEL, "exchange_out", [(p, i, r) for p, i, r in give_done]),
+                (EXCHANGE_TAKE_LABEL, "exchange_in", [(p, i, r) for p, i, r, _new in take_done]),
+            ):
+                for position_payload, item, _row_values in done:
+                    insert_sheet_row(
+                        store, EXCHANGE_SHEET_NAME,
+                        exchange_sheet_values(store, position_payload, item, side_label, now, document_number), now,
+                    )
+                    store.add_stock_movement({
+                        "movement_type": movement_type,
+                        "source": "telegram",
+                        "telegram_user_id": user.get("id"),
+                        "username": user.get("username"),
+                        "full_name": user.get("full_name"),
+                        "product": sheet_product_name(position_payload),
+                        "breed": position_payload.get("breed"),
+                        "condition": position_payload.get("condition"),
+                        "thickness": item.get("thickness"),
+                        "width": item.get("width"),
+                        "length": item.get("length"),
+                        "quantity": item.get("quantity"),
+                        "volume": item.get("volume"),
+                        "area": item.get("area"),
+                        "linear": item.get("linear"),
+                        "reason": payload.get("comment"),
+                        "sheet_row_id": item.get("row_id"),
+                        "original_text": payload.get("original_text"),
+                        "created_at": now,
+                        "document": document_number,
+                    })
+    except _ExchangeAbort as exc:
+        return {"ok": False, "message": exc.message}
+
+    excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", EXCHANGE_SHEET_NAME], dirty_notifier)
+    lines = ["<b>%s</b> записан." % _esc(document_number), "", "<b>Отдаём:</b>"]
+    for index, (position_payload, item, row_values) in enumerate(give_done, start=1):
+        head = " / ".join(_esc(part) for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition")) if part)
+        lines.append(_exchange_report_line(index, head, item, "\u2212", row_values, columns))
+    lines += ["", "<b>Получаем:</b>"]
+    for index, (position_payload, item, row_values, is_new) in enumerate(take_done, start=1):
+        head = " / ".join(_esc(part) for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition")) if part)
+        lines.append(_exchange_report_line(index, head, item, "+", row_values, columns, "(новая позиция)" if is_new else ""))
+    if payload.get("comment"):
+        lines.append("")
+        lines.append("Комментарий: %s" % _esc(payload["comment"]))
+    lines.append("")
+    lines.append("✅ Выполнено.")
+    if excel_warning:
+        lines.append("")
+        lines.append(_esc(excel_warning))
+    return {"ok": True, "message": "\n".join(lines), "document": document_number}
 
 
 def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):

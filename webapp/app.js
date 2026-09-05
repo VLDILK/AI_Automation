@@ -2765,6 +2765,661 @@
     }
   }
 
+  // --- Обмін (ТЗ пункт 1, 2026-09-05) ---
+  // Задача користувача: кнопка "ОБМЕН", два блоки "Отдаём" і "Получаем",
+  // кілька позицій у кожному, "Добавить ещё позицию" в кожному окремо,
+  // завершити лише коли обидва заповнені. Робота лише через форму.
+  // Обраний варіант 01 із пʼяти: два блоки один під одним, у кожного свій
+  // кошик і своя кнопка "Добавить". Поля, кошик, чипи ✎/✕, підказки
+  // залишку й м3/мп - ті самі помічники, що й у mainAllInOne, тож обмін
+  // не вчить людину нового.
+  //
+  // Відповіді користувача: "Получаем" може створити новий розмір (мітка
+  // "новая"); порожній блок - помилка, яка НЕ перериває й НІЧОГО не стирає.
+  function exchangeAllInOne(ctx) {
+    var formEl = document.getElementById("form");
+    var rowsContainer = document.getElementById("rows");
+    var singleContainer = document.getElementById("single-fields");
+    var errorEl = document.getElementById("error");
+    var confirmView = document.getElementById("confirm-view");
+    var confirmSummaryEl = document.getElementById("confirm-summary");
+    var confirmEditButton = document.getElementById("confirm-edit-button");
+    var confirmPayload = null;
+
+    function haptic(kind) {
+      if (tg && tg.HapticFeedback) {
+        tg.HapticFeedback.notificationOccurred(kind);
+      }
+    }
+
+    function fail(text) {
+      errorEl.textContent = text;
+      haptic("error");
+    }
+
+    function pluralPositions(count) {
+      var mod10 = count % 10;
+      var mod100 = count % 100;
+      if (mod10 === 1 && mod100 !== 11) {
+        return count + " позиция";
+      }
+      if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+        return count + " позиции";
+      }
+      return count + " позиций";
+    }
+
+    // Той самий setFieldValue, що й у mainAllInOne (він там - замикання):
+    // select зі списку або ручне значення, якщо такого пункту немає.
+    function setValueInto(input, value) {
+      if (value === undefined || value === null || value === "") {
+        return;
+      }
+      var stringValue = String(value);
+      if (input.tagName === "SELECT") {
+        var matched = false;
+        for (var i = 0; i < input.options.length; i++) {
+          if (input.options[i].value === stringValue) {
+            input.value = stringValue;
+            matched = true;
+            break;
+          }
+        }
+        if (matched) {
+          if (input.manualInput) {
+            input.manualInput.value = "";
+          }
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          return;
+        }
+        if (input.manualInput) {
+          input.value = "";
+          input.manualInput.value = stringValue;
+          return;
+        }
+      }
+      input.value = stringValue;
+    }
+
+    function pickRow(row) {
+      var picked = {};
+      ["thickness", "width", "length", "quantity"].forEach(function (key) {
+        if (row && row[key] !== undefined && row[key] !== null && row[key] !== "") {
+          picked[key] = row[key];
+        }
+      });
+      return picked;
+    }
+
+    function buildBlock(side, title, addLabel, cats) {
+      var block = document.createElement("div");
+      block.className = "exchange-block exchange-block-" + side;
+
+      var head = document.createElement("div");
+      head.className = "exchange-block-head";
+      var titleEl = document.createElement("span");
+      titleEl.className = "exchange-block-title";
+      titleEl.textContent = title;
+      var countEl = document.createElement("span");
+      countEl.className = "exchange-block-count";
+      head.appendChild(titleEl);
+      head.appendChild(countEl);
+      block.appendChild(head);
+
+      var cartSection = document.createElement("div");
+      cartSection.className = "cart-section";
+      cartSection.style.display = "none";
+      var cartList = document.createElement("div");
+      cartList.className = "cart-list";
+      cartSection.appendChild(cartList);
+      block.appendChild(cartSection);
+
+      var categoryWrap = document.createElement("div");
+      categoryWrap.className = "field";
+      var categoryLabel = document.createElement("label");
+      categoryLabel.textContent = "Категория *";
+      applyFieldLabelStyle(categoryLabel, "category");
+      categoryWrap.appendChild(categoryLabel);
+      var select = document.createElement("select");
+      select.className = "field-wide";
+      cats.forEach(function (cat) {
+        var option = document.createElement("option");
+        option.value = String(cat.key);
+        option.textContent = cat.label;
+        select.appendChild(option);
+      });
+      categoryWrap.appendChild(select);
+      block.appendChild(categoryWrap);
+
+      var identityContainer = document.createElement("div");
+      var measureContainer = document.createElement("div");
+      block.appendChild(identityContainer);
+      block.appendChild(measureContainer);
+
+      var state = {};
+      cats.forEach(function (cat) {
+        var identityBlock = document.createElement("div");
+        identityBlock.className = "category-group";
+        var measureBlock = document.createElement("div");
+        measureBlock.className = "category-group";
+        var fields = cat.fields || [];
+        var identityFields = fields.filter(function (f) { return !isMeasureField(f); });
+        var perRow = fields.filter(function (f) { return f.per_row && isMeasureField(f); });
+        var flatMeasure = fields.filter(function (f) { return !f.per_row && isMeasureField(f); });
+        var rowInputs = {};
+        if (perRow.length) {
+          var rowBlock = document.createElement("div");
+          rowBlock.className = "row-block";
+          perRow.forEach(function (field) {
+            rowInputs[field.key] = buildFieldElement(field, rowBlock);
+          });
+          measureBlock.appendChild(rowBlock);
+        }
+        var flatInputs = {};
+        identityFields.forEach(function (field) {
+          flatInputs[field.key] = buildFieldElement(field, identityBlock);
+        });
+        flatMeasure.forEach(function (field) {
+          flatInputs[field.key] = buildFieldElement(field, measureBlock);
+        });
+        if (perRow.length) {
+          wireDimensionCascade(rowInputs, cat.dimension_combos, flatInputs.breed);
+          wireMeasureHint(rowInputs, cat.product);
+        }
+        identityContainer.appendChild(identityBlock);
+        measureContainer.appendChild(measureBlock);
+        state[String(cat.key)] = {
+          fields: fields,
+          rowInputs: rowInputs,
+          flatInputs: flatInputs,
+          identityBlock: identityBlock,
+          measureBlock: measureBlock,
+        };
+      });
+
+      function showCategory(key) {
+        Object.keys(state).forEach(function (k) {
+          var display = k === key ? "" : "none";
+          state[k].identityBlock.style.display = display;
+          state[k].measureBlock.style.display = display;
+        });
+      }
+      select.addEventListener("change", function () {
+        showCategory(select.value);
+      });
+      if (cats.length) {
+        select.value = String(cats[0].key);
+        showCategory(select.value);
+      }
+
+      var addButton = document.createElement("button");
+      addButton.type = "button";
+      addButton.className = "add-position-button";
+      addButton.textContent = addLabel;
+      block.appendChild(addButton);
+
+      var cart = [];
+
+      function category(key) {
+        return cats.filter(function (c) { return String(c.key) === key; })[0];
+      }
+
+      function fieldByKey(categoryFields, key) {
+        return categoryFields.filter(function (f) { return f.key === key; })[0];
+      }
+
+      function collectOne(field, input) {
+        var value = readFieldValue(input);
+        var wrap = input.closest(".field");
+        if (wrap) {
+          wrap.classList.remove("invalid");
+        }
+        if (value === "") {
+          if (field.required !== false) {
+            if (wrap) {
+              wrap.classList.add("invalid");
+            }
+            return { ok: false, missing: true };
+          }
+          return { ok: true };
+        }
+        return { ok: true, value: field.numeric ? Number(String(value).replace(",", ".")) : value };
+      }
+
+      function collect(key) {
+        var st = state[key];
+        if (!st) {
+          return { ok: false };
+        }
+        var values = {};
+        var missingAny = false;
+        var filledAny = false;
+        var rowKeys = Object.keys(st.rowInputs);
+        if (rowKeys.length) {
+          var row = {};
+          rowKeys.forEach(function (rowKey) {
+            var result = collectOne(fieldByKey(st.fields, rowKey), st.rowInputs[rowKey]);
+            if (result.value !== undefined) {
+              filledAny = true;
+              row[rowKey] = result.value;
+            } else if (result.missing) {
+              missingAny = true;
+            }
+          });
+          if (filledAny) {
+            values.rows = [row];
+          }
+        }
+        Object.keys(st.flatInputs).forEach(function (flatKey) {
+          var result = collectOne(fieldByKey(st.fields, flatKey), st.flatInputs[flatKey]);
+          if (result.value !== undefined) {
+            filledAny = true;
+            values[flatKey] = result.value;
+          } else if (result.missing) {
+            missingAny = true;
+          }
+        });
+        if (!filledAny) {
+          return { ok: true, empty: true, values: values };
+        }
+        return { ok: !missingAny, empty: false, values: values };
+      }
+
+      function clearInputs(key) {
+        var st = state[key];
+        if (!st) {
+          return;
+        }
+        [st.rowInputs, st.flatInputs].forEach(function (group) {
+          Object.keys(group).forEach(function (k) {
+            var input = group[k];
+            input.value = "";
+            if (input.manualInput) {
+              input.manualInput.value = "";
+            }
+            var wrap = input.closest(".field");
+            if (wrap) {
+              wrap.classList.remove("invalid");
+            }
+          });
+        });
+      }
+
+      function populate(key, position) {
+        var st = state[key];
+        if (!st) {
+          return;
+        }
+        // Спершу порода: від неї залежать списки товщини/ширини/довжини.
+        Object.keys(st.flatInputs).forEach(function (k) {
+          setValueInto(st.flatInputs[k], position[k]);
+        });
+        var row = (position.rows && position.rows[0]) || {};
+        Object.keys(st.rowInputs).forEach(function (k) {
+          setValueInto(st.rowInputs[k], row[k]);
+        });
+      }
+
+      function hasCombos(key) {
+        var cat = category(key);
+        return !!(cat && cat.dimension_combos && cat.dimension_combos.length);
+      }
+
+      function balanceFor(key, values) {
+        var cat = category(key);
+        var combos = cat && cat.dimension_combos;
+        var row = values.rows && values.rows[0];
+        if (!combos || !combos.length || !row) {
+          return null;
+        }
+        return findComboBalance(
+          combos,
+          values.breed,
+          formatServerNumber(row.thickness),
+          formatServerNumber(row.width),
+          formatServerNumber(row.length)
+        );
+      }
+
+      function measureOf(key, values) {
+        var cat = category(key);
+        var row = values.rows && values.rows[0];
+        if (!row) {
+          return null;
+        }
+        var kind = rowMeasureKind(cat && cat.product, row.thickness, row.width);
+        if (!kind) {
+          return null;
+        }
+        var qty = numberOrZero(row.quantity);
+        if (qty <= 0) {
+          return null;
+        }
+        return { kind: kind, amount: pieceMeasure(row.thickness, row.width, row.length, kind) * qty };
+      }
+
+      function summaryText(key, values) {
+        var cat = category(key);
+        var text = cat ? cat.label : key;
+        var row = values.rows && values.rows[0];
+        if (row) {
+          var dims = [row.thickness, row.width, row.length].filter(function (v) {
+            return v !== undefined && v !== null && v !== "";
+          }).join("x");
+          if (dims) {
+            text += ", " + dims;
+          }
+          if (row.quantity) {
+            text += " × " + row.quantity;
+          }
+          var measureText = computeMeasureText(cat && cat.product, row.thickness, row.width, row.length, row.quantity);
+          if (measureText) {
+            text += " — " + measureText;
+          }
+        }
+        if (values.breed) {
+          text += " (" + values.breed + ")";
+        }
+        return text;
+      }
+
+      function makeItem(key, values) {
+        var numericKey = Number(key);
+        var position = { category_operation_id: isNaN(numericKey) ? key : numericKey };
+        Object.keys(values).forEach(function (k) {
+          position[k] = values[k];
+        });
+        return {
+          key: key,
+          position: position,
+          summary: summaryText(key, values),
+          isNew: side === "take" && hasCombos(key) && balanceFor(key, values) === null,
+          measure: measureOf(key, values),
+        };
+      }
+
+      function refreshCount() {
+        if (!cart.length) {
+          countEl.textContent = "пусто";
+          return;
+        }
+        var quantity = 0;
+        var byUnit = {};
+        cart.forEach(function (item) {
+          var row = item.position.rows && item.position.rows[0];
+          quantity += numberOrZero(row && row.quantity);
+          if (item.measure) {
+            byUnit[item.measure.kind] = (byUnit[item.measure.kind] || 0) + item.measure.amount;
+          }
+        });
+        var parts = [pluralPositions(cart.length), formatServerNumber(quantity) + " шт"];
+        Object.keys(byUnit).forEach(function (kind) {
+          parts.push(formatServerNumber(byUnit[kind]) + " " + MEASURE_UNIT_BY_KIND[kind]);
+        });
+        countEl.textContent = parts.join(" · ");
+      }
+
+      function renderCart() {
+        cartList.innerHTML = "";
+        cartSection.style.display = cart.length ? "" : "none";
+        cart.forEach(function (item, index) {
+          var row = document.createElement("div");
+          row.className = "cart-item";
+          var textWrap = document.createElement("div");
+          textWrap.className = "cart-item-text-wrap";
+          var text = document.createElement("span");
+          text.className = "cart-item-text";
+          text.textContent = (index + 1) + ". " + item.summary;
+          textWrap.appendChild(text);
+          row.appendChild(textWrap);
+          if (item.isNew) {
+            var badge = document.createElement("span");
+            badge.className = "cart-item-badge-new";
+            badge.textContent = "новая";
+            row.appendChild(badge);
+          }
+          var actions = document.createElement("div");
+          actions.className = "cart-item-actions";
+          var editBtn = document.createElement("button");
+          editBtn.type = "button";
+          editBtn.className = "cart-item-btn";
+          editBtn.textContent = "✎";
+          editBtn.addEventListener("click", function () {
+            editItem(index);
+          });
+          actions.appendChild(editBtn);
+          var removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "cart-item-btn cart-item-btn-remove";
+          removeBtn.textContent = "✕";
+          removeBtn.addEventListener("click", function () {
+            removeItem(index);
+          });
+          actions.appendChild(removeBtn);
+          row.appendChild(actions);
+          cartList.appendChild(row);
+        });
+        refreshCount();
+      }
+
+      function stockProblem(key, values) {
+        if (side !== "give") {
+          return null;
+        }
+        var available = balanceFor(key, values);
+        var row = values.rows && values.rows[0];
+        if (available !== null && row && Number(row.quantity) > available) {
+          return "На складе только " + available + " шт. Уменьшите количество в блоке «" + title + "».";
+        }
+        return null;
+      }
+
+      function addCurrent() {
+        errorEl.textContent = "";
+        var key = select.value;
+        var result = collect(key);
+        if (!result.ok || result.empty) {
+          fail("Заполните все поля позиции в блоке «" + title + "».");
+          return;
+        }
+        var problem = stockProblem(key, result.values);
+        if (problem) {
+          fail(problem);
+          return;
+        }
+        cart.push(makeItem(key, result.values));
+        clearInputs(key);
+        renderCart();
+        haptic("success");
+      }
+
+      function editItem(index) {
+        var item = cart[index];
+        if (!item) {
+          return;
+        }
+        cart.splice(index, 1);
+        select.value = item.key;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        populate(item.key, item.position);
+        errorEl.textContent = "";
+        renderCart();
+        block.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+
+      function removeItem(index) {
+        cart.splice(index, 1);
+        renderCart();
+      }
+
+      addButton.addEventListener("click", addCurrent);
+
+      // Усе, що є в блоці зараз: кошик плюс заповнена, але ще не додана
+      // позиція. Наполовину заповнена - помилка, нічого не стирається.
+      function finalize() {
+        var key = select.value;
+        var result = collect(key);
+        if (!result.ok) {
+          fail("Заполните все поля позиции в блоке «" + title + "» или очистите их.");
+          return null;
+        }
+        var items = cart.slice();
+        if (!result.empty) {
+          var problem = stockProblem(key, result.values);
+          if (problem) {
+            fail(problem);
+            return null;
+          }
+          items.push(makeItem(key, result.values));
+        }
+        return items;
+      }
+
+      function restore(entries) {
+        (entries || []).forEach(function (entry) {
+          var key = String(entry.category_operation_id);
+          if (!state[key]) {
+            return;
+          }
+          var values = {};
+          if (entry.breed) {
+            values.breed = entry.breed;
+          }
+          if (entry.rows && entry.rows.length) {
+            values.rows = [pickRow(entry.rows[0])];
+          }
+          cart.push(makeItem(key, values));
+        });
+        renderCart();
+      }
+
+      return { element: block, finalize: finalize, restore: restore, title: title };
+    }
+
+    var giveBlock = buildBlock("give", "Отдаём", "+ Добавить в «Отдаём»", ctx.give_categories || []);
+    var takeBlock = buildBlock("take", "Получаем", "+ Добавить в «Получаем»", ctx.take_categories || []);
+    rowsContainer.appendChild(giveBlock.element);
+    rowsContainer.appendChild(takeBlock.element);
+
+    var commonInputs = {};
+    (ctx.common_fields || []).forEach(function (field) {
+      commonInputs[field.key] = buildFieldElement(field, singleContainer);
+    });
+
+    function buildSummary(giveItems, takeItems, comment) {
+      var wrap = document.createElement("div");
+      function section(title, cls, items) {
+        var heading = document.createElement("div");
+        heading.className = "exchange-summary-title " + cls;
+        heading.textContent = title;
+        wrap.appendChild(heading);
+        items.forEach(function (item, index) {
+          var line = document.createElement("div");
+          line.textContent = (index + 1) + ". " + item.summary + (item.isNew ? " — новая позиция" : "");
+          wrap.appendChild(line);
+        });
+      }
+      section("Отдаём", "give", giveItems);
+      section("Получаем", "take", takeItems);
+      if (comment) {
+        var commentLine = document.createElement("div");
+        commentLine.textContent = "Комментарий: " + comment;
+        wrap.appendChild(commentLine);
+      }
+      return wrap;
+    }
+
+    function showConfirm(payload, summary) {
+      confirmPayload = payload;
+      confirmSummaryEl.innerHTML = "";
+      confirmSummaryEl.appendChild(summary);
+      errorEl.textContent = "";
+      formEl.style.display = "none";
+      confirmView.style.display = "";
+    }
+
+    function hideConfirm() {
+      confirmPayload = null;
+      confirmView.style.display = "none";
+      formEl.style.display = "";
+    }
+    confirmEditButton.addEventListener("click", hideConfirm);
+
+    var isSending = false;
+    function send(payload) {
+      if (isSending) {
+        return;
+      }
+      var json = JSON.stringify(payload);
+      if (!tg) {
+        window.alert(json);
+        return;
+      }
+      // Той самий ліміт sendData (~4096 байт), що й у решти форми.
+      if (new TextEncoder().encode(json).length > 4000) {
+        window.alert("Слишком много позиций для одной отправки — разделите обмен на два.");
+        return;
+      }
+      isSending = true;
+      if (tg.MainButton && tg.MainButton.showProgress) {
+        tg.MainButton.showProgress(false);
+      }
+      tg.sendData(json);
+    }
+
+    function submit() {
+      if (confirmPayload) {
+        send(confirmPayload);
+        return;
+      }
+      errorEl.textContent = "";
+      var giveItems = giveBlock.finalize();
+      if (giveItems === null) {
+        return;
+      }
+      var takeItems = takeBlock.finalize();
+      if (takeItems === null) {
+        return;
+      }
+      if (!giveItems.length) {
+        fail("В блоке «Отдаём» пока пусто — добавьте хотя бы одну позицию. Введённое сохранено.");
+        return;
+      }
+      if (!takeItems.length) {
+        fail("В блоке «Получаем» пока пусто — добавьте хотя бы одну позицию. Введённое сохранено.");
+        return;
+      }
+      var comment = commonInputs.comment ? String(readFieldValue(commonInputs.comment) || "").trim() : "";
+      var payload = {
+        positions_kind: "exchange",
+        give: giveItems.map(function (item) { return item.position; }),
+        take: takeItems.map(function (item) { return item.position; }),
+      };
+      if (comment) {
+        payload.comment = comment;
+      }
+      showConfirm(payload, buildSummary(giveItems, takeItems, comment));
+    }
+
+    if (ctx.resume) {
+      giveBlock.restore(ctx.resume.give);
+      takeBlock.restore(ctx.resume.take);
+      if (ctx.resume.common && ctx.resume.common.comment && commonInputs.comment) {
+        setValueInto(commonInputs.comment, ctx.resume.common.comment);
+      }
+    }
+
+    if (tg && tg.MainButton) {
+      tg.MainButton.setText("Отправить");
+      tg.MainButton.show();
+      tg.MainButton.onClick(submit);
+    } else {
+      var fallback = document.getElementById("fallback-submit");
+      fallback.style.display = "block";
+      fallback.onclick = submit;
+    }
+  }
+
   function main() {
     var token = new URLSearchParams(window.location.search).get("t");
     if (token) {
@@ -2819,7 +3474,13 @@
     }
 
     if (ctx.mode === "all_in_one") {
-      mainAllInOne(ctx);
+      // Обмін - окрема форма з двома блоками (exchangeAllInOne), решта
+      // операцій - одна мега-форма з одним кошиком.
+      if (ctx.kind === "exchange") {
+        exchangeAllInOne(ctx);
+      } else {
+        mainAllInOne(ctx);
+      }
       return;
     }
 

@@ -161,6 +161,8 @@ class MenuDialogMixin:
             return self._start_writeoff_operation(store, context)
         if action_code == "start_writeoff_form":
             return self._start_writeoff_all_in_one_reply(store, context)
+        if action_code == "start_exchange_form":
+            return self._start_exchange_all_in_one_reply(store, context)
         if action_code == "start_calculator":
             return self._start_calculator_operation("калькулятор", store, context)
         if action_code == "show_help":

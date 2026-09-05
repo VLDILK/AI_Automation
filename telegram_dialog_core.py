@@ -22,6 +22,11 @@ from utils import (
     _number_value,
 )
 from warehouse_data import (
+    ITEM_MEASURE_UNIT,
+    apply_exchange_operation,
+    display_product_name,
+    item_measure_kind,
+    _display_bot_number,
     BOT_MESSAGE_DEFAULTS,
     INCOME_VOLUME_TOLERANCE,
     antiseptic_rows,
@@ -583,6 +588,10 @@ class CoreDialogMixin:
         # взагалі - падав у sale-форму замість форми антисептирования.
         if kind == "antiseptic":
             return self._start_antiseptic_all_in_one_reply(store, context, resume_payload=payload)
+        if kind == "exchange":
+            return self._start_exchange_all_in_one_reply(
+                store, context, resume=self._build_exchange_resume(store, payload),
+            )
         # Задача користувача (скріншот "Вернуться в форму"): продажа - єдина
         # мега-форма з кошиком, тож єдина, де є що "повернути" -
         # resume_payload несе вже введені позиції/клієнта/адресу/оплату.
@@ -593,6 +602,8 @@ class CoreDialogMixin:
         # відомо, яка саме операція (категорія дерева/антисептирование) -
         # її обирає сама форма (поле "Категория"), тож дисптечеризація за
         # operation_type тут ще НЕ застосовна - окрема гілка ПЕРЕД нею.
+        if pending.get("status") == "exchange_all_in_one":
+            return self._continue_exchange_all_in_one_submission(store, context, submitted)
         if pending.get("status") == "sale_all_in_one":
             return self._continue_sale_all_in_one_submission(store, context, submitted)
         if pending.get("status") == "writeoff_all_in_one":
@@ -1488,6 +1499,326 @@ class CoreDialogMixin:
             ctx["resume"] = resume
         return ctx
 
+    # --- Обмін (ТЗ пункт 1, 2026-09-05) ---
+    # Задача користувача: кнопка "ОБМЕН", два блоки "Отдаём"/"Получаем",
+    # кілька позицій у кожному, все проводиться одночасно, один запис в
+    # історії. Робота ЛИШЕ через форму ("стару систему... ніколи не
+    # будемо"), чат - підтвердження. Обраний варіант 01 із пʼяти: два блоки
+    # один під одним, у кожного свій кошик і своя кнопка "Добавить".
+    # Відповіді користувача: без грошей і контрагента; "Получаем" може
+    # створити новий розмір; порожній блок - помилка без переривання, з
+    # поверненням у форму з усім введеним.
+    _WEBAPP_ALL_IN_ONE_EXCHANGE_COMMON_KEYS = ("comment",)
+    _EXCHANGE_CONFIRM_LABEL = "Провести обмен"
+
+    def _webapp_exchange_categories(self, store, parent_action_code, keys, allow_new):
+        categories = []
+        for operation in store.list_operations(parent_action_code):
+            op_id, _code, kind, _requires_identity, label, _parent, prefill_json, *_rest = operation
+            prefill = json.loads(prefill_json) if prefill_json else {}
+            sub_payload = {"product": prefill.get("product"), "condition": prefill.get("condition")}
+            sub_ctx = self._webapp_form_context(
+                store, op_id, keys, sub_payload, label, restrict_to_existing_combos=not allow_new,
+            )
+            categories.append({
+                "key": op_id,
+                "label": label,
+                "kind": kind,
+                "fields": sub_ctx["fields"],
+                "dimension_combos": sub_ctx["dimension_combos"],
+                "product": prefill.get("product"),
+            })
+        return categories
+
+    def _webapp_all_in_one_exchange_context(self, store, resume=None):
+        # "Отдаём" - категорії списання (лише наявні розміри, з залишками),
+        # "Получаем" - категорії приходу (новий розмір дозволений).
+        give = self._webapp_exchange_categories(
+            store, "start_writeoff", self._WEBAPP_ALL_IN_ONE_WRITEOFF_KEYS, allow_new=False,
+        )
+        take = self._webapp_exchange_categories(
+            store, "start_income", self._WEBAPP_ALL_IN_ONE_INCOME_KEYS, allow_new=True,
+        )
+        common_ctx = self._webapp_form_context(
+            store, None, self._WEBAPP_ALL_IN_ONE_EXCHANGE_COMMON_KEYS, {}, "Обмен"
+        )
+        ctx = {
+            "mode": "all_in_one",
+            "kind": "exchange",
+            "title": "Обмен одной формой",
+            "categories": [],
+            "give_categories": give,
+            "take_categories": take,
+            "common_fields": common_ctx["fields"],
+            **self._webapp_style_ctx(),
+        }
+        if resume:
+            ctx["resume"] = resume
+        return ctx
+
+    def _exchange_resume_from_positions(self, give, take, comment):
+        """Форма відновлює обидва блоки з {category_operation_id, breed, rows}."""
+        def entries(positions):
+            out = []
+            for position in positions or []:
+                if not isinstance(position, dict) or not position.get("rows"):
+                    continue
+                out.append({
+                    "category_operation_id": position.get("category_operation_id"),
+                    "breed": position.get("breed"),
+                    "rows": position.get("rows"),
+                })
+            return out
+        resume = {"give": entries(give), "take": entries(take), "common": {"comment": comment}}
+        return resume if resume["give"] or resume["take"] else None
+
+    def _build_exchange_resume(self, store, payload):
+        """Те саме, але з уже розібраних позицій (після підтвердження)."""
+        if not payload:
+            return None
+        def with_operation(positions, parent_action_code, kind):
+            out = []
+            for position in positions or []:
+                operation_id = resolve_operation_for_payload(store, parent_action_code, kind, position)
+                if operation_id is None:
+                    continue
+                out.append({**position, "category_operation_id": operation_id})
+            return out
+        return self._exchange_resume_from_positions(
+            with_operation(payload.get("give"), "start_writeoff", "writeoff"),
+            with_operation(payload.get("take"), "start_income", "income"),
+            payload.get("comment"),
+        )
+
+    def _exchange_all_in_one_webapp_button(self, store, resume=None):
+        base_url = getattr(self, "webapp_public_url", None)
+        if not base_url:
+            return None
+        ctx = self._webapp_all_in_one_exchange_context(store, resume=resume)
+        if not ctx["give_categories"] or not ctx["take_categories"]:
+            return None
+        token = webapp_server.register_context(ctx)
+        url = f"{base_url.rstrip('/')}/index.html?t={token}"
+        return {"web_app": {"url": url}}
+
+    def _require_exchange_permission(self, store, context):
+        # Обмін = списання + прихід, тож потрібні обидва права.
+        return (
+            self._require_permission(store, context, perm.WRITEOFF)
+            or self._require_permission(store, context, perm.INCOME)
+        )
+
+    def _start_exchange_all_in_one_reply(self, store, context, resume=None, prefix_text=None):
+        denied = self._require_exchange_permission(store, context)
+        if denied:
+            return denied
+        web_app = self._exchange_all_in_one_webapp_button(store, resume=resume)
+        if web_app is None:
+            return self._with_main_menu("Обмен одной формой сейчас недоступен (форма не подключена).", store)
+        store.save_pending_operation(
+            context["chat_id"], context["user_id"], "stock_exchange", "exchange_all_in_one", {},
+        )
+        text = store.get_message_template("start_exchange_form", BOT_MESSAGE_DEFAULTS["start_exchange_form"])
+        if prefix_text:
+            text = prefix_text + "\n\n" + text
+        return {
+            "type": "message",
+            "text": text,
+            "reply_markup": {
+                "keyboard": [
+                    [{"text": "Заполнить форму обмена", **web_app}],
+                    [{"text": "Главное меню"}],
+                ],
+                "resize_keyboard": True,
+            },
+        }
+
+    def _exchange_positions_from_form(self, store, context, positions_data, parent_action_code, kind):
+        """Позиції одного блоку з форми -> розібрані позиції, або (None, текст помилки)."""
+        resolved = []
+        for position in positions_data or []:
+            if not isinstance(position, dict):
+                continue
+            position = dict(position)
+            operation_id = position.pop("category_operation_id", None)
+            operation = store.get_operation(operation_id) if operation_id is not None else None
+            if operation is None:
+                return None, "Не удалось определить категорию одной из позиций."
+            _op_id, _code, op_kind, _requires_identity, _label, _parent, prefill_json, *_rest = operation
+            if op_kind != kind:
+                return None, "Одна из позиций попала не в тот блок обмена."
+            prefill = json.loads(prefill_json) if prefill_json else {}
+            item_payload = self._new_income_payload("", context)
+            item_payload["operation_kind"] = kind
+            item_payload["product"] = prefill.get("product")
+            if prefill.get("condition"):
+                item_payload["condition"] = prefill.get("condition")
+            self._merge_webapp_submission(item_payload, position)
+            if not item_payload.get("rows"):
+                return None, "Одна из позиций без размера или количества."
+            amount_issue = self._prepare_income_amounts(item_payload)
+            if amount_issue:
+                return None, "Не удалось рассчитать одну из позиций. Проверьте размеры и количество."
+            if kind == "writeoff":
+                match_issue = self._resolve_sale_rows(store, item_payload)
+                if match_issue:
+                    message = match_issue.get("message") or (
+                        "Не найдено на складе: %s." % sale_position_text(item_payload, match_issue["item"])
+                    )
+                    return None, message
+                stock_issue = self._sale_stock_issue(store, item_payload)
+                if stock_issue:
+                    return None, self._writeoff_stock_issue_text(item_payload, stock_issue)
+            else:
+                match_issue = self._resolve_income_rows(store, item_payload)
+                if match_issue:
+                    return None, match_issue
+            resolved.append({
+                key: item_payload[key]
+                for key in ("product", "breed", "condition", "rows")
+                if key in item_payload
+            })
+        return resolved, None
+
+    def _continue_exchange_all_in_one_submission(self, store, context, submitted):
+        denied = self._require_exchange_permission(store, context)
+        if denied:
+            return denied
+        store.delete_pending_operation(context["chat_id"], context["user_id"])
+        submitted = dict(submitted) if isinstance(submitted, dict) else {}
+        comment = submitted.get("comment")
+        if isinstance(comment, str):
+            comment = comment.strip()
+        give_data = submitted.get("give") if isinstance(submitted.get("give"), list) else []
+        take_data = submitted.get("take") if isinstance(submitted.get("take"), list) else []
+
+        def back_to_form(message):
+            # Відповідь користувача 4: помилка не перериває й не губить
+            # введене - форма відкривається знову з обома блоками.
+            return self._start_exchange_all_in_one_reply(
+                store, context,
+                resume=self._exchange_resume_from_positions(give_data, take_data, comment),
+                prefix_text="⚠️ " + message + "\n\nВведённое сохранено — откройте форму и исправьте.",
+            )
+
+        if not give_data:
+            return back_to_form("В блоке «Отдаём» пока пусто — добавьте хотя бы одну позицию.")
+        if not take_data:
+            return back_to_form("В блоке «Получаем» пока пусто — добавьте хотя бы одну позицию.")
+        give, problem = self._exchange_positions_from_form(store, context, give_data, "start_writeoff", "writeoff")
+        if problem:
+            return back_to_form("Блок «Отдаём»: " + problem)
+        take, problem = self._exchange_positions_from_form(store, context, take_data, "start_income", "income")
+        if problem:
+            return back_to_form("Блок «Получаем»: " + problem)
+        if not give or not take:
+            return back_to_form("Не удалось определить ни одной позиции.")
+
+        payload = self._new_income_payload("", context)
+        payload["operation_kind"] = "exchange"
+        payload["give"] = give
+        payload["take"] = take
+        payload["_from_webapp_form"] = True
+        if comment:
+            payload["comment"] = comment
+        store.save_pending_operation(
+            context["chat_id"], context["user_id"], "stock_exchange", "confirm_exchange_write", payload,
+        )
+        return {
+            "type": "message",
+            "text": self._exchange_preview(store, payload),
+            "reply_markup": self._exchange_confirm_keyboard(),
+        }
+
+    def _exchange_confirm_keyboard(self):
+        return {
+            "keyboard": [
+                [{"text": self._EXCHANGE_CONFIRM_LABEL}, {"text": "Отмена"}],
+                [{"text": self._WEBAPP_FORM_RETURN_LABEL}],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": True,
+        }
+
+    def _exchange_preview(self, store, payload):
+        _headers, columns, _rows = warehouse_rows(store)
+
+        def item_line(index, position, item, sign):
+            head = " / ".join(
+                part for part in (display_product_name(position), position.get("breed"), position.get("condition")) if part
+            )
+            text = "%d. %s%s: %s%s шт" % (
+                index, (head + " ") if head else "", income_item_size(item),
+                "\u2212" if sign == "-" else "+", _display_bot_number(item.get("quantity")),
+            )
+            measure_kind = item_measure_kind(item)
+            if measure_kind is not None:
+                text += " (%s %s)" % (_display_bot_number(item.get(measure_kind)), ITEM_MEASURE_UNIT[measure_kind])
+            row_id = item.get("row_id")
+            row_values = store.get_row(row_id) if row_id else None
+            if row_values:
+                balance = _number_value(row_value(row_values, columns["balance_qty"]))
+                delta = _number_value(item.get("quantity")) * (1 if sign == "+" else -1)
+                text += ", остаток %s → %s" % (_display_bot_number(balance), _display_bot_number(balance + delta))
+            elif sign == "+":
+                text += ", новая позиция"
+            return text
+
+        lines = ["Обмен — подтвердите:", "", "Отдаём:"]
+        index = 0
+        for position in payload["give"]:
+            for item in position["rows"]:
+                index += 1
+                lines.append(item_line(index, position, item, "-"))
+        lines += ["", "Получаем:"]
+        index = 0
+        for position in payload["take"]:
+            for item in position["rows"]:
+                index += 1
+                lines.append(item_line(index, position, item, "+"))
+        if payload.get("comment"):
+            lines += ["", "Комментарий: %s" % payload["comment"]]
+        return "\n".join(lines)
+
+    def _continue_exchange_operation(self, text, store, context, pending):
+        status = pending["status"]
+        payload = pending["payload"] or {}
+        normalized = _normalize_phrase(text or "")
+        if status == "exchange_all_in_one":
+            # Людина написала щось замість того, щоб відкрити форму.
+            if normalized in ("отмена", "главное меню"):
+                store.delete_pending_operation(context["chat_id"], context["user_id"])
+                return self._with_main_menu("Обмен отменён.", store)
+            return self._start_exchange_all_in_one_reply(store, context)
+        if status != "confirm_exchange_write":
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._with_main_menu("Предыдущая операция сброшена. Отправьте запрос заново.", store)
+        if normalized == _normalize_phrase(self._WEBAPP_FORM_RETURN_LABEL):
+            return self._reopen_webapp_form_reply(store, context, payload)
+        if normalized in (_normalize_phrase(self._EXCHANGE_CONFIRM_LABEL), "да", "провести"):
+            result = apply_exchange_operation(store, payload, self._excel_sync_mode(), self)
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            if not result.get("ok"):
+                # ТЗ пункт 12 + відповідь 4: нічого не записано, введене
+                # не загублено - форма відкривається знову.
+                return self._start_exchange_all_in_one_reply(
+                    store, context,
+                    resume=self._build_exchange_resume(store, payload),
+                    prefix_text="⚠️ " + result["message"] + "\n\nВведённое сохранено — откройте форму и исправьте.",
+                )
+            self._notify_report_broadcast(context, result["message"])
+            return self._webapp_form_terminal_reply(store, context, result["message"], parse_mode="HTML")
+        if normalized == "отмена" or self._yes_no(text or "") is False:
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._with_main_menu("Обмен отменён.", store)
+        return {
+            "type": "message",
+            "text": "Ответьте, пожалуйста: %s, Отмена или %s." % (
+                self._EXCHANGE_CONFIRM_LABEL, self._WEBAPP_FORM_RETURN_LABEL,
+            ),
+            "reply_markup": self._exchange_confirm_keyboard(),
+        }
+
     def _writeoff_all_in_one_webapp_button(self, store, resume_payload=None):
         base_url = getattr(self, "webapp_public_url", None)
         if not base_url:
@@ -1848,6 +2179,10 @@ class CoreDialogMixin:
     # прапорцем - позиції з positions[] завжди належать продажу (списання
     # кошика не будує).
     def _continue_direct_open_webapp_submission(self, store, context, submitted):
+        # Обмін позначає себе сам (positions_kind) - категорія тут не
+        # підказка, бо позиції двох блоків належать різним розділам.
+        if isinstance(submitted, dict) and submitted.get("positions_kind") == "exchange":
+            return self._continue_exchange_all_in_one_submission(store, context, submitted)
         # "Антисептирование (форма)" перевикористовує РЕАЛЬНІ sale-категорії
         # (Доска AD/KD/ОСБ/Вагонка) для вибору товару/розміру - тому
         # category_operation_id тут веде на operation[2] == "sale", той самий

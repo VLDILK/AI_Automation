@@ -689,3 +689,89 @@ html, body {
 .cart-item-btn-remove {
   color: var(--error);
 }
+
+/* Обмін (ТЗ пункт 1, 2026-09-05) - варіант 01 із пʼяти: два блоки один під
+   одним, у кожного свій кошик і своя кнопка "Добавить". Лівий кант блоку
+   каже, що це за блок, ще до читання заголовка: червоний - віддаємо,
+   зелений - отримуємо. Самі поля, кошик і чипи - ті самі класи, що й у
+   решти форми, щоб обмін не вчив людину нового вигляду. */
+.exchange-block {
+  border-left: 4px solid var(--field-border);
+  border-radius: 12px;
+  background: var(--tg-secondary-bg);
+  padding: 10px 12px 4px;
+  margin-bottom: 14px;
+}
+
+.exchange-block-give {
+  border-left-color: #C0392B;
+}
+
+.exchange-block-take {
+  border-left-color: #2C7A57;
+}
+
+.exchange-block-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.exchange-block-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.exchange-block-give .exchange-block-title {
+  color: #C0392B;
+}
+
+.exchange-block-take .exchange-block-title {
+  color: #2C7A57;
+}
+
+.exchange-block-count {
+  font-size: 12px;
+  color: var(--tg-hint);
+  text-align: right;
+}
+
+/* Кошик усередині блоку вже стоїть на кольоровому тлі блоку - без
+   власного фону, щоб не було "картка в картці". */
+.exchange-block .cart-section {
+  background: transparent;
+  padding: 0 0 6px;
+  margin-bottom: 6px;
+}
+
+.exchange-block .add-position-button {
+  margin: 8px 0 10px;
+}
+
+/* "новая" - позиція, якої на складі ще немає (відповідь користувача 3:
+   такий розмір дозволений і створить новий рядок СКЛАД). */
+.cart-item-badge-new {
+  font-size: 11px;
+  font-weight: 600;
+  color: #2C7A57;
+  border: 1px solid #2C7A57;
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* Підсумок обміну на екрані перевірки: два списки під своїми заголовками. */
+.exchange-summary-title {
+  font-weight: 700;
+  margin: 8px 0 4px;
+}
+
+.exchange-summary-title.give {
+  color: #C0392B;
+}
+
+.exchange-summary-title.take {
+  color: #2C7A57;
+}
