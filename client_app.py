@@ -94,7 +94,7 @@ import single_instance
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.18"
+__version__ = "0.3.19"
 
 # Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
 # remind_every_start - перемикач у Настройках ("Напоминать о недостающих
@@ -1312,28 +1312,44 @@ class ClientApp(ctk.CTk):
     # personnel_list_frame) - тепер і найпростіший спосіб пережити
     # майбутнє зростання цього екрану, а не фіксити конкретний недобір
     # пікселів щоразу заново.
+    # Правило користувача (2026-09-05, усі проєкти): "всі кнопки повернення
+    # у попередні меню мають бути закріплені у верху... якщо я відкрив
+    # налаштування і гортаю вниз - то кнопці "повернутись назад" байдуже -
+    # вона завжди у полі зору", і "має діяти кнопка Esc". Раніше шапка з "←"
+    # лежала всередині CTkScrollableFrame і їхала разом із вмістом - щоб
+    # повернутись, доводилось гортати на початок. Тепер шапка - звичайний
+    # кадр ПОЗА прокруткою, гортається лише вміст під нею.
     def _open_settings_screen(self):
         self.main_frame.pack_forget()
         if self.settings_frame is not None:
             self.settings_frame.destroy()
-        self.settings_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.settings_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.settings_frame.pack(fill="both", expand=True, padx=16, pady=16)
-        self._build_settings_screen(self.settings_frame)
-
-    def _close_settings_screen(self):
-        self.settings_frame.pack_forget()
-        self.main_frame.pack(fill="both", expand=True, padx=16, pady=16)
-
-    def _build_settings_screen(self, parent):
-        header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 16))
+        header = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 12))
         ctk.CTkButton(
             header, text="←", width=32, fg_color="transparent",
             text_color=COLOR_TEXT, hover_color=COLOR_HOVER,
             command=self._close_settings_screen,
         ).pack(side="left")
         ctk.CTkLabel(header, text="Настройки", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left", padx=(8, 0))
+        body = ctk.CTkScrollableFrame(self.settings_frame, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        self._build_settings_screen(body)
+        # Esc - той самий крок назад, що й "←". Привʼязка живе лише поки
+        # відкритий цей екран; вікна поверх (Toplevel) мають власний Esc.
+        self.bind("<Escape>", self._on_settings_escape)
 
+    def _on_settings_escape(self, _event=None):
+        if self.settings_frame is not None and self.settings_frame.winfo_ismapped():
+            self._close_settings_screen()
+
+    def _close_settings_screen(self):
+        self.unbind("<Escape>")
+        self.settings_frame.pack_forget()
+        self.main_frame.pack(fill="both", expand=True, padx=16, pady=16)
+
+    def _build_settings_screen(self, parent):
         self._build_autostart_settings_section(parent)
 
         self._build_auto_update_settings_section(parent)
