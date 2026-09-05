@@ -1548,7 +1548,7 @@ class CoreDialogMixin:
         # ні слова, ні порожнього місця.
         for field in common_ctx["fields"]:
             if field.get("key") == "comment":
-                field["label"] = "Комментарий (необязательно)"
+                field["label"] = "Комментарий"
                 field["required"] = False
         ctx = {
             "mode": "all_in_one",
