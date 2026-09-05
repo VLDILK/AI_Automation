@@ -727,6 +727,13 @@ class ReportsDialogMixin:
                     "area": area if is_area else None,
                     "linear": linear if is_linear else None,
                     "total_amount": row_value(row, columns["total_amount"]),
+                    # KD за номіналом: дохід по перерахунку з окремої колонки
+                    # листа (нема колонки - 0).
+                    "recalc_income": (
+                        _number_value(row_value(row, columns["recalc_income"]))
+                        if columns.get("recalc_income") is not None
+                        else 0
+                    ),
                     "payment_method": _display_value(row_value(row, columns.get("payment_method"))),
                     "manager": _display_value(row_value(row, columns.get("manager_final"))),
                 }
@@ -786,6 +793,7 @@ class ReportsDialogMixin:
             "area": raw_totals.get("area", 0),
             "linear": raw_totals.get("linear", 0),
             "total_amount": total_amount,
+            "recalc_income": round(sum(_number_value(row.get("recalc_income")) for row in report_rows), 2),
             "average_amount": round(total_amount / len(report_rows), 2) if report_rows else 0,
             "distinct_clients": len({row.get("client") for row in report_rows if row.get("client")}),
         }
@@ -800,9 +808,19 @@ class ReportsDialogMixin:
             f"Средняя сумма продажи: {_display_bot_number(totals['average_amount'])} MDL, "
             f"клиентов: {totals['distinct_clients']}"
         )
+        # KD за номіналом (рішення користувача 2026-09-05): «Сумма» - за
+        # фактично списаним розміром; скільки заплатили клієнти - окремо.
+        recalc_lines = []
+        if totals.get("recalc_income"):
+            recalc_lines = [
+                f"Доход по пересчету: +{_display_bot_number(totals['recalc_income'])} MDL",
+                f"Всего получено: {_display_bot_number(round(totals['total_amount'] + totals['recalc_income'], 2))} MDL",
+            ]
 
         if fmt == reports.FORMAT_MESSAGE:
             text = reports.render_report_message(spec)
+            if recalc_lines:
+                text += "\n" + "\n".join(recalc_lines)
             if extra_lines:
                 text += "\n" + "\n".join(extra_lines)
             text += "\n" + summary_line
@@ -850,8 +868,9 @@ class ReportsDialogMixin:
             spec["title"],
             f"Позиций: {len(report_rows)}",
             totals_text,
-            summary_line,
         ]
+        caption_lines.extend(recalc_lines)
+        caption_lines.append(summary_line)
         caption_lines.extend(extra_lines)
         caption_lines.append("Показать в другом формате, Назад или Главное меню.")
         rendered["caption"] = "\n".join(caption_lines)
