@@ -2305,8 +2305,13 @@ class ExcelSqliteStore:
     # пізніше вручну увімкне (enabled=1) приховану кнопку через Редактор
     # кнопок — мітка 'resolved' вже стоїть, тож жоден майбутній запуск
     # застосунку більше НІКОЛИ не поверне її назад у enabled=0.
+    # Реальна помилка (2026-09-05, знайшов користувач: "чому ти зробив цю
+    # кнопку прихованою?"): "ОБМЕН (форма)" додали в BUILTIN_MIGRATED_
+    # CUSTOM_BUTTONS, але не сюди - і політика нижче чесно сховала її при
+    # першому запуску, як колись старі чатові кнопки. Усі кнопки "(форма)"
+    # - це і є стандартне меню, тож нова "(форма)" мусить бути тут.
     _STANDARD_MENU_ROOT_MIGRATION_KEYS = frozenset(
-        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form"}
+        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form", "exchange_form"}
     )
 
     def _apply_standard_menu_policy(self):
@@ -2343,6 +2348,19 @@ class ExcelSqliteStore:
                 )
                 self.conn.execute(
                     "INSERT INTO app_meta (key, value) VALUES (?, '1')", (meta_key,)
+                )
+            # Повернення "ОБМЕН (форма)" там, де політика вище встигла її
+            # сховати до виправлення білого списку (2026-09-05). Рівно один
+            # раз: далі рішення адміністратора в Редакторі кнопок - остаточне.
+            restored = self.conn.execute(
+                "SELECT 1 FROM app_meta WHERE key = 'exchange_form_restored_once'"
+            ).fetchone()
+            if not restored:
+                self.conn.execute(
+                    "UPDATE custom_menu_buttons SET enabled = 1 WHERE migration_key = 'exchange_form'"
+                )
+                self.conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES ('exchange_form_restored_once', '1')"
                 )
 
     # "Хмарна істина" (standard_menu_cloud.py) — Задача користувача
@@ -3006,6 +3024,31 @@ class ExcelSqliteStore:
     # обидва як прийшли — виконавець (_enter_custom_button_node,
     # telegram_dialog.py) перевіряє operation_id ПЕРШИМ, тож навіть якщо
     # обидва колись опиняться заповненими, поведінка лишається однозначною.
+    # Задача користувача (2026-09-05): "ставити статус прихованої в самому
+    # редакторі кнопок" - раніше enabled міняли лише міграції та хмара, а
+    # редактор тільки писав "(скрыта)" і нічим не давав це змінити.
+    def set_custom_button_enabled(self, node_id, enabled):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE custom_menu_buttons SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, now, node_id),
+            )
+
+    def custom_button_migration_key(self, node_id):
+        row = self.conn.execute(
+            "SELECT migration_key FROM custom_menu_buttons WHERE id = ?", (node_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    # Видимість КОРЕНЕВИХ вбудованих кнопок живе ще й у хмарі (стандартне
+    # меню, standard_menu_cloud): без цього запису наступний старт клієнта
+    # повернув би стан із хмари поверх щойно натиснутого 👁.
+    def standard_menu_state_if_root_builtin(self, node_id):
+        if self.custom_button_migration_key(node_id) not in self.get_standard_menu_root_keys():
+            return None
+        return self.get_standard_menu_state()
+
     def update_custom_button(self, node_id, label, message_text, action_code, layout="full", operation_id=None):
         now = datetime.now().isoformat(timespec="seconds")
         with self.conn:

@@ -237,6 +237,12 @@ def update_remote_custom_button(
     )
 
 
+def set_remote_custom_button_enabled(node_id, enabled, timeout=10):
+    return _post_custom_button_action(
+        {"op": "set_enabled", "node_id": node_id, "enabled": bool(enabled)}, timeout=timeout,
+    )
+
+
 def delete_remote_custom_button(node_id, timeout=10):
     return _post_custom_button_action({"op": "delete", "node_id": node_id}, timeout=timeout)
 

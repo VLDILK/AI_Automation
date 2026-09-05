@@ -501,11 +501,29 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(503, {"ok": False, "error": "База данных недоступна."})
             return
         op = payload.get("op")
-        if op not in ("add", "update", "delete"):
+        if op not in ("add", "update", "delete", "set_enabled"):
             self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
             return
         store = ExcelSqliteStore(self.db_path)
         try:
+            if op == "set_enabled":
+                # Задача користувача (2026-09-05): 👁 у редакторі домашки
+                # міняє видимість кнопки в живому дереві клієнта.
+                node_id = payload.get("node_id")
+                enabled = payload.get("enabled")
+                if not isinstance(node_id, int) or isinstance(node_id, bool) or not isinstance(enabled, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not store.get_custom_button(node_id):
+                    self._send_json(404, {"ok": False, "error": "Кнопка не найдена."})
+                    return
+                store.set_custom_button_enabled(node_id, enabled)
+                state = store.standard_menu_state_if_root_builtin(node_id)
+                if state is not None:
+                    standard_menu_cloud.write_local_cache(state)
+                    standard_menu_cloud.write_cloud_state(state, self._onedrive_email())
+                self._send_json(200, {"ok": True})
+                return
             if op == "delete":
                 node_id = payload.get("node_id")
                 if not isinstance(node_id, int) or isinstance(node_id, bool):

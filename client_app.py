@@ -94,7 +94,7 @@ import single_instance
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.17"
+__version__ = "0.3.18"
 
 # Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
 # remind_every_start - перемикач у Настройках ("Напоминать о недостающих
@@ -4176,6 +4176,15 @@ class ClientApp(ctk.CTk):
             row_frame, text="x", width=3, fg="#D1242F",
             command=lambda nid=node_id, lbl=label: self.delete_custom_button_confirm(nid, lbl),
         ).pack(side="right")
+        # Задача користувача (2026-09-05): "ставити статус прихованої в
+        # самому редакторі кнопок" - обраний варіант 01 із пʼяти: кнопка 👁
+        # у рядку, один клік. Синя - показана в меню (клік ховає), сіра -
+        # прихована (клік показує); текст "(скрыта)" поруч із назвою лишається.
+        tk.Button(
+            row_frame, text="\U0001F441", width=3, font=("Segoe UI Emoji", 9),
+            fg=self._tk_color(("#2F7BD9", "#5B9BEA")) if enabled else self._tk_color(COLOR_TEXT_MUTED),
+            command=lambda nid=node_id, shown=enabled: self._toggle_custom_button_visibility(nid, not shown),
+        ).pack(side="right")
         tk.Button(
             row_frame, text="ред", width=5,
             command=lambda nid=node_id: self.edit_custom_button_dialog(nid),
@@ -4192,6 +4201,20 @@ class ClientApp(ctk.CTk):
 
     def select_custom_button(self, node_id):
         self.custom_buttons_selected_id = node_id
+        self._refresh_custom_buttons()
+
+    def _toggle_custom_button_visibility(self, node_id, enabled):
+        self.store.set_custom_button_enabled(node_id, enabled)
+        # Коренева вбудована кнопка - її видимість живе ще й у хмарі
+        # (стандартне меню): без цього запису наступний старт повернув би
+        # стан із хмари поверх щойно натиснутого 👁.
+        state = self.store.standard_menu_state_if_root_builtin(node_id)
+        if state is not None:
+            try:
+                standard_menu_cloud.write_local_cache(state)
+                standard_menu_cloud.write_cloud_state(state, self._onedrive_shared_email())
+            except OSError:
+                pass
         self._refresh_custom_buttons()
 
     def _custom_button_position_options(self, parent_id, exclude_node_id=None):

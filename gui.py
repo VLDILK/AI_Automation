@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.11"
+__version__ = "1.1.12"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -2725,11 +2725,15 @@ class ExcelViewerApp:
         row_frame = tk.Frame(self.custom_buttons_list_frame, bg=bg)
         row_frame.pack(fill="x", pady=1, padx=(depth * 24, 0))
 
-        display_label = label + (f" ({side})" if side else "")
+        # Задача користувача (2026-09-05): прихована кнопка має бути видна
+        # як прихована і тут, а не лише в редакторі клієнта.
+        display_label = label + (f" ({side})" if side else "") + ("" if enabled else " " + self._t("(прихована)"))
+        label_style = {} if enabled else {"fg": "#9aa1ab"}
         tk.Button(
             row_frame, text=display_label, anchor="center", bg=bg, font=("Segoe UI", 9),
             width=24,
             command=lambda nid=node_id: self.select_custom_button(nid),
+            **label_style,
         ).pack(side="left")
 
         # Задача користувача: "іконки замість тексту" (обраний варіант A) -
@@ -2737,6 +2741,16 @@ class ExcelViewerApp:
         tk.Button(
             row_frame, text="✕", width=3, fg="#d1242f",
             command=lambda nid=node_id, lbl=label: self.delete_custom_button_confirm(nid, lbl),
+            **self._chip_button_style(),
+        ).pack(side="right")
+        # Задача користувача (2026-09-05): "ставити статус прихованої в
+        # самому редакторі кнопок" - варіант 01 із пʼяти: 👁 у рядку, один
+        # клік. Синя - показана (клік ховає), сіра - прихована (клік показує).
+        # Домашка міняє живе дерево клієнта через тунель - дія set_enabled.
+        tk.Button(
+            row_frame, text="\U0001F441", width=3, font=("Segoe UI Emoji", 9),
+            fg=("#2f7bd9" if enabled else "#9aa1ab"),
+            command=lambda nid=node_id, shown=enabled: self._toggle_remote_custom_button_visibility(nid, not shown),
             **self._chip_button_style(),
         ).pack(side="right")
         tk.Button(
@@ -2754,6 +2768,11 @@ class ExcelViewerApp:
         child_sides = self._half_pair_sides(child_rows)
         for child_row in child_rows:
             self._render_custom_button_row(child_row, depth=depth + 1, side=child_sides.get(child_row[0]))
+
+    def _toggle_remote_custom_button_visibility(self, node_id, enabled):
+        self._push_custom_button_action(
+            lambda: remote_control_client.set_remote_custom_button_enabled(node_id, enabled),
+        )
 
     def select_custom_button(self, node_id):
         self.custom_buttons_selected_id = node_id
