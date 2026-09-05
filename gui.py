@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.14"
+__version__ = "1.1.15"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1032,6 +1032,10 @@ class ExcelViewerApp:
         # Кольори фону/тексту лишаються за _apply_theme (тема), тут - лише
         # форма: тонка рамка, вирівнювання, іконка. "Вихід" - семантичний
         # червоний, який тема не перефарбовує (_SEMANTIC_FG_COLORS).
+        # Задача користувача (2026-09-05): "прибери кнопку сервери, вона
+        # більше не потрібна. її ролі виконують інші кнопки" - пункт
+        # "Сервери" прибрано; саме вікно (open_servers_dialog) лишається
+        # для місць, що на нього ще посилаються.
         menu_panel = tk.Frame(self.main_menu_frame)
         menu_panel.place(relx=1.0, x=-16, y=56, anchor="ne")
         menu_items = [
@@ -1041,7 +1045,6 @@ class ExcelViewerApp:
             ("\u25a6", "Редактор кнопок", self.show_custom_buttons, None),
             ("\u27f2", "Обновити Excel", self.sync_excel_manually, None),
             ("\u21ea", "Публікація оновлень", self.open_publish_updates_dialog, None),
-            ("\u25a3", "Сервери", self.open_servers_dialog, None),
             ("\u26d3", "Тунель", self.open_tunnel_dialog, None),
             ("\u23fb", "Вихід", self.on_close, "#d1242f"),
         ]
