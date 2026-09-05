@@ -87,6 +87,7 @@ from warehouse_data import (
 import webapp_server
 from webapp_server import WebappServer
 import single_instance
+import button_editor
 
 # Задача користувача: "потрібно ще все інше доробити" (Журналы/Персонал -
 # після stub-заглушок) - короткі російські назви днів тижня для форматування
@@ -94,7 +95,7 @@ import single_instance
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.21"
+__version__ = "0.3.22"
 
 # Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
 # remind_every_start - перемикач у Настройках ("Напоминать о недостающих
@@ -214,6 +215,51 @@ def _spinner_frame(step, size=14):
         _SPINNER_CACHE[key] = cached
     return cached
 
+
+
+# Редактор кнопок (варіант 01, 2026-09-05): спільна панель button_editor
+# показує "телефон" і властивості, а звідки беруться кнопки й куди йдуть
+# зміни - каже це джерело. У клієнта - власна база (store).
+class _LocalButtonSource(button_editor.ButtonSource):
+    def __init__(self, app):
+        self.app = app
+
+    @property
+    def store(self):
+        return self.app.store
+
+    def rows(self, parent_id):
+        return self.store.list_custom_buttons(parent_id, include_disabled=True)
+
+    def get(self, node_id):
+        return self.store.get_custom_button(node_id)
+
+    def actions(self):
+        return [(action["code"], action["label"]) for action in CUSTOM_BUTTON_ACTIONS]
+
+    def operations(self):
+        return self.app._operation_link_catalog()
+
+    def label_collides(self, label, exclude_id=None):
+        return self.store.custom_button_label_collides(label)
+
+    def add(self, parent_id, label, layout):
+        return self.store.add_custom_button(label, "", None, parent_id=parent_id, layout=layout, operation_id=None)
+
+    def update(self, node_id, label, message_text, action_code, layout, operation_id):
+        self.store.update_custom_button(
+            node_id, label, message_text, action_code, layout=layout, operation_id=operation_id,
+        )
+
+    def move(self, node_id, new_index):
+        self.store.set_custom_button_position(node_id, new_index)
+
+    def delete(self, node_id):
+        self.store.delete_custom_button(node_id)
+
+    def set_enabled(self, node_id, enabled):
+        self.store.set_custom_button_enabled(node_id, enabled)
+        self.app._mirror_root_button_visibility_to_cloud(node_id)
 
 
 class ClientApp(ctk.CTk):
@@ -439,6 +485,7 @@ class ClientApp(ctk.CTk):
         self._backup_tab = "local"
         self._backup_restore_in_progress = False
         self.custom_buttons_selected_id = None
+        self.button_editor = None
 
         self.refresh_excel_button = None
         self._excel_refresh_in_progress = False
@@ -4097,448 +4144,64 @@ class ClientApp(ctk.CTk):
             return
         window = tk.Toplevel(self)
         window.title("Редактор кнопок")
-        window.geometry("760x560")
+        window.geometry("780x600")
+        window.minsize(700, 520)
         window.configure(bg=self._tk_color(COLOR_BG))
         self.custom_buttons_window = window
         self._build_custom_buttons_window(window)
 
+    # Задача користувача (2026-09-05): "потрібно переробити налаштовування
+    # кнопок... виглядає досить криво та нелогічно як для користувача
+    # середнього класу знань ПК" - обраний варіант 01 із пʼяти: телефон
+    # ліворуч (меню як у Telegram), властивості праворуч, ↑↓ замість номера
+    # позиції, жодних модальних вікон. Сама панель - button_editor.py
+    # (спільна з домашкою), тут - лише вікно, кольори й джерело даних.
     def _build_custom_buttons_window(self, window):
         top = ctk.CTkFrame(window, fg_color="transparent")
         top.pack(fill="x", padx=16, pady=(16, 8))
         ctk.CTkLabel(top, text="Редактор кнопок", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
-
-        note = tk.Label(
-            window,
-            text="Кнопки, которые вы добавите здесь, появятся в главном меню бота в Telegram.",
-            fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
-            wraplength=720, justify="left",
-        )
-        note.pack(anchor="w", padx=16, pady=(0, 8))
-
-        ctk.CTkButton(
-            window, text="+ Добавить корневую кнопку", width=220,
-            command=lambda: self.add_custom_button_dialog(None),
-        ).pack(anchor="w", padx=16, pady=(0, 8))
-
-        content = tk.Frame(window, bg=self._tk_color(COLOR_BG))
-        content.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-
-        list_side = ctk.CTkScrollableFrame(content, fg_color="transparent")
-        list_side.pack(side="left", fill="both", expand=True, padx=(0, 12))
-        self.custom_buttons_list_frame = list_side
-
-        preview_side = tk.Frame(content, width=240, bg=self._tk_color(COLOR_CARD), relief="groove", borderwidth=1)
-        preview_side.pack(side="right", fill="y")
-        preview_side.pack_propagate(False)
-        tk.Label(
-            preview_side, text="Превью", font=("Segoe UI", 11, "bold"),
-            fg=self._tk_color(COLOR_TEXT), bg=self._tk_color(COLOR_CARD),
-        ).pack(anchor="w", padx=12, pady=(12, 4))
-        self.custom_button_preview_frame = tk.Frame(preview_side, bg=self._tk_color(COLOR_CARD))
-        self.custom_button_preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
+        body = tk.Frame(window, bg=self._tk_color(COLOR_BG))
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        colors = {
+            "bg": self._tk_color(COLOR_BG),
+            "card": self._tk_color(COLOR_CARD),
+            "entry": self._tk_color(COLOR_ROW),
+            "fg": self._tk_color(COLOR_TEXT),
+            "muted": self._tk_color(COLOR_TEXT_MUTED),
+            "border": self._tk_color(COLOR_BORDER),
+            "accent": "#2F7BD9",
+        }
+        self.button_editor = button_editor.ButtonEditorPanel(body, _LocalButtonSource(self), colors)
+        window.bind("<Escape>", lambda _event: window.destroy())
         window.protocol("WM_DELETE_WINDOW", window.destroy)
-        self._refresh_custom_buttons()
 
     def _refresh_custom_buttons(self):
-        for child in self.custom_buttons_list_frame.winfo_children():
-            child.destroy()
-        roots = self.store.list_custom_buttons(None, include_disabled=True)
-        if not roots:
-            tk.Label(
-                self.custom_buttons_list_frame, text="Кнопок пока нет.",
-                fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
-            ).pack(anchor="w", pady=4)
-        else:
-            root_sides = self._half_pair_sides(roots)
-            for row in roots:
-                self._render_custom_button_row(row, depth=0, side=root_sides.get(row[0]))
-        self._refresh_custom_button_preview()
-
-    def _half_pair_sides(self, rows):
-        sides = {}
-        pending_id = None
-        for row in rows:
-            node_id, enabled, layout = row[0], row[5], row[6]
-            if not enabled:
-                continue
-            if layout == "half":
-                if pending_id is not None:
-                    sides[pending_id] = "лево"
-                    sides[node_id] = "право"
-                    pending_id = None
-                else:
-                    pending_id = node_id
-            else:
-                pending_id = None
-        return sides
-
-    def _render_custom_button_row(self, row, depth, side=None):
-        node_id, label, message_text, action_code, section, enabled, layout, operation_id = row
-        is_selected = node_id == self.custom_buttons_selected_id
-        row_bg = self._tk_color(("#D0E8FF", "#2A4A66")) if is_selected else self._tk_color(COLOR_ROW)
-
-        row_frame = tk.Frame(self.custom_buttons_list_frame, bg=row_bg)
-        row_frame.pack(fill="x", pady=1, padx=(depth * 24, 0))
-
-        display_label = label + (f" ({side})" if side else "") + ("" if enabled else " (скрыта)")
-        tk.Button(
-            row_frame, text=display_label, anchor="w", bg=row_bg, fg=self._tk_color(COLOR_TEXT),
-            font=("Segoe UI", 9), width=28,
-            command=lambda nid=node_id: self.select_custom_button(nid),
-        ).pack(side="left", fill="x", expand=True)
-
-        tk.Button(
-            row_frame, text="x", width=3, fg="#D1242F",
-            command=lambda nid=node_id, lbl=label: self.delete_custom_button_confirm(nid, lbl),
-        ).pack(side="right")
-        # Задача користувача (2026-09-05): "ставити статус прихованої в
-        # самому редакторі кнопок" - обраний варіант 01 із пʼяти: кнопка 👁
-        # у рядку, один клік. Синя - показана в меню (клік ховає), сіра -
-        # прихована (клік показує); текст "(скрыта)" поруч із назвою лишається.
-        tk.Button(
-            row_frame, text="\U0001F441", width=3, font=("Segoe UI Emoji", 9),
-            fg=self._tk_color(("#2F7BD9", "#5B9BEA")) if enabled else self._tk_color(COLOR_TEXT_MUTED),
-            command=lambda nid=node_id, shown=enabled: self._toggle_custom_button_visibility(nid, not shown),
-        ).pack(side="right")
-        tk.Button(
-            row_frame, text="ред", width=5,
-            command=lambda nid=node_id: self.edit_custom_button_dialog(nid),
-        ).pack(side="right")
-        tk.Button(
-            row_frame, text="+", width=3, fg="#1A7F37",
-            command=lambda nid=node_id: self.add_custom_button_dialog(nid),
-        ).pack(side="right")
-
-        child_rows = self.store.list_custom_buttons(node_id, include_disabled=True)
-        child_sides = self._half_pair_sides(child_rows)
-        for child_row in child_rows:
-            self._render_custom_button_row(child_row, depth=depth + 1, side=child_sides.get(child_row[0]))
-
-    def select_custom_button(self, node_id):
-        self.custom_buttons_selected_id = node_id
-        self._refresh_custom_buttons()
-
-    def _toggle_custom_button_visibility(self, node_id, enabled):
-        self.store.set_custom_button_enabled(node_id, enabled)
-        # Коренева вбудована кнопка - її видимість живе ще й у хмарі
-        # (стандартне меню): без цього запису наступний старт повернув би
-        # стан із хмари поверх щойно натиснутого 👁.
-        state = self.store.standard_menu_state_if_root_builtin(node_id)
-        if state is not None:
-            try:
-                standard_menu_cloud.write_local_cache(state)
-                standard_menu_cloud.write_cloud_state(state, self._onedrive_shared_email())
-            except OSError:
-                pass
-        self._refresh_custom_buttons()
-
-    def _custom_button_position_options(self, parent_id, exclude_node_id=None):
-        siblings = self.store.list_custom_buttons(parent_id, include_disabled=True)
-        ids_in_order = [row[0] for row in siblings]
-        if exclude_node_id in ids_in_order:
-            ids_in_order.remove(exclude_node_id)
-        return [str(i) for i in range(1, len(ids_in_order) + 2)]
-
-    def _refresh_custom_button_preview(self):
-        for child in self.custom_button_preview_frame.winfo_children():
-            child.destroy()
-        node_id = self.custom_buttons_selected_id
-        row = self.store.get_custom_button(node_id) if node_id else None
-        text_color = self._tk_color(COLOR_TEXT)
-        muted_color = self._tk_color(COLOR_TEXT_MUTED)
-        card_bg = self._tk_color(COLOR_CARD)
-        if not row:
-            tk.Label(
-                self.custom_button_preview_frame, text="Выберите кнопку слева.",
-                fg=muted_color, bg=card_bg, wraplength=210, justify="left",
-            ).pack(anchor="w")
+        editor = getattr(self, "button_editor", None)
+        window = self.custom_buttons_window
+        if editor is None or window is None or not window.winfo_exists():
             return
+        editor.refresh()
 
-        _id, _parent_id, label, message_text, action_code, section, enabled, layout, operation_id = row
-        tk.Label(
-            self.custom_button_preview_frame, text=label, font=("Segoe UI", 10, "bold"),
-            fg=text_color, bg=card_bg, wraplength=210, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-        tk.Label(
-            self.custom_button_preview_frame, text=self._CUSTOM_BUTTON_LAYOUT_LABELS.get(layout, layout),
-            fg=text_color, bg=card_bg, wraplength=210, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-        tk.Label(
-            self.custom_button_preview_frame, text=message_text or "(без сообщения)",
-            fg=text_color, bg=card_bg, wraplength=210, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-
-        tk.Label(
-            self.custom_button_preview_frame, text="Далее:", font=("Segoe UI", 9, "bold"),
-            fg=text_color, bg=card_bg,
-        ).pack(anchor="w")
-        children = self.store.list_custom_buttons(_id, include_disabled=True)
-        if children:
-            for _child_id, child_label, *_rest in children:
-                tk.Label(
-                    self.custom_button_preview_frame, text=f"• {child_label}",
-                    fg=text_color, bg=card_bg, wraplength=210, justify="left",
-                ).pack(anchor="w")
-        elif operation_id is not None:
-            tk.Label(
-                self.custom_button_preview_frame,
-                text=f"Прямая ссылка: {self._operation_link_id_to_label(operation_id)}",
-                fg=text_color, bg=card_bg, wraplength=210, justify="left",
-            ).pack(anchor="w")
-        elif action_code:
-            action_label = next(
-                (action["label"] for action in CUSTOM_BUTTON_ACTIONS if action["code"] == action_code),
-                action_code,
-            )
-            tk.Label(
-                self.custom_button_preview_frame, text=f"Действие: {action_label}",
-                fg=text_color, bg=card_bg, wraplength=210, justify="left",
-            ).pack(anchor="w")
-        else:
-            tk.Label(self.custom_button_preview_frame, text="(нет действия)", fg=text_color, bg=card_bg).pack(anchor="w")
-
-    def _custom_button_action_options(self):
-        return [self._NO_ACTION_LABEL] + [action["label"] for action in CUSTOM_BUTTON_ACTIONS]
-
-    def _custom_button_action_code_to_label(self, action_code):
-        for action in CUSTOM_BUTTON_ACTIONS:
-            if action["code"] == action_code:
-                return action["label"]
-        return self._NO_ACTION_LABEL
-
-    def _custom_button_action_label_to_code(self, label):
-        for action in CUSTOM_BUTTON_ACTIONS:
-            if action["label"] == label:
-                return action["code"]
-        return None
+    # Видимість КОРЕНЕВИХ вбудованих кнопок дзеркалиться в хмару стандартного
+    # меню (локальне -> хмара, ніколи навпаки - рішення користувача 2026-09-05).
+    def _mirror_root_button_visibility_to_cloud(self, node_id):
+        state = self.store.standard_menu_state_if_root_builtin(node_id)
+        if state is None:
+            return
+        try:
+            standard_menu_cloud.write_local_cache(state)
+            standard_menu_cloud.write_cloud_state(state, self._onedrive_shared_email())
+        except OSError:
+            pass
 
     def _operation_link_catalog(self):
         catalog = []
         for operation in self.store.list_operations():
             operation_id, _code, _kind, _requires_identity, op_label, parent_action_code, *_rest = operation
             section_label = self._OPERATION_LINK_SECTION_LABELS.get(parent_action_code, parent_action_code)
-            catalog.append((operation_id, f"{op_label} — {section_label}"))
+            catalog.append((operation_id, f"{op_label} \u2014 {section_label}"))
         return catalog
 
-    def _operation_link_options(self):
-        return [self._NO_OPERATION_LINK_LABEL] + [display for _id, display in self._operation_link_catalog()]
-
-    def _operation_link_id_to_label(self, operation_id):
-        if operation_id is not None:
-            for op_id, display in self._operation_link_catalog():
-                if op_id == operation_id:
-                    return display
-        return self._NO_OPERATION_LINK_LABEL
-
-    def _operation_link_label_to_id(self, label):
-        for op_id, display in self._operation_link_catalog():
-            if display == label:
-                return op_id
-        return None
-
-    def _ask_custom_button_form(
-        self, title, position_options=None, initial_position=None,
-        initial_label="", initial_message="", initial_action_code=None, initial_layout="full",
-        initial_operation_id=None,
-    ):
-        if position_options is None:
-            position_options = ["1"]
-        if initial_position is None:
-            initial_position = position_options[0]
-        result = {"value": None}
-        window = tk.Toplevel(self.custom_buttons_window)
-        window.title(title)
-        window.resizable(False, False)
-        window.configure(bg=self._tk_color(COLOR_BG))
-
-        form = tk.Frame(window, bg=self._tk_color(COLOR_BG))
-        form.pack(padx=16, pady=16, fill="both", expand=True)
-        label_color = self._tk_color(COLOR_TEXT)
-        bg = self._tk_color(COLOR_BG)
-
-        tk.Label(form, text="Название кнопки:", fg=label_color, bg=bg).pack(anchor="w")
-        label_entry = tk.Entry(form, width=44)
-        label_entry.insert(0, initial_label)
-        label_entry.pack(anchor="w", pady=(2, 12))
-        label_entry.focus_set()
-
-        tk.Label(form, text="Что бот отвечает при нажатии:", fg=label_color, bg=bg).pack(anchor="w")
-        message_text_widget = tk.Text(form, width=44, height=5, wrap="word")
-        message_text_widget.insert("1.0", initial_message or "")
-        message_text_widget.pack(anchor="w", pady=(2, 4))
-        tk.Label(
-            form,
-            text=(
-                "Для стандартных действий (Приход, Реализация, Склад, Продажи,\n"
-                "Калькулятор, Справка) этот текст игнорируется."
-            ),
-            justify="left", fg=self._tk_color(COLOR_TEXT_MUTED), bg=bg, font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(0, 12))
-
-        assignment_var = tk.StringVar(value="operation" if initial_operation_id is not None else "action")
-
-        tk.Label(form, text="Назначение кнопки:", fg=label_color, bg=bg).pack(anchor="w")
-        tk.Radiobutton(
-            form, text="Стандартное действие:", variable=assignment_var, value="action",
-            bg=bg, fg=label_color, selectcolor=bg, command=lambda: update_combo_states(),
-        ).pack(anchor="w")
-        action_var = tk.StringVar(value=self._custom_button_action_code_to_label(initial_action_code))
-        action_combo = ttk.Combobox(
-            form, textvariable=action_var, values=self._custom_button_action_options(), state="readonly", width=38,
-        )
-        action_combo.pack(anchor="w", padx=(20, 0), pady=(2, 10))
-
-        tk.Radiobutton(
-            form, text="Прямая ссылка на действие из «Действий»:", variable=assignment_var, value="operation",
-            bg=bg, fg=label_color, selectcolor=bg, command=lambda: update_combo_states(),
-        ).pack(anchor="w")
-        operation_var = tk.StringVar(value=self._operation_link_id_to_label(initial_operation_id))
-        operation_combo = ttk.Combobox(
-            form, textvariable=operation_var, values=self._operation_link_options(), state="readonly", width=38,
-        )
-        operation_combo.pack(anchor="w", padx=(20, 0), pady=(2, 16))
-
-        def update_combo_states():
-            mode = assignment_var.get()
-            action_combo.configure(state="readonly" if mode == "action" else "disabled")
-            operation_combo.configure(state="readonly" if mode == "operation" else "disabled")
-
-        update_combo_states()
-
-        tk.Label(form, text="Позиция (номер среди соседних кнопок):", fg=label_color, bg=bg).pack(anchor="w")
-        position_var = tk.StringVar(value=initial_position)
-        ttk.Combobox(
-            form, textvariable=position_var, values=position_options, state="readonly", width=10,
-        ).pack(anchor="w", pady=(2, 16))
-
-        tk.Label(form, text="Размер кнопки:", fg=label_color, bg=bg).pack(anchor="w")
-        layout_var = tk.StringVar(value=initial_layout or "full")
-        tk.Radiobutton(
-            form, text="Одна сплошная (на всю строку)", variable=layout_var, value="full",
-            bg=bg, fg=label_color, selectcolor=bg,
-        ).pack(anchor="w")
-        tk.Radiobutton(
-            form, text="Вдвое меньше (парится с соседней по позиции)", variable=layout_var, value="half",
-            bg=bg, fg=label_color, selectcolor=bg,
-        ).pack(anchor="w", pady=(0, 16))
-
-        button_row = tk.Frame(form, bg=bg)
-        button_row.pack(anchor="e", fill="x")
-
-        def save():
-            label = label_entry.get().strip()
-            if not label:
-                messagebox.showerror(title, "Название кнопки не может быть пустым.", parent=window)
-                return
-            mode = assignment_var.get()
-            result["value"] = {
-                "label": label,
-                "message_text": message_text_widget.get("1.0", "end").strip(),
-                "action_code": self._custom_button_action_label_to_code(action_var.get()) if mode == "action" else None,
-                "operation_id": self._operation_link_label_to_id(operation_var.get()) if mode == "operation" else None,
-                "layout": layout_var.get(),
-                "position_index": int(position_var.get()) - 1,
-            }
-            window.destroy()
-
-        def cancel():
-            window.destroy()
-
-        tk.Button(button_row, text="Отменить", width=14, command=cancel).pack(side="right", padx=(8, 0))
-        tk.Button(button_row, text="Сохранить изменения", width=18, command=save).pack(side="right")
-
-        window.bind("<Escape>", lambda event: cancel())
-        window.protocol("WM_DELETE_WINDOW", cancel)
-        window.update_idletasks()
-        width, height = 420, 640
-        x = self.custom_buttons_window.winfo_rootx() + (self.custom_buttons_window.winfo_width() - width) // 2
-        y = self.custom_buttons_window.winfo_rooty() + (self.custom_buttons_window.winfo_height() - height) // 2
-        window.geometry(f"{width}x{height}+{max(x, 0)}+{max(y, 0)}")
-        window.transient(self.custom_buttons_window)
-        window.grab_set()
-        self.custom_buttons_window.wait_window(window)
-        return result["value"]
-
-    def add_custom_button_dialog(self, parent_id=None):
-        position_options = self._custom_button_position_options(parent_id)
-        form = self._ask_custom_button_form(
-            "Новая кнопка", position_options=position_options, initial_position=position_options[-1],
-        )
-        if not form:
-            return
-        if self.store.custom_button_label_collides(form["label"]):
-            messagebox.showerror(
-                "Редактор кнопок",
-                f'Название "{form["label"]}" совпадает с уже существующей командой бота. Выберите другое название.',
-                parent=self.custom_buttons_window,
-            )
-            return
-        new_id = self.store.add_custom_button(
-            form["label"], form["message_text"], form["action_code"], parent_id=parent_id, layout=form["layout"],
-            operation_id=form["operation_id"],
-        )
-        self.store.set_custom_button_position(new_id, form["position_index"])
-        self._refresh_custom_buttons()
-
-    def edit_custom_button_dialog(self, node_id):
-        row = self.store.get_custom_button(node_id)
-        if not row:
-            return
-        _id, parent_id, label, message_text, action_code, section, enabled, layout, operation_id = row
-
-        siblings = self.store.list_custom_buttons(parent_id, include_disabled=True)
-        ids_in_order = [sibling_row[0] for sibling_row in siblings]
-        current_index = ids_in_order.index(node_id) if node_id in ids_in_order else len(ids_in_order) - 1
-        position_options = self._custom_button_position_options(parent_id, exclude_node_id=node_id)
-
-        form = self._ask_custom_button_form(
-            "Редактировать кнопку",
-            position_options=position_options,
-            initial_position=str(current_index + 1),
-            initial_label=label,
-            initial_message=message_text or "",
-            initial_action_code=action_code,
-            initial_layout=layout,
-            initial_operation_id=operation_id,
-        )
-        if not form:
-            return
-        if form["label"].lower() != label.lower() and self.store.custom_button_label_collides(form["label"]):
-            messagebox.showerror(
-                "Редактор кнопок",
-                f'Название "{form["label"]}" совпадает с уже существующей командой бота. Выберите другое название.',
-                parent=self.custom_buttons_window,
-            )
-            return
-        self.store.update_custom_button(
-            node_id, form["label"], form["message_text"], form["action_code"], layout=form["layout"],
-            operation_id=form["operation_id"],
-        )
-        self.store.set_custom_button_position(node_id, form["position_index"])
-        self._refresh_custom_buttons()
-
-    def delete_custom_button_confirm(self, node_id, label):
-        descendant_count = self.store.count_custom_button_descendants(node_id)
-        if descendant_count > 0:
-            confirmed = messagebox.askyesno(
-                "Удалить кнопку",
-                f'Кнопка "{label}" имеет дочерние кнопки — вместе с ней удалятся ещё {descendant_count} '
-                "дочерних кнопок (вся ветка). Продолжить?",
-                parent=self.custom_buttons_window,
-            )
-        else:
-            confirmed = messagebox.askyesno(
-                "Удалить кнопку", f'Удалить кнопку "{label}"?', parent=self.custom_buttons_window,
-            )
-        if not confirmed:
-            return
-        self.store.delete_custom_button(node_id)
-        if self.custom_buttons_selected_id is not None and not self.store.get_custom_button(self.custom_buttons_selected_id):
-            self.custom_buttons_selected_id = None
-        self._refresh_custom_buttons()
-
-    # ---------- керування Telegram-ботом ----------
     def _read_telegram_token(self):
         token_file = self.settings.get("telegram_token_file")
         if not token_file:

@@ -41,6 +41,7 @@ import code_backup
 import config_backup
 import domain_info
 import remote_control_client
+import button_editor
 import servers_registry
 import standard_menu_cloud
 import update_check
@@ -75,7 +76,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.16"
+__version__ = "1.1.18"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -115,6 +116,70 @@ RU_MONTHS = [
     "ноября",
     "декабря",
 ]
+
+
+# Редактор кнопок (варіант 01, 2026-09-05): спільна панель button_editor
+# показує "телефон" і властивості; домашка редагує ЖИВЕ дерево клієнта через
+# тунель, тож джерело читає кеш останнього fetch і шле дії віддалено.
+# Кожна дія - у фоні (_push_custom_button_action); після успіху дерево
+# перечитується, і лише тоді панель перемальовується (then).
+class _RemoteButtonSource(button_editor.ButtonSource):
+    def __init__(self, app):
+        self.app = app
+
+    def _cache(self):
+        return self.app._custom_buttons_cache or []
+
+    def rows(self, parent_id):
+        return [
+            (row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
+            for row in self._cache() if row[1] == parent_id
+        ]
+
+    def get(self, node_id):
+        for row in self._cache():
+            if row[0] == node_id:
+                return row
+        return None
+
+    def actions(self):
+        return [(action["code"], action["label"]) for action in CUSTOM_BUTTON_ACTIONS]
+
+    def operations(self):
+        return self.app._operation_link_catalog()
+
+    def label_collides(self, label, exclude_id=None):
+        # Збіги перевіряє сам клієнт (409) - помилка прийде текстом.
+        return False
+
+    def add(self, parent_id, label, layout):
+        result = remote_control_client.add_remote_custom_button(
+            label, "", None, parent_id=parent_id, layout=layout, operation_id=None,
+        )
+        return result.get("id") if isinstance(result, dict) else None
+
+    def update(self, node_id, label, message_text, action_code, layout, operation_id):
+        remote_control_client.update_remote_custom_button(
+            node_id, label, message_text, action_code, layout=layout, operation_id=operation_id,
+        )
+
+    def move(self, node_id, new_index):
+        row = self.get(node_id)
+        if not row:
+            return
+        remote_control_client.update_remote_custom_button(
+            node_id, row[2], row[3] or "", row[4], layout=row[7], operation_id=row[8], position_index=new_index,
+        )
+
+    def delete(self, node_id):
+        remote_control_client.delete_remote_custom_button(node_id)
+
+    def set_enabled(self, node_id, enabled):
+        remote_control_client.set_remote_custom_button_enabled(node_id, enabled)
+
+    def apply(self, action, then):
+        self.app._button_editor_pending_then = then
+        self.app._push_custom_button_action(action)
 
 
 class ExcelViewerApp:
@@ -196,11 +261,14 @@ class ExcelViewerApp:
         "white", "#d1242f", "#1a7f37", "#0969da", "#2F7BD9", "#255FA8",
         "#1D9E75", "#B23B3B", "red", "green", "darkgreen",
         "#8a5a00",  # бейдж "виняток" (одиниця виміру) - лишається впізнаваним у обох темах
+        "#B0B8C0", "#DFE6EE",  # текст на "телефоні" редактора кнопок
     } | {fg for _bg, fg in _ROLE_CHIP_COLORS.values()}
     _SEMANTIC_BG_COLORS = {bg.lower() for bg, _fg in _ROLE_CHIP_COLORS.values()} | {
         "#fff3d6",
         "#ddf4ff",  # бейдж "gui" (журнал оновлень)
         "#dafbe1",  # бейдж "client" (журнал оновлень)
+        # "Телефон" у редакторі кнопок (button_editor.py) - кольори Telegram.
+        "#17212b", "#182533", "#2b5278", "#3d6e9e", "#3a4a5a", "#2f7bd9",
     }
 
     def _theme(self):
@@ -1638,6 +1706,13 @@ class ExcelViewerApp:
         tk.Label(
             active_server_section, text=self._t("Активний сервер"), font=("Segoe UI", 10, "bold"), anchor="w",
         ).pack(anchor="w")
+        # Зауваження користувача (2026-09-05): "я не бачу кому я пошту
+        # прикріплюю чи чию дивлюсь" - підпис, чиї саме дані показує домашка.
+        tk.Label(
+            active_server_section,
+            text=self._t("Домашка показує дані, журнали, персонал і кнопки саме цього клієнта."),
+            font=("Segoe UI", 9), fg="#8c959f", anchor="w", justify="left", wraplength=620,
+        ).pack(anchor="w")
         self.active_server_list_frame = tk.Frame(active_server_section)
         self.active_server_list_frame.pack(anchor="w", fill="x", pady=(4, 0))
         self._active_server_var = tk.StringVar(value=remote_control_client.active_hostname())
@@ -1654,7 +1729,12 @@ class ExcelViewerApp:
             width=28,
             command=self.open_onedrive_account_dialog,
         )
-        onedrive_account_button.pack(anchor="w", pady=(0, 12))
+        onedrive_account_button.pack(anchor="w", pady=(0, 2))
+        tk.Label(
+            main_settings,
+            text=self._t("Обліковий запис цього компʼютера — для резервних копій і реєстру клієнтів. До клієнтів не стосується."),
+            font=("Segoe UI", 9), fg="#8c959f", anchor="w", justify="left", wraplength=620,
+        ).pack(anchor="w", pady=(0, 12))
 
         # Задача користувача (2026-08-21): "ключі зроби змогу або файлом
         # .тхт, або в строку ввести". Поле мусить бути з ОБОХ боків: ключ
@@ -2056,35 +2136,18 @@ class ExcelViewerApp:
         notebook.add(actions_tab, text=self._t("Дії"))
         self._build_actions_view(actions_tab)
 
-        list_side = tk.Frame(content)
-        list_side.pack(side="left", fill="both", expand=True, padx=(0, 16))
-
-        tk.Label(
-            list_side,
-            text=self._t("Кнопки, які ви додасте тут, з'являться в головному меню бота в Telegram."),
-            wraplength=520,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 12))
-
-        self.add_root_button = tk.Button(
-            list_side,
-            text=self._t("+ Додати кореневу кнопку"),
-            width=26,
-            command=lambda: self.add_custom_button_dialog(None),
-            fg="#1a7f37",
-            **self._chip_button_style(),
-        )
-        self.add_root_button.pack(anchor="w", pady=(0, 8))
-
-        self.custom_buttons_list_frame = self._create_scrollable_list(list_side)
-
-        preview_side = tk.Frame(content, width=260, relief="groove", borderwidth=1)
-        preview_side.pack(side="right", fill="y")
-        preview_side.pack_propagate(False)
-
-        tk.Label(preview_side, text=self._t("Прев'ю"), font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
-        self.custom_button_preview_frame = tk.Frame(preview_side)
-        self.custom_button_preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        # Задача користувача (2026-09-05): "потрібно переробити налаштовування
+        # кнопок... виглядає досить криво та нелогічно" - варіант 01 із пʼяти:
+        # телефон + властивості (button_editor.py, спільно з клієнтом).
+        theme = self._theme()
+        colors = {
+            "bg": theme["bg"], "card": theme["panel_bg"], "entry": theme["entry_bg"],
+            "fg": theme["fg"], "muted": theme["muted_fg"], "border": theme["border"], "accent": "#2F7BD9",
+        }
+        self._button_editor_pending_then = None
+        self.button_editor = button_editor.ButtonEditorPanel(content, _RemoteButtonSource(self), colors)
+        self.custom_buttons_list_frame = None
+        self.custom_button_preview_frame = None
 
     # Той самий фон-потік + _run_on_main_thread + guard-прапорець, що вже й
     # _on_role_menu_selected вище (не блокувати вікно на весь мережевий
@@ -2439,12 +2502,6 @@ class ExcelViewerApp:
     # дерево напряму з client_app.py через remote_control_client.
     # fetch_remote_custom_buttons).
     def _refresh_custom_buttons(self):
-        self._clear_frame(self.custom_buttons_list_frame)
-        tk.Label(self.custom_buttons_list_frame, text=self._t("Завантаження..."), anchor="w").pack(
-            anchor="w", fill="x", pady=4
-        )
-        self._apply_theme(self.custom_buttons_list_frame)
-
         self._custom_buttons_refresh_generation += 1
         generation = self._custom_buttons_refresh_generation
 
@@ -2455,12 +2512,20 @@ class ExcelViewerApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_custom_buttons_rows(self, rows, generation=None):
-        if getattr(self, "custom_buttons_list_frame", None) is None:
-            return
         if generation is not None and generation != self._custom_buttons_refresh_generation:
             return
         self._custom_buttons_cache = rows
-        self._render_custom_buttons_tree()
+        server_text = self._t("Дані: {value}").format(value=self._active_server_display_name())
+        if rows is None:
+            server_text += " — " + self._t("немає зв'язку з клієнтом")
+        self._custom_buttons_active_server_text.set(server_text)
+        editor = getattr(self, "button_editor", None)
+        if editor is not None:
+            editor.refresh()
+        pending = getattr(self, "_button_editor_pending_then", None)
+        self._button_editor_pending_then = None
+        if pending:
+            pending()
 
     # rows у кеші - 9-елементні (id, parent_id, label, message_text,
     # action_code, section, enabled, layout, operation_id), як їх віддає
@@ -2921,6 +2986,7 @@ class ExcelViewerApp:
 
             def finish():
                 if error:
+                    self._button_editor_pending_then = None
                     messagebox.showerror(self._t("Редактор кнопок"), error)
                     return
                 if on_success:
@@ -5328,6 +5394,22 @@ class ExcelViewerApp:
                 hostname = self._active_server_var.get()
                 remote_control_client.set_active_server(hostname)
                 self.settings.set("active_remote_server_hostname", hostname)
+                # Перемалювати список: позначка ✓ і жирний шрифт
+                # мають перейти на нову обрану (див. mark нижче).
+                self._refresh_active_server_list()
+
+            # Зауваження користувача (2026-09-05, знімок): "не показують
+            # візуально який увімкнений" - індикатор Radiobutton у темній
+            # темі Tk не видно. Позначка робиться ТЕКСТОМ і кольором:
+            # "✓ ", жирний шрифт і синій (семантичний, тема не чіпає).
+            def mark(text, value):
+                selected = value == current_hostname
+                return {
+                    "text": ("\u2713 " + text) if selected else text,
+                    "font": ("Segoe UI", 9, "bold" if selected else "normal"),
+                    "fg": "#2F7BD9" if selected else None,
+                    "selectcolor": "#2F7BD9",
+                }
 
             # Задача користувача (2026-08-20): "додай ще мені змогу вибрати
             # стандартний (той який не прописується в строці)" - той самий
@@ -5349,10 +5431,15 @@ class ExcelViewerApp:
             standard_text = self._t("Стандартний (без реєстрації)")
             if same_address:
                 standard_text = "%s - %s" % (standard_text, ", ".join(same_address))
-            tk.Radiobutton(
-                frame, text=standard_text, variable=self._active_server_var,
+            standard_style = mark(standard_text, standard_hostname)
+            standard_radio = tk.Radiobutton(
+                frame, text=standard_style["text"], font=standard_style["font"],
+                selectcolor=standard_style["selectcolor"], variable=self._active_server_var,
                 value=standard_hostname, anchor="w", command=on_pick,
-            ).pack(anchor="w")
+            )
+            if standard_style["fg"]:
+                standard_radio.configure(fg=standard_style["fg"])
+            standard_radio.pack(anchor="w")
             servers = {
                 name: server for name, server in servers.items()
                 if (server.get("hostname") or "") != standard_hostname
@@ -5365,10 +5452,15 @@ class ExcelViewerApp:
             else:
                 for name, server in sorted(servers.items()):
                     kind_label = self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний"))
-                    tk.Radiobutton(
-                        frame, text=f"{name} ({kind_label})", variable=self._active_server_var,
+                    style = mark(f"{name} ({kind_label})", server["hostname"])
+                    radio = tk.Radiobutton(
+                        frame, text=style["text"], font=style["font"], selectcolor=style["selectcolor"],
+                        variable=self._active_server_var,
                         value=server["hostname"], anchor="w", command=on_pick,
-                    ).pack(anchor="w")
+                    )
+                    if style["fg"]:
+                        radio.configure(fg=style["fg"])
+                    radio.pack(anchor="w")
             self._apply_theme(frame)
 
         def worker():
