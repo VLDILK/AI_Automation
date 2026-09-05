@@ -94,7 +94,7 @@ import single_instance
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.20"
+__version__ = "0.3.21"
 
 # Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
 # remind_every_start - перемикач у Настройках ("Напоминать о недостающих
@@ -6196,16 +6196,19 @@ class ClientApp(ctk.CTk):
 # значеннями - потраплять у хмару, коли адміністратор наступного разу явно
 # натисне кнопку.
 def _reconcile_standard_menu_with_cloud(store, email=None):
-    cloud_state = standard_menu_cloud.read_cloud_state(email)
+    """Локальний стан видимості кнопок - єдине джерело правди; хмара - дзеркало.
+
+    Рішення користувача (2026-09-05): "розклад і видимість кнопок у боті
+    беруться з клієнта налаштувань (локально)... я тоді ще злився що знову
+    зʼявились старі кнопки. тому краще це локально тримати". Раніше хмара
+    (2026-08-18) перемагала локальний стан при кожному старті - саме так
+    старі кнопки й поверталися на новому клієнті. Тепер напрям один:
+    локальне -> кеш -> хмара (best-effort, без пошти OneDrive тихо
+    пропускається). Домашка читає хмару лише як довідку.
+    """
     local_state = store.get_standard_menu_state()
-    if cloud_state is None:
-        standard_menu_cloud.write_local_cache(local_state)
-        return
-    merged_state = dict(local_state)
-    merged_state.update({key: value for key, value in cloud_state.items() if key in local_state})
-    if merged_state != local_state:
-        store.apply_standard_menu_state(merged_state)
-    standard_menu_cloud.write_local_cache(merged_state)
+    standard_menu_cloud.write_local_cache(local_state)
+    standard_menu_cloud.write_cloud_state(local_state, email)
 
 
 # Задача користувача (2026-08-17): "якщо програма закриється - то щоб
