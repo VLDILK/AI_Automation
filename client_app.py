@@ -95,7 +95,7 @@ import button_editor
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.22"
+__version__ = "0.3.23"
 
 # Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
 # remind_every_start - перемикач у Настройках ("Напоминать о недостающих
@@ -2644,7 +2644,7 @@ class ClientApp(ctk.CTk):
             return
         window = tk.Toplevel(self)
         window.title("Учётная запись OneDrive")
-        window.geometry("380x420")
+        window.geometry("420x560")
         window.configure(bg=self._tk_color(COLOR_BG))
         self.onedrive_account_window = window
 
@@ -2654,28 +2654,74 @@ class ClientApp(ctk.CTk):
             side="left"
         )
 
+        # Зауваження користувача (2026-09-05): пошту не видно й вона не
+        # зберігалась, якщо натиснути "Закрыть" одразу після набору. Тепер
+        # акаунти OneDrive цього ПК читаються з Windows і обираються кліком -
+        # зберігається одразу; ручне поле - для адреси поза списком.
         ctk.CTkLabel(
             window,
             text=(
-                "Email аккаунта OneDrive для общих данных: реестр серверов, "
-                "резервные копии, стандартное меню. Пусто — угадывание по "
-                "названию папки, как раньше."
+                "Какой аккаунт OneDrive этого компьютера использовать для общих данных: "
+                "реестр клиентов, резервные копии, стандартное меню. Дома должен быть "
+                "указан тот же аккаунт."
             ),
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 8))
-
-        email_var = ctk.StringVar(value=self.settings.get("onedrive_shared_email") or "")
+        choices = ctk.CTkFrame(window, fg_color="transparent")
+        choices.pack(fill="x", padx=16)
+        choice_var = ctk.StringVar(value=(self.settings.get("onedrive_shared_email") or "").strip())
+        manual_var = ctk.StringVar(value="")
         status_var = ctk.StringVar(value=self._onedrive_account_status_text())
 
-        def on_email_changed(*_args):
-            self.settings.set("onedrive_shared_email", email_var.get().strip())
+        def current_email():
+            return (self.settings.get("onedrive_shared_email") or "").strip()
+
+        def save(value):
+            self.settings.set("onedrive_shared_email", (value or "").strip())
+            choice_var.set(current_email())
             status_var.set(self._onedrive_account_status_text())
+            render_choices()
 
-        email_entry = ctk.CTkEntry(window, textvariable=email_var, placeholder_text="you@company.com")
-        email_entry.pack(fill="x", padx=16, pady=(0, 6))
-        email_entry.bind("<FocusOut>", on_email_changed)
-        email_entry.bind("<Return>", on_email_changed)
+        def render_choices():
+            for child in choices.winfo_children():
+                child.destroy()
+            accounts = servers_registry.list_account_folders()
+            current = current_email().lower()
+            options = [(email, folder) for email, folder in accounts] + [("", None)]
+            for email, folder in options:
+                selected = (email.lower() == current) if email else (current == "")
+                text = email if email else "Не использовать облако (данные только на этом компьютере)"
+                ctk.CTkRadioButton(
+                    choices, text=("\u2713 " + text) if selected else text, variable=choice_var, value=email,
+                    font=("", 12, "bold" if selected else "normal"),
+                    text_color=("#2F7BD9" if selected else COLOR_TEXT), command=lambda e=email: save(e),
+                ).pack(anchor="w", pady=(0, 2))
+                if folder is not None:
+                    ctk.CTkLabel(
+                        choices, text=str(folder), font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w",
+                    ).pack(anchor="w", padx=(28, 0), pady=(0, 6))
+            if current and not any(email.lower() == current for email, _folder in accounts):
+                ctk.CTkLabel(
+                    choices, text=f"Указан {current_email()}, но такого аккаунта на этом компьютере нет.",
+                    font=("", 11), text_color=COLOR_STOP_TEXT, anchor="w", justify="left", wraplength=340,
+                ).pack(anchor="w", pady=(2, 0))
 
+        render_choices()
+
+        ctk.CTkLabel(
+            window, text="Другой адрес (если его нет в списке):", font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(8, 2))
+        manual_entry = ctk.CTkEntry(window, textvariable=manual_var, placeholder_text="you@company.com")
+        manual_entry.pack(fill="x", padx=16, pady=(0, 6))
+
+        def flush_manual(*_args):
+            value = manual_var.get().strip()
+            if value and value.lower() != current_email().lower():
+                save(value)
+                manual_var.set("")
+
+        manual_entry.bind("<Return>", flush_manual)
+        manual_entry.bind("<FocusOut>", flush_manual)
         ctk.CTkLabel(
             window, textvariable=status_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
@@ -2694,7 +2740,13 @@ class ClientApp(ctk.CTk):
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 16))
 
-        ctk.CTkButton(window, text="Закрыть", command=window.destroy).pack(fill="x", padx=16, pady=(0, 16))
+        def close_window():
+            flush_manual()
+            window.destroy()
+
+        ctk.CTkButton(window, text="Закрыть", command=close_window).pack(fill="x", padx=16, pady=(0, 16))
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.bind("<Escape>", lambda _event: close_window())
 
     # Той самий короткий підпис під реліз-нотатками, що вже й gui.py
     # "Історія" (навмисно продубльовано - client_app.py уникає імпорту

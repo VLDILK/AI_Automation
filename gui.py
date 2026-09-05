@@ -76,7 +76,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.18"
+__version__ = "1.1.19"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -3595,13 +3595,19 @@ class ExcelViewerApp:
         window.bind("<Escape>", lambda event: window.destroy())
         self._center_window(window, 480, 300)
 
+    # Зауваження користувача (2026-09-05, знімок): "щось не показує пошту
+    # введену... маю бачити пошту". Причина: поле зберігалось лише при
+    # виході з нього чи Enter - "Закрыть" одразу після набору нічого не
+    # писало, і в settings.json ключа не було взагалі. Тепер акаунти
+    # OneDrive цього ПК читаються з Windows (servers_registry.
+    # list_account_folders) і обираються КЛІКОМ - зберігається одразу,
+    # обране позначене ✓ і показує свою теку. Ручне поле лишається для
+    # адреси, якої в списку нема, і зберігається також при "Закрыть".
     def open_onedrive_account_dialog(self):
         window = tk.Toplevel(self.root)
         window.title(self._t("Учётная запись OneDrive"))
-        window.geometry("460x260")
         window.transient(self.root)
         window.grab_set()
-
         top = tk.Frame(window)
         top.pack(side="top", fill="x", padx=18, pady=(16, 8))
         tk.Label(
@@ -3610,46 +3616,93 @@ class ExcelViewerApp:
         tk.Label(
             top,
             text=self._t(
-                "Email аккаунта OneDrive для общих данных: реестр серверов, "
-                "резервные копии, стандартное меню. Пусто — угадывание по "
-                "названию папки, как раньше. Должен совпадать с тем же "
-                "полем на клиентских машинах."
+                "Какой аккаунт OneDrive этого компьютера использовать для общих данных: "
+                "реестр клиентов, резервные копии, стандартное меню. На клиентах должен "
+                "быть указан тот же аккаунт."
             ),
-            anchor="w", justify="left", wraplength=420, fg="#555555",
+            anchor="w", justify="left", wraplength=470, fg="#8c959f",
         ).pack(anchor="w", pady=(4, 0))
 
         body = tk.Frame(window)
-        body.pack(side="top", fill="x", padx=18, pady=8)
-
-        email_var = tk.StringVar(value=self.settings.get("onedrive_shared_email") or "")
-        email_entry = tk.Entry(body, textvariable=email_var, width=40)
-        email_entry.pack(anchor="w", fill="x")
-
+        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
+        choices = tk.Frame(body)
+        choices.pack(anchor="w", fill="x")
+        choice_var = tk.StringVar(value=(self.settings.get("onedrive_shared_email") or "").strip())
+        manual_var = tk.StringVar(value="")
         status_var = tk.StringVar(value=self._onedrive_account_status_text())
-        status_label = tk.Label(
-            body, textvariable=status_var, anchor="w", justify="left", wraplength=420, fg="#555555",
-        )
-        status_label.pack(anchor="w", fill="x", pady=(8, 0))
 
-        def on_email_changed(*_args):
-            self.settings.set("onedrive_shared_email", email_var.get().strip())
+        def current_email():
+            return (self.settings.get("onedrive_shared_email") or "").strip()
+
+        def save(value):
+            self.settings.set("onedrive_shared_email", (value or "").strip())
+            choice_var.set(current_email())
             status_var.set(self._onedrive_account_status_text())
+            render_choices()
 
-        email_entry.bind("<FocusOut>", on_email_changed)
-        email_entry.bind("<Return>", on_email_changed)
+        def render_choices():
+            for child in choices.winfo_children():
+                child.destroy()
+            accounts = servers_registry.list_account_folders()
+            current = current_email().lower()
+            options = [(email, folder) for email, folder in accounts] + [("", None)]
+            for email, folder in options:
+                selected = (email.lower() == current) if email else (current == "")
+                text = email if email else self._t("Не использовать облако (данные только на этом компьютере)")
+                radio = tk.Radiobutton(
+                    choices, text=("\u2713 " + text) if selected else text,
+                    font=("Segoe UI", 9, "bold" if selected else "normal"),
+                    variable=choice_var, value=email, anchor="w", selectcolor="#2F7BD9",
+                    command=lambda e=email: save(e),
+                )
+                if selected:
+                    radio.configure(fg="#2F7BD9")
+                radio.pack(anchor="w")
+                if folder is not None:
+                    tk.Label(
+                        choices, text=str(folder), font=("Segoe UI", 8), fg="#8c959f", anchor="w",
+                    ).pack(anchor="w", padx=(24, 0))
+            if current and not any(email.lower() == current for email, _folder in accounts):
+                tk.Label(
+                    choices,
+                    text=self._t("Указан {email}, но такого аккаунта на этом компьютере нет.").format(email=current_email()),
+                    font=("Segoe UI", 9), fg="#d1242f", anchor="w", justify="left", wraplength=470,
+                ).pack(anchor="w", pady=(4, 0))
+            self._apply_theme(choices)
+
+        render_choices()
+
+        tk.Label(
+            body, text=self._t("Другой адрес (если его нет в списке):"), anchor="w", fg="#8c959f",
+        ).pack(anchor="w", pady=(10, 2))
+        manual_entry = tk.Entry(body, textvariable=manual_var, width=44)
+        manual_entry.pack(anchor="w", fill="x")
+
+        def flush_manual(*_args):
+            value = manual_var.get().strip()
+            if value and value.lower() != current_email().lower():
+                save(value)
+                manual_var.set("")
+
+        manual_entry.bind("<Return>", flush_manual)
+        manual_entry.bind("<FocusOut>", flush_manual)
+
+        tk.Label(
+            body, textvariable=status_var, anchor="w", justify="left", wraplength=470, fg="#8c959f",
+        ).pack(anchor="w", fill="x", pady=(10, 0))
+
+        def close():
+            flush_manual()
+            window.destroy()
 
         bottom = tk.Frame(window)
         bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
-        tk.Button(bottom, text=self._t("Закрыть"), width=14, command=window.destroy).pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy())
-        self._center_window(window, width=460, height=260)
+        tk.Button(bottom, text=self._t("Закрыть"), width=14, command=close).pack(side="right")
+        window.bind("<Escape>", lambda event: close())
+        window.protocol("WM_DELETE_WINDOW", close)
+        self._center_window(window, width=520, height=400)
+        self._apply_theme(window)
 
-    # Задача користувача (2026-08-19): "додай кнопку системні команди
-    # чат-боту... галочки на ввімкнення... кнопка зберегти яка закриває
-    # вікно і зберігає команди" - той самий read-then-write через
-    # remote_control_client, що вже й "Способи оплати"/редактор кнопок -
-    # домашня программа сама нічого не зберігає локально, лише тягне й
-    # штовхає стан client_app.py.
     _SYSTEM_COMMANDS_INFO = (
         ("status", "Статус базы", "Показывает количество листов и строк в кэше."),
         ("sheets", "Список листов", "Показывает названия всех листов Excel."),
