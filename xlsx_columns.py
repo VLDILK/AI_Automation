@@ -228,6 +228,57 @@ def _patch_sheet(sheet_xml, header_row, columns, previous_last_column):
     return sheet_xml
 
 
+def _with_width(attributes, width):
+    attributes = re.sub(r'\s*\b(width|customWidth)="[^"]*"', "", attributes)
+    return attributes + ' width="%s" customWidth="1"' % _format_number(width)
+
+
+def _patch_cols(sheet_xml, columns):
+    """Ширина дописаних колонок (<cols>) - "щоб під формат було".
+
+    Записи <col> у листі не можуть перетинатись і мусять іти за зростанням
+    min - інакше Excel вважає файл пошкодженим. Тому наявні записи
+    розбираються повністю: той, що вже описує потрібну колонку, отримує
+    нову ширину (діапазон при цьому розрізається на до трьох частин, решта
+    атрибутів - стиль, приховування - лишаються), а колонка, яку ніхто не
+    описував, вставляється на своє місце за порядком.
+    """
+    wanted = {column["index"]: column["width"] for column in columns if column.get("width")}
+    if not wanted:
+        return sheet_xml
+    sheet_xml = sheet_xml.replace("<cols/>", "", 1)
+    cols_match = re.search(r"<cols>(.*?)</cols>", sheet_xml, flags=re.S)
+    entries = []
+    if cols_match:
+        for match in re.finditer(r"<col\b([^>]*?)/>", cols_match.group(1)):
+            attributes = match.group(1)
+            low = int(re.search(r'\bmin="(\d+)"', attributes).group(1))
+            high = int(re.search(r'\bmax="(\d+)"', attributes).group(1))
+            rest = re.sub(r'\s*\b(min|max)="\d+"', "", attributes)
+            entries.append([low, high, rest])
+    for index, width in sorted(wanted.items()):
+        rebuilt = []
+        placed = False
+        for low, high, rest in entries:
+            if low <= index <= high:
+                if low < index:
+                    rebuilt.append([low, index - 1, rest])
+                rebuilt.append([index, index, _with_width(rest, width)])
+                if index < high:
+                    rebuilt.append([index + 1, high, rest])
+                placed = True
+            else:
+                rebuilt.append([low, high, rest])
+        if not placed:
+            rebuilt.append([index, index, _with_width("", width)])
+        entries = rebuilt
+    entries.sort(key=lambda entry: entry[0])
+    body = "".join('<col min="%d" max="%d"%s/>' % (low, high, rest) for low, high, rest in entries)
+    if cols_match:
+        return sheet_xml[: cols_match.start()] + "<cols>" + body + "</cols>" + sheet_xml[cols_match.end():]
+    return re.sub(r"<sheetData\b", "<cols>" + body + "</cols><sheetData", sheet_xml, count=1)
+
+
 def _patch_table(table_xml, previous_last_column, columns):
     new_last_letter = column_letter(max(column["index"] for column in columns))
     ref_match = re.search(r'\bref="([A-Z]+)(\d+):([A-Z]+)(\d+)"', table_xml)
@@ -286,9 +337,8 @@ def append_columns(data, sheet_name, header_row, columns, previous_last_column):
 
         patched = {}
         sheet_xml = source.read(sheet_part).decode("utf-8")
-        patched[sheet_part] = _patch_sheet(
-            sheet_xml, header_row, columns, previous_last_column
-        ).encode("utf-8")
+        sheet_xml = _patch_sheet(sheet_xml, header_row, columns, previous_last_column)
+        patched[sheet_part] = _patch_cols(sheet_xml, columns).encode("utf-8")
 
         for table_part in table_parts:
             table_xml = source.read(table_part).decode("utf-8")
@@ -296,20 +346,171 @@ def append_columns(data, sheet_name, header_row, columns, previous_last_column):
             if new_table_xml is not None:
                 patched[table_part] = new_table_xml.encode("utf-8")
 
-        buffer = BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
-            for item in source.infolist():
-                payload = patched.get(item.filename)
-                if payload is None:
-                    payload = source.read(item.filename)
-                # Зберігаємо власний ZipInfo кожного запису: дата, спосіб
-                # стиснення й прапорці лишаються тими самими, що були.
-                info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
-                info.compress_type = item.compress_type
-                info.external_attr = item.external_attr
-                info.internal_attr = item.internal_attr
-                info.create_system = item.create_system
-                target.writestr(info, payload)
-        return buffer.getvalue()
+        return _rewrite_archive(source, patched)
     finally:
         source.close()
+
+
+def _rewrite_archive(source, patched, added=None):
+    """Нова книга: усі записи як були, крім patched (замінені) і added (нові)."""
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+        for item in source.infolist():
+            payload = patched.get(item.filename)
+            if payload is None:
+                payload = source.read(item.filename)
+            # Зберігаємо власний ZipInfo кожного запису: дата, спосіб
+            # стиснення й прапорці лишаються тими самими, що були.
+            info = zipfile.ZipInfo(item.filename, date_time=item.date_time)
+            info.compress_type = item.compress_type
+            info.external_attr = item.external_attr
+            info.internal_attr = item.internal_attr
+            info.create_system = item.create_system
+            target.writestr(info, payload)
+        for name, payload in (added or {}).items():
+            target.writestr(name, payload)
+    return buffer.getvalue()
+
+
+# --- Новий лист ---
+# Задача користувача (2026-09-05): лист ОБМЕН "якщо цього листа немає в
+# екселі - программа має автоматично його додати". Створювати лист через
+# openpyxl не можна з тієї ж причини, що й колонки (див. шапку модуля):
+# збереження книги знеструмило б кешовані значення формул. Тому лист
+# додається як ще чотири правки архіву:
+#   xl/worksheets/sheetN.xml     сам лист: заголовки, ширини, висота шапки
+#   xl/workbook.xml              <sheet> у списку листів
+#   xl/_rels/workbook.xml.rels   звʼязок id -> файл листа
+#   [Content_Types].xml          оголошення типу нової частини
+# docProps/app.xml (перелік назв листів для властивостей файлу) не
+# чіпається: Excel його не звіряє - перевірено відкриттям результату
+# справжнім Excel.
+
+_REL_WORKSHEET = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+_CONTENT_TYPE_WORKSHEET = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def header_style_of(data, sheet_name, header_row=1):
+    """Індекс стилю першої клітинки шапки листа (атрибут s), або None.
+
+    Стилі в книзі спільні для всіх листів, тож новий лист може взяти
+    оформлення шапки в сусіднього - і виглядатиме так само без правки
+    styles.xml.
+    """
+    source = zipfile.ZipFile(BytesIO(data))
+    try:
+        sheet_part = _sheet_part_name(source, sheet_name)
+        if sheet_part is None:
+            return None
+        sheet_xml = source.read(sheet_part).decode("utf-8")
+        return _cell_style(sheet_xml, "A%d" % header_row)
+    finally:
+        source.close()
+
+
+def _relationship_prefix(workbook_xml):
+    match = re.search(r'xmlns:(\w+)="%s"' % re.escape(_NS_REL), workbook_xml)
+    return match.group(1) if match else None
+
+
+def add_sheet(data, sheet_name, headers, column_widths=None, header_row_height=None, header_style=None):
+    """Повертає НОВІ байти книги з доданим порожнім листом.
+
+    headers          заголовки першого рядка
+    column_widths    ширина кожної колонки (той самий порядок), або None
+    header_row_height висота рядка шапки в пунктах, або None (типова)
+    header_style     індекс стилю для клітинок шапки (див. header_style_of)
+
+    Лист із такою назвою вже є - книга повертається як була.
+    """
+    source = zipfile.ZipFile(BytesIO(data))
+    try:
+        if _sheet_part_name(source, sheet_name) is not None:
+            return data
+
+        workbook_xml = source.read("xl/workbook.xml").decode("utf-8")
+        rels_xml = source.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+        types_xml = source.read("[Content_Types].xml").decode("utf-8")
+
+        sheet_numbers = [
+            int(match.group(1))
+            for name in source.namelist()
+            for match in [re.fullmatch(r"xl/worksheets/sheet(\d+)\.xml", name)]
+            if match
+        ]
+        new_number = max(sheet_numbers, default=0) + 1
+        new_part = "xl/worksheets/sheet%d.xml" % new_number
+
+        rel_numbers = [int(number) for number in re.findall(r'\bId="rId(\d+)"', rels_xml)]
+        new_rid = "rId%d" % (max(rel_numbers, default=0) + 1)
+
+        sheet_ids = [int(number) for number in re.findall(r'<sheet\b[^>]*\bsheetId="(\d+)"', workbook_xml)]
+        new_sheet_id = max(sheet_ids, default=0) + 1
+
+        prefix = _relationship_prefix(workbook_xml)
+        if prefix is None:
+            prefix = "r"
+            workbook_xml = workbook_xml.replace(
+                "<workbook ", '<workbook xmlns:r="%s" ' % _NS_REL, 1
+            )
+        workbook_xml = workbook_xml.replace(
+            "</sheets>",
+            '<sheet name="%s" sheetId="%d" %s:id="%s"/></sheets>'
+            % (_escape(sheet_name), new_sheet_id, prefix, new_rid),
+            1,
+        )
+        rels_xml = rels_xml.replace(
+            "</Relationships>",
+            '<Relationship Id="%s" Type="%s" Target="worksheets/sheet%d.xml"/></Relationships>'
+            % (new_rid, _REL_WORKSHEET, new_number),
+            1,
+        )
+        types_xml = types_xml.replace(
+            "</Types>",
+            '<Override PartName="/%s" ContentType="%s"/></Types>' % (new_part, _CONTENT_TYPE_WORKSHEET),
+            1,
+        )
+
+        patched = {
+            "xl/workbook.xml": workbook_xml.encode("utf-8"),
+            "xl/_rels/workbook.xml.rels": rels_xml.encode("utf-8"),
+            "[Content_Types].xml": types_xml.encode("utf-8"),
+        }
+        added = {new_part: _build_sheet_xml(headers, column_widths, header_row_height, header_style).encode("utf-8")}
+        return _rewrite_archive(source, patched, added)
+    finally:
+        source.close()
+
+
+def _build_sheet_xml(headers, column_widths, header_row_height, header_style):
+    last_letter = column_letter(max(len(headers), 1))
+    style_attribute = ' s="%s"' % header_style if header_style else ""
+    cells = "".join(
+        '<c r="%s1"%s t="inlineStr"><is><t>%s</t></is></c>'
+        % (column_letter(index), style_attribute, _escape(header))
+        for index, header in enumerate(headers, start=1)
+    )
+    cols = ""
+    if column_widths:
+        cols = "<cols>%s</cols>" % "".join(
+            '<col min="%d" max="%d" width="%s" customWidth="1"/>' % (index, index, _format_number(width))
+            for index, width in enumerate(column_widths, start=1)
+            if width
+        )
+    height_attribute = ""
+    if header_row_height:
+        height_attribute = ' ht="%s" customHeight="1"' % _format_number(header_row_height)
+    # Порядок елементів усередині <worksheet> суворий (схема OOXML):
+    # dimension, sheetViews, sheetFormatPr, cols, sheetData, pageMargins.
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<worksheet xmlns="%s" xmlns:r="%s">'
+        '<dimension ref="A1:%s1"/>'
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        "%s"
+        '<sheetData><row r="1" spans="1:%d"%s>%s</row></sheetData>'
+        '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
+        "</worksheet>"
+    ) % (_NS_MAIN, _NS_REL, last_letter, cols, max(len(headers), 1), height_attribute, cells)

@@ -816,60 +816,251 @@ def _readable_number(worksheet, values_worksheet, row, column):
     return True, _number_value(value)
 
 
-def ensure_workbook_has_required_sheets():
+# --- Звірка книги з шаблоном: план "чого бракує" і його виконання ---
+# Задача користувача (2026-09-05): "при початку роботи клієнта, якщо чогось
+# не вистачає в екселі (вкладка\стовбець\інше), програма має відразу
+# запитати, чи додати нові стовпці. якщо так - додається відразу по нашому
+# шаблону і має також бути синхронізовано із налаштуваннями висоти\ширини
+# рядків у самих налаштуваннях программи".
+#
+# Раніше все це робилось мовчки й через openpyxl - а збереження openpyxl
+# знеструмлює кешовані значення формул (виміряно 2026-08-21: "Остаток, шт"
+# 1033 -> None), тоді як програма читає саме кеш. Тепер два кроки:
+#   plan_workbook_repairs()   - лише читає, повертає що бракує (або None);
+#   apply_workbook_repairs()  - байтами архіву (xlsx_columns), один запис,
+#                               одна резервна копія, ширини/висота шапки з
+#                               налаштувань "Формат таблицы".
+# Єдиний виняток, що лишився на openpyxl, - "Точное время" у СПИСАНИЕ:
+# та колонка історично вставляється ПЕРШОЮ (зсуває всі інші), а зсув усіх
+# клітинок листа байтами - окрема велика робота заради файлів, у яких її
+# немає роками. Планується окремим пунктом і виконується лише коли справді
+# бракує.
+
+
+def _sheet_header_values(worksheet, header_row):
+    return [
+        worksheet.cell(row=header_row, column=column).value
+        for column in range(1, worksheet.max_column + 1)
+    ]
+
+
+def plan_workbook_repairs():
+    """Що бракує в книзі порівняно з шаблоном. Нічого не пише.
+
+    Повертає None, коли все на місці, інакше словник:
+        sheets               назви листів, яких немає взагалі
+        columns              [{sheet, header, header_row, previous_last_column}]
+                             для колонок автора в наявних листах
+        writeoff_time_column True, якщо в СПИСАНИЕ немає "Точное время"
+        warehouse            план колонок мп для СКЛАД (plan_warehouse_columns)
+    """
     workbook = excel_source.open_workbook()
-    changed = False
+    values_workbook = None
     try:
-        # Задача користувача: "якщо приєднати порожній ексель, то має
-        # створитись программою красивенька табличка з відповідними
-        # вкладками" - кожен із 5 відомих листів, якого взагалі немає у
-        # файлі, створюється з нуля з повним набором заголовків.
-        for sheet_name, full_headers in _REQUIRED_SHEETS_FULL:
-            if sheet_name in workbook.sheetnames:
-                continue
-            if not changed:
-                create_excel_backup()
-            worksheet = workbook.create_sheet(sheet_name)
-            for column_index, header in enumerate(full_headers, start=1):
-                worksheet.cell(row=1, column=column_index, value=header)
-            changed = True
+        try:
+            values_workbook = excel_source.open_workbook(data_only=True)
+        except Exception:
+            values_workbook = None
 
-        # Той самий принцип самозцілення, тепер для колонки, доданої в лист,
-        # що вже існує у реальному файлі (_WRITEOFF_TIME_HEADER) - без цього
-        # користувачам зі старим файлом довелось би дописувати колонку
-        # вручну.
-        if WRITEOFF_SHEET_NAME in workbook.sheetnames:
-            worksheet = workbook[WRITEOFF_SHEET_NAME]
-            existing_headers = [
-                worksheet.cell(row=1, column=column).value
-                for column in range(1, worksheet.max_column + 1)
-            ]
-            if _WRITEOFF_TIME_HEADER not in existing_headers:
-                if not changed:
-                    create_excel_backup()
-                worksheet.insert_cols(1)
-                worksheet.cell(row=1, column=1, value=_WRITEOFF_TIME_HEADER)
-                changed = True
+        sheets = [name for name, _headers in _REQUIRED_SHEETS_FULL if name not in workbook.sheetnames]
 
+        columns = []
         for sheet_name, required_header in _REQUIRED_OPERATION_AUTHOR_COLUMNS:
             if sheet_name not in workbook.sheetnames:
+                # Лист створиться цілком, уже з цією колонкою.
                 continue
             worksheet = workbook[sheet_name]
             header_row = _find_header_row(worksheet, sheet_name)
-            existing_headers = [
-                worksheet.cell(row=header_row, column=column).value
-                for column in range(1, worksheet.max_column + 1)
-            ]
-            if required_header in existing_headers:
+            existing = _sheet_header_values(worksheet, header_row)
+            if required_header in existing:
                 continue
-            if not changed:
-                create_excel_backup()
-            worksheet.cell(row=header_row, column=worksheet.max_column + 1, value=required_header)
-            changed = True
+            # Порожній лист openpyxl показує як max_column=1 - дописування
+            # "після останньої" почалось би з другої колонки.
+            has_any = any(value not in (None, "") for value in existing)
+            columns.append({
+                "sheet": sheet_name,
+                "header": required_header,
+                "header_row": header_row,
+                "previous_last_column": worksheet.max_column if has_any else 0,
+            })
 
-        if changed:
-            excel_source.save_workbook(workbook)
-        return changed
+        writeoff_time_column = False
+        if WRITEOFF_SHEET_NAME in workbook.sheetnames:
+            worksheet = workbook[WRITEOFF_SHEET_NAME]
+            writeoff_time_column = _WRITEOFF_TIME_HEADER not in _sheet_header_values(worksheet, 1)
+
+        warehouse = plan_warehouse_columns(workbook, values_workbook)
+    finally:
+        if values_workbook is not None:
+            values_workbook.close()
+        workbook.close()
+
+    plan = {
+        "sheets": sheets,
+        "columns": columns,
+        "writeoff_time_column": writeoff_time_column,
+        "warehouse": warehouse,
+    }
+    return plan if workbook_repairs_needed(plan) else None
+
+
+def workbook_repairs_needed(plan, include_warehouse=True):
+    if not plan:
+        return False
+    return bool(
+        plan["sheets"] or plan["columns"] or plan["writeoff_time_column"]
+        or (include_warehouse and plan["warehouse"])
+    )
+
+
+def _russian_columns(count):
+    if count % 10 == 1 and count % 100 != 11:
+        return "%d столбец" % count
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "%d столбца" % count
+    return "%d столбцов" % count
+
+
+def describe_workbook_plan(plan, include_warehouse=True):
+    """Рядки для людини (мовою застосунку) + підпис плану для "Позже".
+
+    Підпис - те, за чим програма впізнає, що бракує ТОГО САМОГО, що й
+    минулого разу: тоді повторно не питає, а лише тримає цятку на
+    дзвіночку. Зʼявилось щось нове - підпис інший, і питання повертається.
+    """
+    lines = []
+    keys = []
+    for sheet_name in plan["sheets"]:
+        lines.append("лист %s" % sheet_name)
+        keys.append("sheet:%s" % sheet_name)
+    for item in plan["columns"]:
+        lines.append("в листе %s — столбец «%s»" % (item["sheet"], item["header"]))
+        keys.append("column:%s:%s" % (item["sheet"], item["header"]))
+    if plan["writeoff_time_column"]:
+        lines.append("в листе %s — столбец «%s»" % (WRITEOFF_SHEET_NAME, _WRITEOFF_TIME_HEADER))
+        keys.append("column:%s:%s" % (WRITEOFF_SHEET_NAME, _WRITEOFF_TIME_HEADER))
+    if include_warehouse and plan["warehouse"]:
+        headers = plan["warehouse"]["headers"]
+        lines.append("в листе СКЛАД — %s: %s" % (_russian_columns(len(headers)), ", ".join(headers)))
+        keys.append("warehouse:%s" % ",".join(headers))
+    return lines, "|".join(sorted(keys))
+
+
+def _planned_column_width(header, settings):
+    """Ширина нової колонки за тими ж правилами, що й "Выровнять"."""
+    width_mode = settings.get(TABLE_FORMAT_COLUMN_WIDTH_MODE_KEY) or TABLE_FORMAT_DEFAULT_COLUMN_WIDTH_MODE
+    if width_mode == "fixed":
+        return float(settings.get(TABLE_FORMAT_COLUMN_WIDTH_KEY) or TABLE_FORMAT_DEFAULT_COLUMN_WIDTH)
+    return float(min(
+        TABLE_FORMAT_MAX_AUTO_COLUMN_WIDTH,
+        max(TABLE_FORMAT_MIN_AUTO_COLUMN_WIDTH, len(str(header)) + TABLE_FORMAT_COLUMN_WIDTH_PADDING),
+    ))
+
+
+def _reference_header_style(data):
+    """Стиль шапки одного з наявних листів - щоб новий лист не був "голим"."""
+    for sheet_name in (INCOME_SHEET_NAME, SALES_SHEET_NAME, WRITEOFF_SHEET_NAME):
+        style = xlsx_columns.header_style_of(data, sheet_name, 1)
+        if style:
+            return style
+    return None
+
+
+def apply_workbook_repairs(plan, settings=None, include_warehouse=True):
+    """Виконує план: резервна копія → листи → колонки → СКЛАД мп. Один запис.
+
+    Повертає звіт: {sheets: [...], columns: [(лист, заголовок)],
+    writeoff_time_column: bool, warehouse: план мп або None}.
+    """
+    report = {"sheets": [], "columns": [], "writeoff_time_column": False, "warehouse": None}
+    if not workbook_repairs_needed(plan, include_warehouse):
+        return report
+    settings = settings or SettingsStore(SETTINGS_PATH)
+    header_row_height = settings.get(TABLE_FORMAT_HEADER_ROW_HEIGHT_KEY) or None
+
+    create_excel_backup()
+    data = excel_source.backup_workbook_bytes()
+    touched = False
+
+    if plan["sheets"]:
+        header_style = _reference_header_style(data)
+        headers_by_sheet = dict(_REQUIRED_SHEETS_FULL)
+        for sheet_name in plan["sheets"]:
+            headers = headers_by_sheet[sheet_name]
+            data = xlsx_columns.add_sheet(
+                data, sheet_name, headers,
+                column_widths=[_planned_column_width(header, settings) for header in headers],
+                header_row_height=header_row_height,
+                header_style=header_style,
+            )
+            report["sheets"].append(sheet_name)
+            touched = True
+
+    for item in plan["columns"]:
+        previous = item["previous_last_column"]
+        data = xlsx_columns.append_columns(
+            data, item["sheet"], item["header_row"],
+            [{
+                "index": previous + 1,
+                "header": item["header"],
+                "style_from_index": previous or None,
+                "values": {},
+                "width": _planned_column_width(item["header"], settings),
+            }],
+            previous,
+        )
+        report["columns"].append((item["sheet"], item["header"]))
+        touched = True
+
+    if include_warehouse and plan["warehouse"]:
+        warehouse = plan["warehouse"]
+        for column in warehouse["columns"]:
+            column.setdefault("width", _planned_column_width(column["header"], settings))
+        data = xlsx_columns.append_columns(
+            data, "СКЛАД", warehouse["header_row"], warehouse["columns"], warehouse["previous_last_column"],
+        )
+        report["warehouse"] = warehouse
+        touched = True
+
+    if touched:
+        excel_source.write_workbook_bytes(data)
+
+    if plan["writeoff_time_column"]:
+        _ensure_writeoff_time_column()
+        report["writeoff_time_column"] = True
+    return report
+
+
+def ensure_workbook_has_required_sheets(settings=None):
+    """Мовчазна обгортка для gui.py: план + виконання без питань.
+
+    Колонки мп для СКЛАД сюди НЕ входять - домашка робить їх окремим
+    викликом repair_warehouse_columns() і показує про це власний звіт.
+    """
+    plan = plan_workbook_repairs()
+    if not workbook_repairs_needed(plan, include_warehouse=False):
+        return False
+    apply_workbook_repairs(plan, settings, include_warehouse=False)
+    return True
+
+
+def _ensure_writeoff_time_column():
+    """Старий випадок: "Точное время" ПЕРШОЮ колонкою СПИСАНИЕ (зсуває решту).
+
+    Єдине місце, що лишилось на openpyxl, - див. коментар над
+    plan_workbook_repairs. Викликається лише коли колонки справді немає.
+    """
+    workbook = excel_source.open_workbook()
+    try:
+        if WRITEOFF_SHEET_NAME not in workbook.sheetnames:
+            return False
+        worksheet = workbook[WRITEOFF_SHEET_NAME]
+        if _WRITEOFF_TIME_HEADER in _sheet_header_values(worksheet, 1):
+            return False
+        worksheet.insert_cols(1)
+        worksheet.cell(row=1, column=1, value=_WRITEOFF_TIME_HEADER)
+        excel_source.save_workbook(workbook)
+        return True
     finally:
         workbook.close()
 
@@ -4660,6 +4851,13 @@ INCOME_SHEET_NAME = "ПРИХОД МАТЕРИАЛА"
 # списания" на самому СКЛАД - єдине поточне значення, без історії). Новий
 # лист з тим самим принципом, що вже мають ПРОДАЖА МАТЕРИАЛА/АНТИСЕПТИРОВАНИЕ.
 WRITEOFF_SHEET_NAME = "СПИСАНИЕ"
+# Задача користувача (2026-09-05, ТЗ пункт 1 "ОБМЕН"): "окремий лист, із
+# записуванням автора обміну та датою". Обидва боки обміну лежать в одному
+# листі, по рядку на позицію: колонка "Отдаём / Получаем" каже, до якого
+# блоку належить рядок, а "Обмен №" звʼязує всі рядки однієї операції.
+# Гроші й контрагент сюди СВІДОМО не закладені - користувач на це ще не
+# відповів; коли відповість, колонки допише той самий механізм звірки.
+EXCHANGE_SHEET_NAME = "ОБМЕН"
 # Задача користувача: "нащо в стовбцю дата час з секундами? прибери. лівіше
 # додай окрему колонку точний час" - "Дата" лишається чистою датою (як і
 # була, _parse_date_text завжди повертає .date()), а реальний момент
@@ -4814,12 +5012,32 @@ _WAREHOUSE_SHEET_HEADERS = [
 # нього під час запису) - не критично для самого створення листів (кожен
 # лист незалежний), але логічно найближче до того, як людина сама читала б
 # структуру "спочатку склад, потім документи руху".
+_EXCHANGE_SHEET_HEADERS = [
+    "Дата",
+    "Время",
+    "Обмен №",
+    "Отдаём / Получаем",
+    "Продукт",
+    "Порода",
+    "Состояние",
+    "Толщина, мм",
+    "Ширина, мм",
+    "Длина, мм",
+    "Количество, шт",
+    "Итоговый объем, м3",
+    "Итоговая площадь, м2",
+    "Расчетный метраж, мп",
+    "Менеджер",
+    "Комментарий",
+]
+
 _REQUIRED_SHEETS_FULL = [
     ("СКЛАД", _WAREHOUSE_SHEET_HEADERS),
     (INCOME_SHEET_NAME, _INCOME_SHEET_HEADERS),
     (SALES_SHEET_NAME, _SALES_SHEET_HEADERS),
     (WRITEOFF_SHEET_NAME, _WRITEOFF_SHEET_HEADERS),
     (ANTISEPTIC_SHEET_NAME, _ANTISEPTIC_SHEET_HEADERS),
+    (EXCHANGE_SHEET_NAME, _EXCHANGE_SHEET_HEADERS),
 ]
 
 

@@ -75,11 +75,12 @@ from warehouse_data import (
     TABLE_FORMAT_HEADER_FONT_SIZE_KEY,
     TABLE_FORMAT_HEADER_ROW_HEIGHT_KEY,
     apply_standard_table_format,
-    ensure_workbook_has_required_sheets,
+    apply_workbook_repairs,
+    describe_workbook_plan,
+    plan_workbook_repairs,
     create_db_snapshot,
     create_excel_backup,
     list_db_snapshots,
-    repair_warehouse_columns,
     restore_db_snapshot,
     regenerate_excel_after_restore,
 )
@@ -93,7 +94,15 @@ import single_instance
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.15"
+__version__ = "0.3.16"
+
+# Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
+# remind_every_start - перемикач у Настройках ("Напоминать о недостающих
+# столбцах при каждом запуске", типово увімкнений); snoozed - що саме
+# людина відклала кнопкою "Позже" (підпис плану + коли), щоб при
+# вимкненому перемикачі не питати про те саме вдруге.
+EXCEL_CHECK_REMIND_EVERY_START_KEY = "excel_check_remind_every_start"
+EXCEL_CHECK_SNOOZED_KEY = "excel_check_snoozed"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -433,6 +442,16 @@ class ClientApp(ctk.CTk):
 
         self.refresh_excel_button = None
         self._excel_refresh_in_progress = False
+        # Задача користувача (2026-09-05): звірка Excel із шаблоном при
+        # старті; відкладене тримає дзвіночок у шапці (_check_excel_on_start).
+        self._excel_pending_plan = None
+        self._excel_pending_lines = []
+        self._excel_pending_at = None
+        self.excel_pending_window = None
+        self._excel_pending_body = None
+        self.bell_button = None
+        self.bell_dot = None
+        self.after(2500, self._check_excel_on_start)
         self._update_download_in_progress = False
         self._update_check_in_progress = False
         # Задача користувача (2026-08-15): "давай вже працювати через
@@ -612,6 +631,20 @@ class ClientApp(ctk.CTk):
             command=self._on_theme_toggle,
         )
         self.theme_toggle_button.pack(side="right")
+
+        # Задача користувача (2026-09-05): "дзвіночок зверху справа в
+        # програмі, і якщо є якась проблема - то там типу червона цятка".
+        # Цятка - маленький Canvas поверх кута кнопки; фон береться з теми,
+        # тож на світлій і темній виглядає як частина шапки (_paint_bell).
+        self.bell_button = ctk.CTkButton(
+            header, text="\U0001F514", width=32, height=26, font=("Segoe UI Emoji", 13),
+            fg_color="transparent", border_width=1, border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED, hover_color=COLOR_HOVER,
+            command=self._open_excel_pending_window,
+        )
+        self.bell_button.pack(side="right", padx=(0, 8))
+        self.bell_dot = tk.Canvas(self.bell_button, width=10, height=10, highlightthickness=0, bd=0)
+        self._paint_bell()
 
     # Задача користувача (2026-08-19): "можливість змінювати напис на
     # головному екрані... положення по х вправо/вліво... розмір тексту...
@@ -2921,6 +2954,30 @@ class ClientApp(ctk.CTk):
         # (та сама, що й у "Таблица Excel" - обидві про таблицю).
         self._build_row_button(card, "document", "Формат таблицы", self._open_table_format_window)
         ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+        # Задача користувача (2026-09-05): "додай це в налаштування як ти
+        # відобразив на скріні" - перемикач для звірки Excel із шаблоном
+        # (_check_excel_on_start). Увімкнений, поки людина сама не вимкне:
+        # тоді після "Позже" програма мовчить, доки не зʼявиться щось нове,
+        # а відкладене тримає лише цятка на дзвіночку. Той самий стиль
+        # рядка з CTkSwitch, що й у секції "Автозапуск".
+        remind_row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        remind_row.pack(fill="x", padx=1, pady=(0, 1))
+        remind_left = ctk.CTkFrame(remind_row, fg_color="transparent")
+        remind_left.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        ctk.CTkLabel(
+            remind_left, text="Напоминать о недостающих столбцах при каждом запуске",
+            font=("", 13), text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            remind_left, text="Выключено — после «Позже» напомнит только красная точка на колокольчике",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+        self._excel_remind_switch_var = ctk.IntVar(value=1 if self._excel_check_reminds_every_start() else 0)
+        ctk.CTkSwitch(
+            remind_row, text="", variable=self._excel_remind_switch_var, onvalue=1, offvalue=0,
+            command=self._on_excel_remind_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
         # Задача користувача (2026-08-15): "додай туди кнопку оновити
         # екселі" - той самий self._on_refresh_excel_clicked, що й у
         # головному меню; self.refresh_excel_button і далі стежить лише
@@ -2936,8 +2993,8 @@ class ClientApp(ctk.CTk):
         confirmed = messagebox.askyesno(
             "Выровнять таблицу",
             "Ничего не будет удалено. Будут лишь сняты активные фильтры и "
-            "выровнены строки и столбцы 5 управляемых листов (СКЛАД, ПРИХОД, "
-            "ПРОДАЖА, СПИСАНИЕ, АНТИСЕПТИРОВАНИЕ) под единый стандарт. "
+            "выровнены строки и столбцы 6 управляемых листов (СКЛАД, ПРИХОД, "
+            "ПРОДАЖА, СПИСАНИЕ, АНТИСЕПТИРОВАНИЕ, ОБМЕН) под единый стандарт. "
             "Продолжить?",
         )
         if not confirmed:
@@ -5656,41 +5713,247 @@ class ClientApp(ctk.CTk):
     # кнопка натискається ПОВЕРХ уже робочого інтерфейсу - обов'язково
     # фоновий потік, з видимим "Обновление..." і заблокованою кнопкою на
     # час роботи (той самий принцип, що вже діє для старту/стопу бота).
+    # Задача користувача (2026-09-05): "при початку роботи клієнта, якщо
+    # чогось не вистачає в екселі (вкладка\стовбець\інше), програма має
+    # відразу запитати, чи додати нові стовпці. якщо так - додається відразу
+    # по нашому шаблону і має також бути синхронізовано із налаштуваннями
+    # висоти\ширини... якщо відхилити запит - має десь це показувати".
+    # Обраний варіант 01 із пʼяти: список і дві кнопки "Позже"/"Добавить";
+    # відкладене - дзвіночок у шапці з червоною цяткою і вікно "Отложено".
+    #
+    # Той самий шлях - для кнопки "Обновить эксели" (раніше вона дописувала
+    # листи й колонки мовчки) і для "Проверить снова" в дзвіночку. Джерело
+    # (source) вирішує лише, що робити ДАЛІ: після "Обновить" таблиця
+    # перечитується в базу в будь-якому разі, після старту чи дзвіночка -
+    # лише якщо щось додали.
+    #
+    # Сам запис - байтами архіву (warehouse_data.apply_workbook_repairs),
+    # не через openpyxl: інакше кешовані значення формул зникли б, і бот
+    # бачив би нулі замість залишків.
+    def _check_excel_on_start(self):
+        self._start_excel_plan("start")
+
     def _on_refresh_excel_clicked(self):
         if self._excel_refresh_in_progress:
             return
         self._excel_refresh_in_progress = True
         if self.refresh_excel_button is not None:
-            self.refresh_excel_button.configure(text="\U0001F504  Обновление...", state="disabled")
+            self.refresh_excel_button.configure(text="\U0001F504  Проверка...", state="disabled")
+        self._start_excel_plan("refresh")
+
+    def _start_excel_plan(self, source):
+        # Читання великої книги - секунди, тож у фоні; рішення (вікно чи
+        # дзвіночок) - на головному потоці.
+        def worker():
+            plan = None
+            error = None
+            try:
+                plan = plan_workbook_repairs()
+            except Exception as exc:
+                error = exc
+            self._run_on_main_thread(lambda: self._on_excel_plan_ready(plan, error, source))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_excel_plan_ready(self, plan, error, source):
+        if error is not None:
+            # При старті файл може бути ще не обраний - це не привід для
+            # вікна з помилкою. "Обновить эксели" покаже ту саму помилку
+            # сама, читаючи книгу для імпорту.
+            if source == "refresh":
+                self._run_excel_refresh(None)
+            elif source in ("bell", "bell_add"):
+                messagebox.showerror("Таблица Excel", f"Не удалось прочитать таблицу: {error}")
+            return
+        if not plan:
+            self._set_excel_pending(None)
+            if source == "refresh":
+                self._run_excel_refresh(None)
+            elif source in ("bell", "bell_add"):
+                messagebox.showinfo("Таблица Excel", "Всё на месте — таблица соответствует шаблону.")
+            return
+        if source == "bell_add":
+            # "Добавить сейчас" з дзвіночка: план щойно перечитано з файлу,
+            # тож дописується саме те, чого бракує ЗАРАЗ, а не те, що було
+            # відкладено годину тому.
+            self._run_excel_refresh(plan)
+            return
+        lines, signature = describe_workbook_plan(plan)
+        if source == "start" and not self._excel_check_reminds_every_start():
+            snoozed = self.settings.get(EXCEL_CHECK_SNOOZED_KEY) or {}
+            if snoozed.get("signature") == signature:
+                self._set_excel_pending(plan, lines, snoozed.get("at"))
+                return
+        self._ask_excel_repairs(plan, lines, signature, source)
+
+    def _excel_check_reminds_every_start(self):
+        value = self.settings.get(EXCEL_CHECK_REMIND_EVERY_START_KEY)
+        return True if value is None else bool(value)
+
+    def _on_excel_remind_toggle_clicked(self):
+        self.settings.set(EXCEL_CHECK_REMIND_EVERY_START_KEY, bool(self._excel_remind_switch_var.get()))
+
+    def _ask_excel_repairs(self, plan, lines, signature, source):
+        window = ctk.CTkToplevel(self)
+        window.title("Таблица Excel")
+        window.resizable(False, False)
+        window.transient(self)
+        body = ctk.CTkFrame(window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=18)
+        ctk.CTkLabel(
+            body, text="В таблице не хватает:", font=("", 13, "bold"), text_color=COLOR_TEXT, anchor="w",
+        ).pack(anchor="w")
+        for line in lines:
+            ctk.CTkLabel(
+                body, text="\u2022  " + line, font=("", 12), text_color=COLOR_TEXT,
+                anchor="w", justify="left", wraplength=400,
+            ).pack(anchor="w", pady=(4, 0))
+        ctk.CTkLabel(
+            body,
+            text=(
+                "Добавлю по шаблону и выровняю ширину и высоту как в настройках.\n"
+                "Перед этим сделаю резервную копию."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(12, 16))
+        buttons = ctk.CTkFrame(body, fg_color="transparent")
+        buttons.pack(anchor="e")
+
+        def later():
+            window.destroy()
+            self._snooze_excel_repairs(plan, lines, signature)
+            if source == "refresh":
+                self._run_excel_refresh(None)
+
+        def add_now():
+            window.destroy()
+            self._run_excel_refresh(plan)
+
+        ctk.CTkButton(
+            buttons, text="Позже", width=100, fg_color="transparent", border_width=1,
+            border_color=COLOR_BORDER, text_color=COLOR_TEXT, hover_color=COLOR_HOVER, command=later,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="Добавить", width=120, command=add_now).pack(side="left")
+        window.protocol("WM_DELETE_WINDOW", later)
+        window.bind("<Escape>", lambda _event: later())
+        window.bind("<Return>", lambda _event: add_now())
+        self._place_over_main_window(window)
+        window.after(120, window.lift)
+        window.grab_set()
+        window.focus_force()
+
+    def _place_over_main_window(self, window):
+        window.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - window.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - window.winfo_height()) // 3
+        window.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+
+    def _snooze_excel_repairs(self, plan, lines, signature):
+        at = time.strftime("%d.%m.%Y в %H:%M")
+        self.settings.set(EXCEL_CHECK_SNOOZED_KEY, {"signature": signature, "at": at})
+        self._set_excel_pending(plan, lines, at)
+
+    def _set_excel_pending(self, plan, lines=None, at=None):
+        self._excel_pending_plan = plan
+        self._excel_pending_lines = list(lines or []) if plan else []
+        self._excel_pending_at = at if plan else None
+        self._paint_bell()
+        if self.excel_pending_window is not None and self.excel_pending_window.winfo_exists():
+            self._fill_excel_pending_window()
+
+    def _paint_bell(self):
+        if self.bell_button is None or self.bell_dot is None or not self.bell_button.winfo_exists():
+            return
+        pending = bool(self._excel_pending_lines)
+        self.bell_button.configure(text_color=COLOR_STOP_TEXT if pending else COLOR_TEXT_MUTED)
+        if not pending:
+            self.bell_dot.place_forget()
+            return
+        self.bell_dot.configure(bg=self._tk_color(COLOR_BG))
+        self.bell_dot.delete("all")
+        self.bell_dot.create_oval(1, 1, 9, 9, fill="#D23B3B", outline="")
+        self.bell_dot.place(relx=1.0, rely=0.0, x=-2, y=2, anchor="ne")
+
+    # Вікно за дзвіночком: що відкладено і кнопка "Добавить сейчас". Окреме
+    # вікно (не панель), тягається й розтягується як будь-яке вікно Windows.
+    def _open_excel_pending_window(self):
+        if self.excel_pending_window is not None and self.excel_pending_window.winfo_exists():
+            self.excel_pending_window.deiconify()
+            self.excel_pending_window.lift()
+            self.excel_pending_window.focus_force()
+            self._fill_excel_pending_window()
+            return
+        window = ctk.CTkToplevel(self)
+        window.title("Отложено")
+        window.geometry("440x280")
+        window.minsize(340, 220)
+        self.excel_pending_window = window
+        self._excel_pending_body = ctk.CTkFrame(window, fg_color="transparent")
+        self._excel_pending_body.pack(fill="both", expand=True, padx=20, pady=16)
+        self._fill_excel_pending_window()
+        self._place_over_main_window(window)
+        window.after(120, window.lift)
+
+    def _fill_excel_pending_window(self):
+        body = self._excel_pending_body
+        if body is None or not body.winfo_exists():
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        if self._excel_pending_lines:
+            ctk.CTkLabel(
+                body, text="Отложено, но в таблицу ещё не добавлено:", font=("", 13, "bold"),
+                text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=380,
+            ).pack(anchor="w")
+            for line in self._excel_pending_lines:
+                ctk.CTkLabel(
+                    body, text="\u2022  " + line, font=("", 12), text_color=COLOR_TEXT,
+                    anchor="w", justify="left", wraplength=380,
+                ).pack(anchor="w", pady=(4, 0))
+            if self._excel_pending_at:
+                ctk.CTkLabel(
+                    body, text="Отложено " + self._excel_pending_at, font=("", 10),
+                    text_color=COLOR_TEXT_MUTED, anchor="w",
+                ).pack(anchor="w", pady=(10, 0))
+            ctk.CTkButton(
+                body, text="Добавить сейчас", width=160,
+                command=lambda: (self.excel_pending_window.destroy(), self._start_excel_plan("bell_add")),
+            ).pack(anchor="e", pady=(16, 0))
+        else:
+            ctk.CTkLabel(
+                body, text="Всё на месте — таблица соответствует шаблону.", font=("", 12),
+                text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=380,
+            ).pack(anchor="w")
+            ctk.CTkButton(
+                body, text="Проверить снова", width=160, command=lambda: self._start_excel_plan("bell"),
+            ).pack(anchor="e", pady=(16, 0))
+
+    # Перечитування Excel у SQLite (openpyxl, data_only=True) - як і раніше
+    # у фоні, з окремим зʼєднанням потоку. apply_plan - що дописати в файл
+    # ПЕРЕД читанням (None - нічого): інакше база прочитала б ще старий лист.
+    def _run_excel_refresh(self, apply_plan):
+        if not self._excel_refresh_in_progress:
+            self._excel_refresh_in_progress = True
+            if self.refresh_excel_button is not None:
+                self.refresh_excel_button.configure(text="\U0001F504  Обновление...", state="disabled")
 
         def worker():
             # Реальний баг (2026-08-13): "SQLite objects created in a thread
             # can only be used in that same thread" - self.store.conn
-            # створений на головному потоці в __init__, тож фоновий потік не
-            # може ним користуватись напряму. Той самий прийом, що вже й у
-            # webapp_server.py - окреме, власне з'єднання ЦЬОГО потоку.
+            # створений на головному потоці, тож у фоновому потоці - окреме
+            # власне з'єднання (той самий прийом, що й у webapp_server.py).
             error = None
-            repair_plan = None
+            report = None
             repair_error = None
             try:
-                ensure_workbook_has_required_sheets()
-                # Другий крок самозцілення, ДО імпорту: доводимо СКЛАД до
-                # еталонного формату. Реальний випадок (2026-08-21) - бот
-                # відмовив у продажу 36 мп ("Доступно: 1033 шт / 0 мп") при
-                # повному складі, бо колонок мп у таблиці не існувало
-                # взагалі. Дописані колонки одразу ж заповнюються, тож
-                # робити це треба саме до import_workbook - інакше база
-                # прочитала б ще порожні колонки.
-                #
-                # Реальний випадок (2026-08-21): "[WinError 5] Access is
-                # denied: ...xlsx.tmp -> ...xlsx" - файл тримав відкритим
-                # Excel, і невдалий ЗАПИС скасовував цілком справне
-                # ЧИТАННЯ. Дописування колонок - покращення, а не умова
-                # роботи: без нього програма читає таблицю як раніше.
-                try:
-                    repair_plan = repair_warehouse_columns()
-                except Exception as exc:
-                    repair_error = exc
+                if apply_plan is not None:
+                    # Реальний випадок (2026-08-21): "[WinError 5] Access is
+                    # denied" - файл тримав відкритим Excel, і невдалий ЗАПИС
+                    # не має скасовувати цілком справне ЧИТАННЯ нижче.
+                    try:
+                        report = apply_workbook_repairs(apply_plan, self.settings)
+                    except Exception as exc:
+                        repair_error = exc
                 workbook = excel_source.open_workbook(data_only=True)
                 try:
                     thread_store = ExcelSqliteStore(paths.DB_PATH)
@@ -5703,12 +5966,28 @@ class ClientApp(ctk.CTk):
             except Exception as exc:
                 error = str(exc)
             self._run_on_main_thread(
-                lambda: self._on_excel_refresh_finished(error, repair_plan, repair_error)
+                lambda: self._on_excel_refresh_finished(error, report, repair_error, apply_plan)
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_excel_refresh_finished(self, error, repair_plan=None, repair_error=None):
+    @staticmethod
+    def _excel_report_lines(report):
+        if not report:
+            return []
+        lines = ["лист " + name for name in report["sheets"]]
+        lines += ["в листе %s — столбец «%s»" % (sheet, header) for sheet, header in report["columns"]]
+        if report["writeoff_time_column"]:
+            lines.append("в листе СПИСАНИЕ — столбец «Точное время»")
+        warehouse = report.get("warehouse")
+        if warehouse:
+            lines.append(
+                "в листе СКЛАД — столбцы: %s (заполнено значений: %s)"
+                % (", ".join(warehouse["headers"]), warehouse["filled_cells"])
+            )
+        return lines
+
+    def _on_excel_refresh_finished(self, error, report=None, repair_error=None, apply_plan=None):
         self._excel_refresh_in_progress = False
         if self.refresh_excel_button is not None:
             self.refresh_excel_button.configure(text="\U0001F504  Обновить эксели", state="normal")
@@ -5721,29 +6000,29 @@ class ClientApp(ctk.CTk):
             if isinstance(repair_error, PermissionError):
                 reason = (
                     "Файл занят другой программой — скорее всего он открыт в Excel.\n"
-                    "Закройте его и нажмите \u00abОбновить эксели\u00bb ещё раз."
+                    "Закройте его и нажмите «Добавить сейчас» в колокольчике вверху справа."
                 )
             else:
                 reason = str(repair_error)
+            if apply_plan:
+                lines, _signature = describe_workbook_plan(apply_plan)
+                self._set_excel_pending(apply_plan, lines, time.strftime("%d.%m.%Y в %H:%M"))
             messagebox.showwarning(
                 "AI Automation",
-                "Таблица Excel прочитана, но недостающие столбцы добавить не удалось.\n\n"
-                f"{reason}\n\n"
-                "Пока столбцов нет, позиции в погонных метрах показывают 0 мп.",
+                "Таблица Excel прочитана, но добавить недостающее не удалось.\n\n" + reason,
             )
             return
-        # Про правку самої таблиці мовчати не можна - програма змінила
-        # файл користувача. Повідомлення з'явиться рівно один раз:
-        # наступне оновлення вже нічого не дописує, бо колонки на місці.
-        if repair_plan:
-            headers = "\n".join("\u2022 " + header for header in repair_plan["headers"])
+        added = self._excel_report_lines(report)
+        if added:
+            # Про правку самої таблиці мовчати не можна - програма змінила
+            # файл користувача. Відкладене більше не висить.
+            self._set_excel_pending(None)
+            self.settings.set(EXCEL_CHECK_SNOOZED_KEY, None)
             messagebox.showinfo(
                 "AI Automation",
-                "Таблица Excel обновлена.\n\n"
-                "В листе СКЛАД не хватало столбцов — программа добавила их сама:\n"
-                f"{headers}\n\n"
-                f"Заполнено значений: {repair_plan['filled_cells']} "
-                "(рассчитаны из количества штук).\n"
+                "Таблица Excel обновлена.\n\nДобавлено по шаблону:\n"
+                + "\n".join("\u2022 " + line for line in added)
+                + "\n\nШирина столбцов и высота шапки — как в настройках.\n"
                 "Перед изменением сделана резервная копия таблицы.",
             )
             return
@@ -5799,6 +6078,7 @@ class ClientApp(ctk.CTk):
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
         self.theme_toggle_button.configure(text="Светлая" if self._dark_mode else "Тёмная")
         self.settings.set("client_dark_mode", self._dark_mode)
+        self._paint_bell()
 
     # ---------- вихід ----------
     # Задача користувача (2026-08-18, живий продакшн - "не працює кнопка
