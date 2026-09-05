@@ -75,7 +75,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.15"
+__version__ = "1.1.16"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1668,112 +1668,15 @@ class ExcelViewerApp:
         )
         remote_key_button.pack(anchor="w", pady=(0, 12))
 
-        choose_token_button = tk.Button(
-            main_settings,
-            text=self._t("Додати шлях до ТГ-ключа"),
-            width=28,
-            height=2,
-            command=self.choose_telegram_token_file,
-        )
-        choose_token_button.pack(anchor="w", pady=(0, 12))
-
-        token_file_label = tk.Label(
-            main_settings,
-            textvariable=self.telegram_file_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-        )
-        token_file_label.pack(anchor="w", fill="x", pady=(0, 16))
-
-        # Задача користувача (2026-08-15): "налаштувати керування із
-        # старої програми до нової... в старій має бути показник онлайну
-        # сервера" - ці самі 2 рядки (status_label/heartbeat_label) і ці
-        # самі 2 кнопки лишаються на тому самому місці, що й були - тепер
-        # показують стан ВІДДАЛЕНОГО сервера (client_app.py, інший ПК,
-        # _remote_control_tick нижче) і шлють йому команди замість
-        # локального запуску (_on_remote_start_bot_clicked/_on_remote_
-        # stop_bot_clicked, remote_control_client.py).
-        connect_button = tk.Button(
-            main_settings,
-            text=self._t("Підключити Telegram"),
-            width=28,
-            command=lambda: self._on_remote_command_clicked("start_bot"),
-        )
-        connect_button.pack(anchor="w", pady=(0, 8))
-
-        stop_button = tk.Button(
-            main_settings,
-            text=self._t("Зупинити Telegram"),
-            width=28,
-            command=lambda: self._on_remote_command_clicked("stop_bot"),
-        )
-        stop_button.pack(anchor="w", pady=(0, 16))
-
-        status_label = tk.Label(
-            main_settings,
-            textvariable=self.telegram_status_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-        )
-        status_label.pack(anchor="w", fill="x", pady=(0, 2))
-        self.telegram_status_label = status_label
-
-        # Ненав'язливий рядок - коли востаннє реально приходив статус від
-        # ВІДДАЛЕНОГО сервера (_remote_control_tick, кожні 15с), а не
-        # застиглий текст, що міг лишитись давно.
-        heartbeat_label = tk.Label(
-            main_settings,
-            textvariable=self.telegram_heartbeat_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-            fg="gray40",
-        )
-        heartbeat_label.pack(anchor="w", fill="x", pady=(0, 18))
-
-        # Задача користувача (2026-08-08): окремі, явні кнопки увімк/вимк/
-        # перезапуск форми (Telegram Mini App) внизу зліва Налаштувань,
-        # незалежно від підключення самого бота — pack(side="bottom") у
-        # цьому ж лівому стовпці (main_settings) притискає їх до самого
-        # низу вікна, а не одразу під heartbeat_label.
-        webapp_form_frame = tk.Frame(main_settings)
-        webapp_form_frame.pack(side="bottom", fill="x", anchor="w")
-
-        webapp_form_status_label = tk.Label(
-            webapp_form_frame,
-            textvariable=self.webapp_status_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-            fg="gray40",
-        )
-        webapp_form_status_label.pack(anchor="w", fill="x", pady=(8, 0))
-
-        webapp_form_buttons = tk.Frame(webapp_form_frame)
-        webapp_form_buttons.pack(anchor="w")
-
-        start_webapp_form_button = tk.Button(
-            webapp_form_buttons,
-            text=self._t("Увімкнути форму (Mini App)"),
-            command=lambda: self._on_remote_command_clicked("start_form"),
-        )
-        start_webapp_form_button.pack(side="left", padx=(0, 8))
-
-        stop_webapp_form_button = tk.Button(
-            webapp_form_buttons,
-            text=self._t("Вимкнути форму (Mini App)"),
-            command=lambda: self._on_remote_command_clicked("stop_form"),
-        )
-        stop_webapp_form_button.pack(side="left", padx=(0, 8))
-
-        restart_webapp_form_button = tk.Button(
-            webapp_form_buttons,
-            text=self._t("Перезапустити форму (Mini App)"),
-            command=lambda: self._on_remote_command_clicked("restart_form"),
-        )
-        restart_webapp_form_button.pack(side="left")
+        # Задача користувача (2026-09-05): "із налаштувань це теж прибери.
+        # клієнти самі цю інформацію мають налаштовувати" - шлях до ключа
+        # Telegram, "Підключити/Зупинити Telegram", статус сервера й кнопки
+        # форми (Mini App) прибрано з домашки: бот і форма живуть на
+        # клієнті, там і їхні налаштування. Змінні стану (telegram_status_
+        # text та ін.) лишаються - їх оновлюють таймери, і вони ще потрібні
+        # іншим екранам. Тут лишається лише те, що потрібно самій домашці:
+        # активний сервер, обліковий запис OneDrive, ключ керування.
+        self.telegram_status_label = None
 
         # Задача користувача (2026-09-05): тумблер теми - тут, справа вгорі,
         # над кнопкою "Команди" (раніше висів на головному екрані).
@@ -9854,7 +9757,7 @@ class ExcelViewerApp:
             )
             self.telegram_heartbeat_text.set("")
             self.webapp_status_text.set("")
-            if self.telegram_status_label.winfo_exists():
+            if self.telegram_status_label is not None and self.telegram_status_label.winfo_exists():
                 self.telegram_status_label.configure(fg="gray40")
             return
 
@@ -9866,7 +9769,7 @@ class ExcelViewerApp:
         # вище (fetch_remote_status повертає None).
         self.telegram_status_text.set(self._t("Сервер онлайн") + f" — {server_name}")
         status_color = "#1D9E75"
-        if self.telegram_status_label.winfo_exists():
+        if self.telegram_status_label is not None and self.telegram_status_label.winfo_exists():
             self.telegram_status_label.configure(fg=status_color)
 
         bot_word = self._t("підключено") if status.get("bot_alive") else self._t("вимкнено")
