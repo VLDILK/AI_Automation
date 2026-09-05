@@ -188,6 +188,27 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
 
 # ---------- Перевірка/завантаження (публічне, без токена працює завжди - викликає client_app.py) ----------
 
+def has_uploaded_zip(release):
+    """Чи є в релізі повністю завантажений .zip.
+
+    Живий випадок (2026-09-05): домашка створює реліз одразу відкритим і лише
+    потім вантажить 138 МБ - кілька хвилин клієнти бачили «Доступна 0.3.24»,
+    а завантаження падало, бо файла ще не було (assets порожній або asset у
+    стані "open"). Рішення користувача: поки файла нема - реліз для клієнта
+    не існує. Чернетки (draft) теж не рахуються."""
+    if not release or release.get("draft"):
+        return False
+    for asset in release.get("assets") or []:
+        if not str(asset.get("name", "")).endswith(".zip"):
+            continue
+        if asset.get("state", "uploaded") != "uploaded":
+            continue
+        if not (asset.get("size") or 0):
+            continue
+        return True
+    return False
+
+
 def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeout=15, token=None):
     """Список релізів (НЕ /releases/latest - див. коментар над
     CLIENT_TAG_PREFIX вище про чому) - повертає найновіший, чий тег
@@ -258,7 +279,9 @@ def get_latest_release(owner, repo, tag_prefix, include_prerelease=False, timeou
     # стабільні - завжди справді найновіший, яким би він не був).
     matching = [
         r for r in releases
-        if r.get("tag_name", "").startswith(tag_prefix) and (include_prerelease or not r.get("prerelease"))
+        if r.get("tag_name", "").startswith(tag_prefix)
+        and (include_prerelease or not r.get("prerelease"))
+        and has_uploaded_zip(r)
     ]
     if not matching:
         return None
@@ -333,6 +356,8 @@ def list_recent_releases(owner, repo, limit=15, timeout=15, token=None):
 
     entries = []
     for release in releases:
+        if not has_uploaded_zip(release):
+            continue
         tag = release.get("tag_name", "")
         if tag.startswith(GUI_TAG_PREFIX):
             kind, prefix = "gui", GUI_TAG_PREFIX
