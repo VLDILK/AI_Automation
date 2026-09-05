@@ -752,7 +752,7 @@
         return;
       }
       var formatted = formatServerNumber(balance);
-      balanceHint.textContent = "На складе: " + formatted + " шт";
+      balanceHint.textContent = "Всего: " + formatted + " шт";
       balanceHint.dataset.value = formatted.replace(",", ".");
       balanceHint.style.display = "";
     }
@@ -1996,7 +1996,25 @@
     cartListEl.className = "cart-list";
     cartSection.appendChild(cartHeaderEl);
     cartSection.appendChild(cartListEl);
-    measureContainer.parentNode.insertBefore(cartSection, categoryWrap);
+    // Рішення користувача (2026-09-06): блок «Добавлено» - з самого верху.
+    formEl.insertBefore(cartSection, formEl.firstChild);
+    // Після «Сохранить и продолжить» форма згортається: видно лише блок
+    // «Добавлено» і кнопку «Добавить позицию» (CSS #form.collapsed); клієнт,
+    // адреса й оплата лишаються заповненими всередині. «Добавить позицию»,
+    // ✎ у рядку і ✕ останнього рядка повертають звичайне меню.
+    var addMoreButton = document.createElement("button");
+    addMoreButton.type = "button";
+    addMoreButton.className = "add-position-button add-more-button";
+    addMoreButton.textContent = "Добавить позицию";
+    formEl.insertBefore(addMoreButton, cartSection.nextSibling);
+    function setFormCollapsed(state) {
+      var collapsed = !!state && cart.length > 0;
+      formEl.classList.toggle("collapsed", collapsed);
+    }
+    addMoreButton.addEventListener("click", function () {
+      errorEl.textContent = "";
+      setFormCollapsed(false);
+    });
 
     // setFieldValue - обернена дія до readFieldValue: повертає збережене
     // значення позиції НАЗАД у поле форми (select чи звичайний input) -
@@ -2102,11 +2120,15 @@
       restoreAntisepticAddon(item.position);
       errorEl.textContent = "";
       renderCart();
+      setFormCollapsed(false);
     }
 
     function removeCartItem(index) {
       cart.splice(index, 1);
       renderCart();
+      if (!cart.length) {
+        setFormCollapsed(false);
+      }
     }
 
     function renderCart() {
@@ -2171,7 +2193,7 @@
     var addPositionButton = document.createElement("button");
     addPositionButton.type = "button";
     addPositionButton.className = "add-position-button";
-    addPositionButton.textContent = "Продолжить продажу";
+    addPositionButton.textContent = "Сохранить и продолжить";
     measureContainer.parentNode.insertBefore(addPositionButton, measureContainer.nextSibling);
     // "Сохранить как шаблон" тепер одразу ПЕРЕД "Продолжить продажу" (за
     // проханням користувача перенести кнопку донизу форми).
@@ -2536,6 +2558,7 @@
         cart.push(cartItem);
         clearCategoryInputs(key);
         renderCart();
+        setFormCollapsed(true);
         return;
       }
       // Задача користувача (2026-08-14): "щоб міг продовжувати приход і
@@ -2548,6 +2571,7 @@
         cart.push({ position: incomePosition, summary: positionSummaryText(key, result.values) });
         clearCategoryInputs(key);
         renderCart();
+        setFormCollapsed(true);
         return;
       }
       var stockCheck = stockSufficiencyCheck(key, result.values);
@@ -2582,6 +2606,7 @@
       antisepticQtyInput.value = "";
       refreshAntisepticBlock();
       renderCart();
+      setFormCollapsed(true);
     });
 
     // Задача користувача (2026-08-14): "щоб міг продовжувати приход і
@@ -2595,7 +2620,7 @@
         ? "Продолжить"
         : currentKind === "income"
         ? "Продолжить приход"
-        : "Продолжить продажу";
+        : "Сохранить и продолжить";
     }
     var showCategoryOriginal = showCategory;
     showCategory = function (key) {

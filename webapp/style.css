@@ -899,3 +899,17 @@ html, body {
 .top-block .field.suggest-field {
   margin-bottom: 10px;
 }
+
+/* Згорнутий стан форми (2026-09-06): після «Сохранить и продолжить» видно
+   лише блок «Добавлено» і кнопку «Добавить позицию». */
+#form.collapsed > :not(.cart-section):not(.add-more-button) {
+  display: none !important;
+}
+
+#form:not(.collapsed) > .add-more-button {
+  display: none;
+}
+
+.add-more-button {
+  margin-top: 4px;
+}
