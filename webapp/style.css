@@ -886,3 +886,16 @@ html, body {
 .field.suggest-field .suggest-item:hover {
   background: color-mix(in srgb, var(--tg-button) 18%, transparent);
 }
+
+/* Картка «хто/куди» зверху форми продажу (2026-09-05): лише фон, без ліній
+   і заголовків - варіант 01 «мʼяка картка». */
+.top-block {
+  background: var(--tg-secondary-bg, rgba(127, 127, 127, 0.12));
+  border-radius: 12px;
+  padding: 10px 12px 2px;
+  margin-bottom: 12px;
+}
+
+.top-block .field.suggest-field {
+  margin-bottom: 10px;
+}

@@ -394,16 +394,20 @@
   // (хмарне сховище Telegram, запасний варіант - памʼять форми на цьому
   // пристрої), типово ▾. Нова адреса просто лишається в полі - бот її не
   // перепитує, вона йде в продаж і наступного разу вже в підказках.
-  var SUGGEST_STATE_KEY = "address_suggest_enabled";
+  var SUGGEST_FIELD_KEYS = ["client", "address"];
+
+  function suggestStateKey(field) {
+    return field.key + "_suggest_enabled";
+  }
 
   function cloudStorageAvailable() {
     return !!(tg && tg.CloudStorage && typeof tg.isVersionAtLeast === "function" && tg.isVersionAtLeast("6.9"));
   }
 
-  function readSuggestState(callback) {
+  function readSuggestState(stateKey, callback) {
     var local = null;
     try {
-      local = window.localStorage.getItem(SUGGEST_STATE_KEY);
+      local = window.localStorage.getItem(stateKey);
     } catch (err) {
       local = null;
     }
@@ -412,29 +416,29 @@
       return;
     }
     try {
-      tg.CloudStorage.getItem(SUGGEST_STATE_KEY, function (error, value) {
+      tg.CloudStorage.getItem(stateKey, function (error, value) {
         if (error || value === undefined || value === null || value === "") {
           return;
         }
         var enabled = value === "1";
         try {
-          window.localStorage.setItem(SUGGEST_STATE_KEY, enabled ? "1" : "0");
+          window.localStorage.setItem(stateKey, enabled ? "1" : "0");
         } catch (err) {}
         callback(enabled);
       });
     } catch (err) {}
   }
 
-  function writeSuggestState(enabled) {
+  function writeSuggestState(stateKey, enabled) {
     var text = enabled ? "1" : "0";
     try {
-      window.localStorage.setItem(SUGGEST_STATE_KEY, text);
+      window.localStorage.setItem(stateKey, text);
     } catch (err) {}
     if (!cloudStorageAvailable()) {
       return;
     }
     try {
-      tg.CloudStorage.setItem(SUGGEST_STATE_KEY, text, function () {});
+      tg.CloudStorage.setItem(stateKey, text, function () {});
     } catch (err) {}
   }
 
@@ -481,7 +485,7 @@
     function render() {
       arrow.textContent = enabled ? "\u25BE" : "\u25B4";
       arrow.classList.toggle("suggest-arrow-off", !enabled);
-      arrow.title = enabled ? "Подсказки адресов включены" : "Подсказки адресов выключены";
+      arrow.title = enabled ? "Подсказки включены" : "Подсказки выключены";
       if (!enabled || document.activeElement !== input) {
         list.style.display = "none";
         return;
@@ -516,12 +520,13 @@
         }
       }, 150);
     });
+    var stateKey = suggestStateKey(field);
     arrow.addEventListener("click", function () {
       enabled = !enabled;
-      writeSuggestState(enabled);
+      writeSuggestState(stateKey, enabled);
       render();
     });
-    readSuggestState(function (state) {
+    readSuggestState(stateKey, function (state) {
       enabled = state;
       render();
     });
@@ -538,7 +543,7 @@
     applyFieldLabelStyle(label, field.key);
     wrap.appendChild(label);
 
-    if (field.key === "address") {
+    if (SUGGEST_FIELD_KEYS.indexOf(field.key) !== -1) {
       return buildSuggestField(field, wrap, container);
     }
 
@@ -1138,8 +1143,14 @@
     categoryWrap.appendChild(categorySelect);
 
     var measureContainer = document.getElementById("rows");
+    // Рішення користувача (2026-09-05): «Клиент» і «Адрес выгрузки» - зверху,
+    // на власному фоні (лише фон, без ліній і заголовків); решта - як була.
+    var topContainer = document.createElement("div");
+    topContainer.id = "top-fields";
+    topContainer.className = "top-block";
     var identityContainer = document.createElement("div");
     identityContainer.id = "identity-fields";
+    measureContainer.parentNode.insertBefore(topContainer, measureContainer);
     measureContainer.parentNode.insertBefore(categoryWrap, measureContainer);
     measureContainer.parentNode.insertBefore(identityContainer, measureContainer);
 
@@ -1237,8 +1248,12 @@
     // клієнтом/адресою, ще ПЕРЕД (не після) полями розміру/об'єму/ціни.
     var commonInputs = {};
     identityCommonFields.forEach(function (field) {
-      commonInputs[field.key] = buildFieldElement(field, identityContainer);
+      var target = SUGGEST_FIELD_KEYS.indexOf(field.key) !== -1 ? topContainer : identityContainer;
+      commonInputs[field.key] = buildFieldElement(field, target);
     });
+    if (!topContainer.childNodes.length) {
+      topContainer.parentNode.removeChild(topContainer);
+    }
     var singleContainer = document.getElementById("single-fields");
     measureCommonFields.forEach(function (field) {
       commonInputs[field.key] = buildFieldElement(field, singleContainer);
