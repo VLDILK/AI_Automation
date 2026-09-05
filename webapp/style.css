@@ -826,27 +826,44 @@ html, body {
 
 /* KD за номіналом (ТЗ пункт 2): галочка "Продать как введённый размер" і
    список "Списать со склада" під розміром позиції категорії KD. Поки
-   галочка стоїть - списку нема взагалі (display:none у JS). */
-.stock-chooser {
+   галочка стоїть - списку нема взагалі (display:none у JS).
+   Живий баг зі скріна (2026-09-05): обгортка має клас .field, а .field -
+   горизонтальний ряд без переносу з nowrap-підписами й полями 84px; усі
+   селектори нижче навмисно точніші за .field/.field label/.field select,
+   щоб блок був вертикальним і на всю ширину. */
+.field.stock-chooser {
+  display: block;
   border-top: 1px dashed var(--field-border);
   padding-top: 8px;
 }
 
-.stock-chooser-check {
+.field.stock-chooser label.stock-chooser-check {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: none;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
   font-size: 14px;
+  font-weight: 500;
   color: var(--tg-text);
   cursor: pointer;
 }
 
-.stock-chooser-check input {
+.field.stock-chooser .stock-chooser-check input {
+  flex: 0 0 auto;
   width: 18px;
   height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  -webkit-appearance: checkbox;
+  appearance: checkbox;
 }
 
-.stock-chooser-label {
+.field.stock-chooser .stock-chooser-label {
   margin-top: 8px;
   font-size: 12px;
   color: var(--tg-hint);
@@ -854,18 +871,28 @@ html, body {
   letter-spacing: 0.03em;
 }
 
-.stock-chooser-hint {
+.field.stock-chooser select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   margin-top: 4px;
-  font-size: 12px;
-  color: var(--tg-hint);
+  text-align: left;
 }
 
-.stock-chooser-remain {
+.field.stock-chooser .stock-chooser-remain {
   margin-top: 6px;
   font-size: 12px;
   color: var(--tg-hint, #8ea0b3);
 }
 
-.stock-chooser-remain.stock-chooser-short {
+.field.stock-chooser .stock-chooser-remain.stock-chooser-short {
   color: #e5484d;
+}
+
+.field.stock-chooser .stock-chooser-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--tg-hint);
+  white-space: normal;
 }
