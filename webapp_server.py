@@ -37,7 +37,7 @@ import permissions as perm
 import standard_menu_cloud
 from settings import SettingsStore
 from utils import measure_classification_data
-from warehouse_data import ExcelSqliteStore, low_stock_report_rows, operation_template_entries
+from warehouse_data import ExcelSqliteStore, low_stock_report_rows
 
 # Задача користувача: "чи є якийсь інший шлях?" (замість роздутого web_app
 # URL з усіма даними форми одразу) - кнопка тепер несе лише короткий
@@ -987,57 +987,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             finally:
                 store.close()
             return
-        if action not in ("delete_recent", "list"):
-            self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
-            return
-        token = self.get_token() if self.get_token else None
-        telegram_id, reason = _validate_init_data(payload.get("init_data"), token)
-        if telegram_id is None:
-            self._send_json(403, {"ok": False, "error": reason or "Не удалось подтвердить пользователя Telegram."})
-            return
-        if self.db_path is None:
-            self._send_json(500, {"ok": False, "error": "База данных недоступна."})
-            return
-        store = ExcelSqliteStore(self.db_path)
-        try:
-            role = perm.normalize_role(store.get_user_role(telegram_id))
-
-            if action == "list":
-                # Задача користувача (шаблони): панель раніше вбудовувалась
-                # у сам web_app-URL - реальний баг, який зламав УСІ
-                # sale/income/writeoff-відповіді (URL переріс ліміт розміру
-                # Telegram reply_markup, той самий клас бага, що й Крок
-                # "мега-форма занадто довга кнопка"). Тепер webapp/app.js
-                # підвантажує шаблони окремим запитом ПІСЛЯ відкриття форми,
-                # а не отримує їх одразу в тілі кнопки.
-                kind = payload.get("kind")
-                required_permission = _PERMISSION_BY_KIND.get(kind)
-                if required_permission is None:
-                    self._send_json(400, {"ok": False, "error": "Неизвестный тип операции."})
-                    return
-                if not perm.has_permission(role, required_permission):
-                    self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                    return
-                kind_for_response = kind
-            else:
-                recent_id = payload.get("recent_id")
-                row = store.get_operation_recent_use(recent_id) if recent_id is not None else None
-                if row is not None:
-                    _row_id, row_kind, _category_operation_id = row
-                    required_permission = _PERMISSION_BY_KIND.get(row_kind)
-                    if required_permission is not None and not perm.has_permission(role, required_permission):
-                        self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                        return
-                    store.delete_operation_recent_use(recent_id)
-                kind_for_response = row[1] if row is not None else payload.get("kind")
-
-            if kind_for_response not in _PERMISSION_BY_KIND:
-                self._send_json(400, {"ok": False, "error": "Неизвестный тип операции."})
-                return
-            recent = operation_template_entries(store, store.recent_operation_uses(kind_for_response), "recent")
-            self._send_json(200, {"ok": True, "recent": recent})
-        finally:
-            store.close()
+        self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
 
     def _send_json(self, status, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")

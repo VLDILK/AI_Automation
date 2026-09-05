@@ -665,7 +665,6 @@ class AntisepticDialogMixin:
             "categories": categories,
             "common_fields": common_ctx["fields"],
             **self._webapp_style_ctx(),
-            **self._webapp_templates_ctx(store, "antiseptic"),
         }
         # Задача користувача (скріншот "нащо ти кнопку прибрав"): та сама
         # логіка відновлення, що вже має продаж - "поточна" (ще не

@@ -109,97 +109,9 @@ html, body {
 
 /* Задача користувача (скріншот 2): "5 рядків із шаблонами" зверху форми -
    два стовпці (власні шаблони / 5 останніх), кожен рядок клікабельний. */
-.template-panel {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.template-column {
-  flex: 1;
-  min-width: 0;
-  background: var(--tg-secondary-bg);
-  border-radius: 12px;
-  padding: 8px;
-}
-
-.template-column-title {
-  font-size: 12px;
-  text-transform: uppercase;
-  color: var(--tg-hint);
-  margin-bottom: 6px;
-  padding: 0 4px;
-}
-
 /* Задача користувача: "не по 1 рядку, а по 2... і обгорнути це ніби в таку
    лагідну кнопочку" - кожен запис тепер власна м'яка пігулка (округлена,
    легка тінь, трохи світліший фон за панель, ЧІТКА рамка - за ескізом). */
-.template-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  padding: 8px 10px;
-  border-radius: 14px;
-  cursor: pointer;
-  background: var(--tg-bg);
-  border: 1px solid rgba(140, 140, 140, 0.3);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-
-.template-row-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.template-row-line-top {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.template-row-line-bottom {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  color: var(--tg-hint);
-}
-
-.template-row-delete {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  line-height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--tg-hint);
-  font-size: 15px;
-}
-
-.template-row-delete:active {
-  background: var(--tg-bg);
-  color: var(--tg-destructive, #e53935);
-}
-
-.template-row:active {
-  box-shadow: inset 0 0 0 100px rgba(0, 0, 0, 0.06);
-}
-
-.template-row + .template-row {
-  margin-top: 6px;
-}
-
-.template-row-empty {
-  color: var(--tg-hint);
-  cursor: default;
-}
-
 
 .row-block {
   background: var(--custom-entry-bg, var(--tg-secondary-bg));

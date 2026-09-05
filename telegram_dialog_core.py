@@ -34,7 +34,6 @@ from warehouse_data import (
     income_item_size,
     income_report_rows,
     low_stock_report_rows,
-    operation_template_entries,
     resolve_operation_for_payload,
     row_value,
     sale_position_text,
@@ -214,17 +213,6 @@ class CoreDialogMixin:
                     store,
                 )
                 return reply
-            # Задача користувача: "3 окремі можливості створювати свої
-            # шаблони" - кнопка "Сохранить шаблон" усередині форми надсилає
-            # ОКРЕМИЙ, самодостатній payload (не пов'язаний з жодною
-            # pending-операцією) - перевіряється РАНІШЕ звичайного розгалуження
-            # нижче, бо збереження шаблону не залежить від того, чи є зараз
-            # активна операція.
-            # Задача користувача: "завжди може видалити історію чи шаблон по
-            # 1 рядку" - той самий термінальний "закриває Mini App і одразу
-            # перевідкриває форму" патерн, що й save_template вище.
-            if submitted.get("delete_recent"):
-                return self._delete_operation_recent_use_reply(store, context, submitted)
             if not pending_before:
                 # Пряме відкриття форми "РЕАЛИЗАЦИЯ (форма)"/"СПИСАНИЕ
                 # (форма)" з головного меню (web_app-кнопка на самій кнопці
@@ -694,7 +682,6 @@ class CoreDialogMixin:
         if prefill.get("condition"):
             payload["condition"] = prefill.get("condition")
         self._merge_webapp_submission(payload, submitted)
-        self._record_webapp_operation_use(store, "sale", operation_id, payload)
         return self._continue_sale_operation(store, context, payload)
 
     # Кожен елемент positions[] - {category_operation_id, breed, rows,
@@ -781,7 +768,6 @@ class CoreDialogMixin:
                 text = self._sale_stock_issue_text(item_payload, stock_issue)
                 text += "\n\nУменьшите количество в форме и отправьте её заново."
                 return self._webapp_form_terminal_reply(store, context, text)
-            self._record_webapp_operation_use(store, "sale", operation_id, item_payload)
             resolved.append(item_payload)
 
         if not resolved:
@@ -847,7 +833,6 @@ class CoreDialogMixin:
             match_issue = self._resolve_income_rows(store, item_payload)
             if match_issue:
                 return self._webapp_form_terminal_reply(store, context, match_issue)
-            self._record_webapp_operation_use(store, "income", operation_id, item_payload)
             resolved.append(item_payload)
 
         if not resolved:
@@ -1114,7 +1099,6 @@ class CoreDialogMixin:
             # шлях?" - sendData() для збереження шаблону не потребує
             # окремого запиту "list", а сам ctx тепер ідe через короткий
             # токен, не base64-URL, тож роздування вже не загрожує).
-            **self._webapp_templates_ctx(store, "income"),
         }
         resume = self._build_single_position_resume(store, resume_payload, "start_income", "income")
         if resume:
@@ -1168,7 +1152,6 @@ class CoreDialogMixin:
         if prefill.get("condition"):
             payload["condition"] = prefill.get("condition")
         self._merge_webapp_submission(payload, submitted)
-        self._record_webapp_operation_use(store, "income", operation_id, payload)
         return self._continue_income_operation(store, context, payload)
 
     # "Реализация (форма)" - друга, паралельна кнопка поруч зі звичайною
@@ -1194,88 +1177,6 @@ class CoreDialogMixin:
     # мега-форми (kind="sale"/"income"/"writeoff"), бо форма даних однакова.
     # Мітка категорії резолвиться тут (не зберігається в самих таблицях) —
     # адмін міг перейменувати bot_operations.label з того часу.
-    def _webapp_operation_template_entries(self, store, rows, source):
-        return operation_template_entries(store, rows, source)
-
-    def _record_webapp_operation_use(self, store, kind, operation_id, payload):
-        if operation_id is None:
-            return
-        rows = payload.get("rows") or [{}]
-        row = rows[0] if rows else {}
-        store.record_operation_use(
-            kind,
-            operation_id,
-            breed=payload.get("breed"),
-            thickness=row.get("thickness"),
-            width=row.get("width"),
-            length=row.get("length"),
-            client=payload.get("client"),
-            address=payload.get("address"),
-            payment_method=payload.get("payment_method"),
-        )
-
-    # "Сохранить шаблон" ЗАВЖДИ закриває Mini App (Telegram.WebApp.sendData
-    # так влаштований - жодного проміжного round-trip без закриття не існує),
-    # тому відповідь одразу пропонує ту саму "Заполнить форму..."-кнопку -
-    # людина повертається до порожньої форми, де новий шаблон уже видно
-    # у списку зверху.
-    # Рішення користувача (2026-09-06): шаблонів більше нема - у контексті
-    # форми лише «Недавние».
-    def _webapp_templates_ctx(self, store, kind):
-        return {
-            "recent": self._webapp_operation_template_entries(
-                store, store.recent_operation_uses(kind), "recent",
-            ),
-        }
-
-    # "Завжди може видалити історію чи шаблон по 1 рядку" - той самий
-    # термінальний патерн, що й збереження: sendData() закриває Mini App,
-    # тому відповідь одразу перевідкриває ту саму форму (вже без видаленого
-    # рядка).
-    def _delete_operation_recent_use_reply(self, store, context, submitted):
-        kind = submitted.get("kind")
-        permission_by_kind = {
-            "sale": perm.SALE_CREATE,
-            "income": perm.INCOME,
-            "writeoff": perm.WRITEOFF,
-            "antiseptic": perm.SALE_CREATE,
-        }
-        required_permission = permission_by_kind.get(kind)
-        if required_permission is None:
-            return self._with_main_menu("Не удалось удалить запись истории: неизвестный тип операции.", store)
-        denied = self._require_permission(store, context, required_permission)
-        if denied:
-            return denied
-        recent_id = submitted.get("recent_id")
-        # Той самий фікс, що й у _delete_operation_template_reply вище -
-        # звіряємо РЕАЛЬНИЙ kind рядка з БД, а не лише той, що надіслав
-        # клієнт, перш ніж видаляти.
-        if recent_id is not None:
-            row = store.get_operation_recent_use(recent_id)
-            if row is not None and row[1] == kind:
-                store.delete_operation_recent_use(recent_id)
-        return self._prepend_reply_text(
-            "Запись истории удалена.", self._reopen_operation_all_in_one_form(store, context, kind),
-        )
-
-    def _reopen_operation_all_in_one_form(self, store, context, kind):
-        reopen_by_kind = {
-            "sale": self._start_sale_all_in_one_reply,
-            "income": self._start_income_all_in_one_reply,
-            "writeoff": self._start_writeoff_all_in_one_reply,
-            "antiseptic": self._start_antiseptic_all_in_one_reply,
-        }
-        reopen_fn = reopen_by_kind.get(kind)
-        return reopen_fn(store, context) if reopen_fn else self._main_menu_reply(store)
-
-    # Задача користувача (скріншот "Вернуться в форму"): кнопка мала
-    # відкривати ПОРОЖНЮ форму, все введене губилось. Дані насправді вже й
-    # так лежать у payload незавершеної операції (той самий pending_
-    # operation, що дозволяє чатовому потоку "пам'ятати" крок) - лишається
-    # лише перетворити його на кошик мега-форми, а не заводити окреме
-    # сховище. resolve_operation_for_payload знаходить category_operation_id
-    # за product/condition - ні completed_positions, ні "поточна" позиція їх
-    # напряму не несуть (лише product/condition, як prefill_json категорії).
     def _build_sale_resume_cart(self, store, payload):
         if not payload:
             return []
@@ -1354,7 +1255,6 @@ class CoreDialogMixin:
             "categories": categories,
             "common_fields": common_ctx["fields"],
             **self._webapp_style_ctx(),
-            **self._webapp_templates_ctx(store, "sale"),
         }
         resume_cart = self._build_sale_resume_cart(store, resume_payload)
         if resume_cart:
@@ -1430,7 +1330,6 @@ class CoreDialogMixin:
             "categories": categories,
             "common_fields": common_ctx["fields"],
             **self._webapp_style_ctx(),
-            **self._webapp_templates_ctx(store, "writeoff"),
         }
         resume = self._build_single_position_resume(store, resume_payload, "start_writeoff", "writeoff")
         if resume:
@@ -2114,7 +2013,6 @@ class CoreDialogMixin:
         if prefill.get("condition"):
             payload["condition"] = prefill.get("condition")
         self._merge_webapp_submission(payload, submitted)
-        self._record_webapp_operation_use(store, "writeoff", operation_id, payload)
         return self._continue_writeoff_operation_impl(store, context, payload)
 
     # Пряме відкриття мега-форми (тап на кнопку меню, без pending) сьогодні

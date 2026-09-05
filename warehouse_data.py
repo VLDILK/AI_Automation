@@ -3232,71 +3232,6 @@ class ExcelSqliteStore:
     # панель (шаблони і недавні окремо).
     _OPERATION_TEMPLATE_LIMIT = 3
 
-    def record_operation_use(
-        self, kind, category_operation_id, breed=None, thickness=None, width=None,
-        length=None, client=None, address=None, payment_method=None,
-    ):
-        if category_operation_id is None:
-            return
-        now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO operation_recent_uses
-                    (kind, category_operation_id, breed, thickness, width, length,
-                     client, address, payment_method, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (kind, category_operation_id, breed, thickness, width, length, client, address, payment_method, now),
-            )
-            # Дешева гігієна диска — лишаємо із запасом (10x показуваного
-            # ліміту) на дедуплікацію в recent_operation_uses, не тримаємо
-            # необмежену історію.
-            excess_ids = [
-                row[0]
-                for row in self.conn.execute(
-                    "SELECT id FROM operation_recent_uses WHERE kind = ? ORDER BY created_at DESC, id DESC",
-                    (kind,),
-                ).fetchall()[self._OPERATION_TEMPLATE_LIMIT * 10:]
-            ]
-            if excess_ids:
-                placeholders = ",".join("?" for _ in excess_ids)
-                self.conn.execute(f"DELETE FROM operation_recent_uses WHERE id IN ({placeholders})", excess_ids)
-
-    def recent_operation_uses(self, kind, limit=_OPERATION_TEMPLATE_LIMIT):
-        rows = self.conn.execute(
-            """
-            SELECT id, category_operation_id, breed, thickness, width, length, client, address, payment_method
-            FROM operation_recent_uses WHERE kind = ? ORDER BY created_at DESC, id DESC LIMIT ?
-            """,
-            (kind, self._OPERATION_TEMPLATE_LIMIT * 10),
-        ).fetchall()
-        # Дедуплікація за ВМІСТОМ (без id, який завжди унікальний) - id
-        # лишається в поверненому рядку, щоб GUI/webapp могли видалити
-        # САМЕ цей конкретний запис (найновіший серед дублікатів, бо
-        # ORDER BY created_at DESC).
-        seen = set()
-        unique = []
-        for row in rows:
-            signature = row[1:]
-            if signature in seen:
-                continue
-            seen.add(signature)
-            unique.append(row)
-            if len(unique) >= limit:
-                break
-        return unique
-
-    def get_operation_recent_use(self, use_id):
-        return self.conn.execute(
-            "SELECT id, kind, category_operation_id FROM operation_recent_uses WHERE id = ?",
-            (use_id,),
-        ).fetchone()
-
-    def delete_operation_recent_use(self, use_id):
-        with self.conn:
-            self.conn.execute("DELETE FROM operation_recent_uses WHERE id = ?", (use_id,))
-
     def list_operation_fields(self, operation_id, include_disabled=False):
         query = (
             "SELECT id, operation_id, field_key, label, is_identity, position, enabled, builtin_key "
@@ -5367,32 +5302,6 @@ def antiseptic_rows(store):
 # метод ExcelSqliteStore чи TelegramDialogMixin. Мітка категорії резолвиться
 # щоразу заново (не зберігається в самих таблицях) - адмін міг перейменувати
 # bot_operations.label з того часу.
-def operation_template_entries(store, rows, source):
-    entries = []
-    for row in rows:
-        (
-            entry_id, category_operation_id, breed, thickness, width, length,
-            client, address, payment_method,
-        ) = row
-        operation = store.get_operation(category_operation_id) if category_operation_id is not None else None
-        if operation is None:
-            continue
-        entries.append({
-            "id": entry_id,
-            "source": source,
-            "category_operation_id": category_operation_id,
-            "category_label": operation[4],
-            "breed": breed,
-            "thickness": thickness,
-            "width": width,
-            "length": length,
-            "client": client,
-            "address": address,
-            "payment_method": payment_method,
-        })
-    return entries
-
-
 def row_value(row, index):
     # row=None означає "немає рядка складу" (наприклад продаж послуги
     # антисептирования без прив'язки до конкретної позиції складу) —
