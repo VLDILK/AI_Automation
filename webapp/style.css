@@ -913,3 +913,9 @@ html, body {
 .add-more-button {
   margin-top: 4px;
 }
+
+/* 2026-09-06: last field of a category block (Порода) has no bottom margin
+   (.field:last-child), so the next common field (Способ оплаты) touched it. */
+#identity-fields > .category-group {
+  margin-bottom: 12px;
+}
