@@ -16,6 +16,7 @@ from utils import (
     _number_value,
 )
 from warehouse_data import (
+    signed_bot_number,
     BOT_MESSAGE_DEFAULTS,
     antiseptic_rows,
     item_measure_kind,
@@ -813,7 +814,7 @@ class ReportsDialogMixin:
         recalc_lines = []
         if totals.get("recalc_income"):
             recalc_lines = [
-                f"Доход по пересчету: +{_display_bot_number(totals['recalc_income'])} MDL",
+                f"Доход по пересчету: {signed_bot_number(totals['recalc_income'])} MDL",
                 f"Всего получено: {_display_bot_number(round(totals['total_amount'] + totals['recalc_income'], 2))} MDL",
             ]
 

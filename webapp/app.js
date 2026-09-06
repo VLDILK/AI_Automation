@@ -1432,8 +1432,8 @@
             if (row && row.stock_thickness !== undefined && row.stock_thickness !== null && priceKind && priceNum > 0 && totalAmount !== null) {
               var factMeasure = pieceMeasure(row.stock_thickness, row.stock_width, row.stock_length, priceKind) * numberOrZero(quantityRawValue);
               var recalcIncome = priceNum * (totalAmount - factMeasure);
-              if (recalcIncome > 0.005) {
-                recalcText = "Доход по пересчету: +" + formatMoney(recalcIncome) + " MDL";
+              if (Math.abs(recalcIncome) > 0.005) {
+                recalcText = "Доход по пересчету: " + (recalcIncome < 0 ? "-" : "+") + formatMoney(Math.abs(recalcIncome)) + " MDL";
               }
             }
           }
@@ -1599,14 +1599,14 @@
         container.appendChild(antisepticTotalRow);
       }
       if (showTotals) {
-        if (recalcTotal > 0.005) {
+        if (Math.abs(recalcTotal) > 0.005) {
           var factTotalRow = document.createElement("div");
           factTotalRow.className = "confirm-common";
           factTotalRow.textContent = "Сумма по факту: " + formatMoney(goodsTotal - recalcTotal) + " MDL";
           container.appendChild(factTotalRow);
           var recalcTotalRow = document.createElement("div");
           recalcTotalRow.className = "confirm-common";
-          recalcTotalRow.textContent = "Доход по пересчету: +" + formatMoney(recalcTotal) + " MDL";
+          recalcTotalRow.textContent = "Доход по пересчету: " + (recalcTotal < 0 ? "-" : "+") + formatMoney(Math.abs(recalcTotal)) + " MDL";
           container.appendChild(recalcTotalRow);
         }
         var goodsTotalRow = document.createElement("div");

@@ -13,6 +13,7 @@ from utils import (
     price_line_text,
 )
 from warehouse_data import (
+    signed_bot_number,
     sale_recalc_income,
     BOT_MESSAGE_DEFAULTS,
     INCOME_QUANTITY_TOLERANCE,
@@ -3963,7 +3964,7 @@ class IncomeSaleFlowDialogMixin:
         # KD за номіналом: різниця між сумою за введений і за списаний розмір.
         recalc_income = sale_recalc_income(position)
         if recalc_income:
-            lines.append(f"   Доход по пересчету: +{_display_bot_number(recalc_income)} MDL")
+            lines.append(f"   Доход по пересчету: {signed_bot_number(recalc_income)} MDL")
         position_antiseptic_sum = 0
         position_antiseptic = position.get("antiseptic")
         if isinstance(position_antiseptic, dict) and position_antiseptic.get("volume") and position_antiseptic.get("price_per_unit"):
@@ -4044,7 +4045,7 @@ class IncomeSaleFlowDialogMixin:
             total_recalc = round(sum(sale_recalc_income(item) for item in completed_positions + [payload]), 2)
             if total_recalc:
                 totals_lines.append(f"Сумма по факту: {_display_bot_number(round(total_goods_sum - total_recalc, 2))} MDL")
-                totals_lines.append(f"Доход по пересчету: +{_display_bot_number(total_recalc)} MDL")
+                totals_lines.append(f"Доход по пересчету: {signed_bot_number(total_recalc)} MDL")
             totals_lines.append(f"Сумма за товар: {_display_bot_number(round(total_goods_sum, 2))} MDL")
             totals_lines.append(f"Итого: {_display_bot_number(grand_total)} MDL")
             sections.append(totals_lines)

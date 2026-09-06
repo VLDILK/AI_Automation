@@ -5928,6 +5928,13 @@ def _esc(value):
     return html.escape(str(value)) if value is not None else ""
 
 
+def signed_bot_number(value):
+    """«+486» / «-711,36» - знак від числа (дохід по перерахунку буває
+    відʼємним, коли списаний обʼєм більший за проданий)."""
+    value = round(_number_value(value), 2)
+    return ("-" if value < 0 else "+") + _display_bot_number(abs(value))
+
+
 def sale_recalc_income(position):
     """Дохід по перерахунку позиції (KD за номіналом): ціна × (введений вимір
     − фактично списаний). 0, якщо підміни розміру не було."""
@@ -6330,7 +6337,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                 lines.append(f"  <b>Сумма позиции: {_display_bot_number(goods_total)} MDL</b>")
             recalc_income = round(group["recalc_income"], 2)
             if full_info and recalc_income:
-                lines.append(f"  Доход по пересчету: +{_display_bot_number(recalc_income)} MDL")
+                lines.append(f"  Доход по пересчету: {signed_bot_number(recalc_income)} MDL")
             grand_recalc += recalc_income
             grand_total += goods_total + antiseptic_sum
             grand_total_goods += goods_total
@@ -6356,7 +6363,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                 lines.append(f"<b>Сумма за Антисептирование: {_display_bot_number(round(grand_total_antiseptic, 2))} MDL</b>")
             if full_info and grand_recalc:
                 lines.append(f"Сумма по факту: {_display_bot_number(round(grand_total_goods - grand_recalc, 2))} MDL")
-                lines.append(f"Доход по пересчету: +{_display_bot_number(round(grand_recalc, 2))} MDL")
+                lines.append(f"Доход по пересчету: {signed_bot_number(grand_recalc)} MDL")
             lines.append(f"<b>Сумма за товар: {_display_bot_number(round(grand_total_goods, 2))} MDL</b>")
             lines.append(f"<b>Итого по всей продаже: {_display_bot_number(round(grand_total, 2))} MDL</b>")
         lines.append("")
