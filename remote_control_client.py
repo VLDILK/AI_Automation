@@ -15,6 +15,7 @@ OneDrive теку (людина мала вручну обрати теку і �
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import paths
@@ -152,6 +153,36 @@ def post_remote_roles_action(payload, timeout=10):
     body["token"] = paths.remote_control_token()
     request = urllib.request.Request(
         f"{_BASE_URL}/control/roles_action",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_remote_journal(filters, timeout=15):
+    """Сторінка журналу операцій клієнта ({"entries","has_more","total",
+    "facets"?}) або None, якщо не вдалось."""
+    query = urllib.parse.urlencode({"filters": json.dumps(filters or {}, ensure_ascii=False)})
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/journal?{query}",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    return data
+
+
+def delete_remote_journal_entry(movement_id, actor=None, timeout=10):
+    body = {"token": paths.remote_control_token(), "id": int(movement_id), "actor": actor or "домашняя программа"}
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/journal_delete",
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",

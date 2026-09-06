@@ -4425,12 +4425,24 @@ class ExcelSqliteStore:
     # Адмін-форма (2026-09-06): журнал з фільтрами - операції (список типів),
     # дати (включно, за датою створення), продукт (підрядок), хто (підрядок
     # імені), пошук за розміром/породою/станом (підрядок "47x150"); порціями.
-    def list_journal_movements(self, movement_types=None, date_from=None, date_to=None, product=None,
-                             who=None, search=None, limit=50, offset=0):
+    # ---------------- Журнал операцій (2026-09-06) ----------------
+    # Одне джерело для трьох місць: форма адміністратора, клієнт «Журналы»,
+    # домашка «Журнал операцій». Фільтр на кожну колонку вікна-таблиці.
+    _JOURNAL_NEGATIVE_TYPES = ("sale", "writeoff", "exchange_out")
+
+    def _journal_where(self, movement_types=None, date_from=None, date_to=None, product=None, who=None,
+                       search=None, documents=None, who_list=None, product_list=None, size=None, sign=None,
+                       qty_min=None, qty_max=None, measure_min=None, measure_max=None,
+                       balance_min=None, balance_max=None, reason=None):
         # SQLite lower() lowercases only ASCII - Cyrillic filters need a Python function.
         self.conn.create_function("py_lower", 1, lambda value: value.lower() if isinstance(value, str) else value)
         where = []
         params = []
+        negative = "movement_type IN (%s)" % ",".join("'%s'" % t for t in self._JOURNAL_NEGATIVE_TYPES)
+        signed_qty = "(CASE WHEN movement_type = 'correction' THEN coalesce(quantity, 0) WHEN %s THEN -abs(coalesce(quantity, 0)) ELSE abs(coalesce(quantity, 0)) END)" % negative
+        measure_expr = "coalesce(volume, area, linear, 0)"
+        size_expr = ("(printf('%g', coalesce(thickness, 0)) || 'x' || printf('%g', coalesce(width, 0)) || 'x'"
+                     " || printf('%g', coalesce(length, 0)))")
         if movement_types:
             where.append("movement_type IN (%s)" % ",".join("?" for _ in movement_types))
             params.extend(movement_types)
@@ -4449,24 +4461,107 @@ class ExcelSqliteStore:
         if search:
             needle = "%" + str(search).lower().replace("×", "x") + "%"
             where.append(
-                "(py_lower(coalesce(breed, '') || ' ' || coalesce(condition, '') || ' ' || printf('%g', coalesce(thickness, 0))"
-                " || 'x' || printf('%g', coalesce(width, 0)) || 'x' || printf('%g', coalesce(length, 0)) || ' ' || coalesce(document, '')) LIKE ?)"
+                "(py_lower(coalesce(breed, '') || ' ' || coalesce(condition, '') || ' ' || " + size_expr
+                + " || ' ' || coalesce(document, '')) LIKE ?)"
             )
             params.append(needle)
+        if documents:
+            clauses = []
+            for value in documents:
+                text = str(value).strip()
+                if not text:
+                    continue
+                digits = re.sub(r"\D", "", text)
+                if digits and digits == text:
+                    clauses.append("(coalesce(document, '') LIKE ? OR coalesce(document, '') = ?)")
+                    params.extend(["%№" + digits, digits])
+                else:
+                    clauses.append("py_lower(coalesce(document, '')) LIKE ?")
+                    params.append("%" + text.lower() + "%")
+            if clauses:
+                where.append("(" + " OR ".join(clauses) + ")")
+        if who_list is not None:
+            values = [str(v) for v in who_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append("coalesce(nullif(full_name, ''), username, '') IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if product_list is not None:
+            values = [str(v) for v in product_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append("coalesce(product, '') IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if size:
+            where.append("py_lower(" + size_expr + ") LIKE ?")
+            params.append("%" + str(size).lower().replace("×", "x").replace(" ", "") + "%")
+        if sign == "plus":
+            where.append(signed_qty + " > 0")
+        elif sign == "minus":
+            where.append(signed_qty + " < 0")
+        elif sign == "none":
+            where.append("0")
+        for value, clause in ((qty_min, "abs(coalesce(quantity, 0)) >= ?"), (qty_max, "abs(coalesce(quantity, 0)) <= ?"),
+                              (measure_min, "abs(" + measure_expr + ") >= ?"), (measure_max, "abs(" + measure_expr + ") <= ?"),
+                              (balance_min, "coalesce(balance_after, 0) >= ?"), (balance_max, "coalesce(balance_after, 0) <= ?")):
+            if value not in (None, ""):
+                where.append(clause)
+                params.append(_number_value(value))
+        if reason:
+            where.append("py_lower(coalesce(reason, '')) LIKE ?")
+            params.append("%" + str(reason).lower() + "%")
+        return (" WHERE " + " AND ".join(where)) if where else "", params
+
+    def list_journal_movements(self, movement_types=None, date_from=None, date_to=None, product=None,
+                               who=None, search=None, limit=50, offset=0, sort="desc", **column_filters):
+        where_sql, params = self._journal_where(movement_types, date_from, date_to, product, who, search, **column_filters)
         sql = (
             "SELECT id, movement_type, source, telegram_user_id, username, full_name, product, breed, condition,"
             " thickness, width, length, quantity, volume, area, linear, reason, sheet_row_id, created_at, document,"
-            " balance_after FROM stock_movements"
+            " balance_after FROM stock_movements" + where_sql
         )
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        params.extend([int(limit) + 1, int(offset)])
+        direction = "ASC" if str(sort).lower() == "asc" else "DESC"
+        sql += " ORDER BY created_at %s, id %s LIMIT ? OFFSET ?" % (direction, direction)
+        params = list(params) + [int(limit) + 1, int(offset)]
         cursor = self.conn.execute(sql, params)
         keys = [column[0] for column in cursor.description]
         rows = [dict(zip(keys, values)) for values in cursor.fetchall()]
         has_more = len(rows) > int(limit)
         return rows[: int(limit)], has_more
+
+    def count_journal_movements(self, movement_types=None, date_from=None, date_to=None, product=None,
+                                who=None, search=None, **column_filters):
+        where_sql, params = self._journal_where(movement_types, date_from, date_to, product, who, search, **column_filters)
+        return self.conn.execute("SELECT COUNT(*) FROM stock_movements" + where_sql, params).fetchone()[0]
+
+    def journal_facets(self):
+        """Значення для фільтрів-прапорців: хто робив і які товари є в журналі."""
+        who = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT coalesce(nullif(full_name, ''), username, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
+        ).fetchall() if row[0]]
+        products = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT coalesce(product, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
+        ).fetchall() if row[0]]
+        return {"who": who, "products": products}
+
+    def delete_journal_movement(self, movement_id, actor=None):
+        """Видалення запису журналу - лише з домашки (рішення користувача):
+        залишок не чіпає, слід лишається в технічному журналі (action_log)."""
+        row = self.conn.execute(
+            "SELECT id, movement_type, document, product, thickness, width, length, quantity, full_name, created_at"
+            " FROM stock_movements WHERE id = ?", (movement_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Запись журнала не найдена.")
+        with self.conn:
+            self.conn.execute("DELETE FROM stock_movements WHERE id = ?", (movement_id,))
+        keys = ("id", "movement_type", "document", "product", "thickness", "width", "length", "quantity", "full_name", "created_at")
+        details = dict(zip(keys, row))
+        details["deleted_by"] = actor or "домашняя программа"
+        self.add_action_log("journal_entry_deleted", details)
+        return details
 
     def get_user_preference(self, telegram_user_id):
         cursor = self.conn.execute(
@@ -5469,6 +5564,125 @@ def normalize_payment_method(store, value):
 def product_requires_type(product):
     normalized = _normalize_phrase(product)
     return normalized in {"доска", "doska"}
+
+
+# --- Журнал операцій: форматування записів (спільне для форми, клієнта й домашки) ---
+JOURNAL_TYPE_LABELS = {
+    "income": "Приход",
+    "sale": "Продажа",
+    "writeoff": "Списание",
+    "exchange_out": "Обмен: отдаём",
+    "exchange_in": "Обмен: получаем",
+    "antiseptic": "Антисептирование",
+    "correction": "Коррекция",
+}
+JOURNAL_NEGATIVE_TYPES = frozenset({"sale", "writeoff", "exchange_out"})
+# Групи прапорців у фільтрі «Операция»: один прапорець «Обмен» = обидва боки.
+JOURNAL_FILTER_GROUPS = (
+    ("Продажа", ("sale",)),
+    ("Приход", ("income",)),
+    ("Списание", ("writeoff",)),
+    ("Обмен", ("exchange_out", "exchange_in")),
+    ("Антисептирование", ("antiseptic",)),
+    ("Коррекция", ("correction",)),
+)
+
+
+def journal_entries(rows):
+    entries = []
+    for row in rows:
+        created = row.get("created_at") or ""
+        try:
+            time_text = datetime.fromisoformat(created).strftime("%H:%M %Y.%m.%d")
+        except ValueError:
+            time_text = created
+        movement_type = row.get("movement_type") or ""
+        quantity = _number_value(row.get("quantity"))
+        measure_kind = item_measure_kind(row)
+        measure = _number_value(row.get(measure_kind)) if measure_kind else None
+        if movement_type != "correction":
+            sign = -1 if movement_type in JOURNAL_NEGATIVE_TYPES else 1
+            quantity = abs(quantity) * sign
+            if measure is not None:
+                measure = abs(measure) * sign
+        dims = [row.get("thickness"), row.get("width"), row.get("length")]
+        size = "x".join(_display_bot_number(v) for v in dims if v not in (None, "")) if any(v not in (None, "") for v in dims) else ""
+        entries.append({
+            "id": row.get("id"),
+            "time": time_text,
+            "created_at": created,
+            "type": movement_type,
+            "type_label": JOURNAL_TYPE_LABELS.get(movement_type, movement_type),
+            "document": row.get("document") or "",
+            "who": row.get("full_name") or row.get("username") or "",
+            "product": row.get("product") or "",
+            "breed": row.get("breed") or "",
+            "condition": row.get("condition") or "",
+            "size": size,
+            "quantity": round(quantity, 6),
+            "measure_kind": measure_kind,
+            "measure": round(measure, 6) if measure is not None else None,
+            "unit": ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else "",
+            "balance_after": row.get("balance_after"),
+            "reason": row.get("reason") or "",
+        })
+    return entries
+
+
+def _journal_filter_kwargs(filters):
+    def text(key):
+        value = filters.get(key)
+        return str(value).strip() if value not in (None, "") else None
+
+    def listing(key):
+        value = filters.get(key)
+        return [str(v) for v in value] if isinstance(value, list) else None
+
+    def number(key):
+        value = filters.get(key)
+        return value if value not in (None, "") else None
+
+    types = listing("types")
+    return {
+        "movement_types": types or None,
+        "date_from": text("date_from"),
+        "date_to": text("date_to"),
+        "product": text("product"),
+        "who": text("who"),
+        "search": text("search"),
+        "documents": listing("documents"),
+        "who_list": listing("who_list"),
+        "product_list": listing("product_list"),
+        "size": text("size"),
+        "sign": text("sign"),
+        "qty_min": number("qty_min"), "qty_max": number("qty_max"),
+        "measure_min": number("measure_min"), "measure_max": number("measure_max"),
+        "balance_min": number("balance_min"), "balance_max": number("balance_max"),
+        "reason": text("reason"),
+    }
+
+
+def journal_page(store, filters):
+    """Сторінка журналу: {"entries", "has_more", "total", "facets"?}. filters -
+    словник з форми/вікна (types, date_from/to, product, who, search,
+    documents, who_list, product_list, size, sign, *_min/*_max, reason, sort,
+    limit, offset, with_facets)."""
+    filters = filters if isinstance(filters, dict) else {}
+    try:
+        limit = max(1, min(int(filters.get("limit") or 50), 5000))
+        offset = max(0, int(filters.get("offset") or 0))
+    except (TypeError, ValueError):
+        limit, offset = 50, 0
+    kwargs = _journal_filter_kwargs(filters)
+    rows, has_more = store.list_journal_movements(limit=limit, offset=offset, sort=filters.get("sort") or "desc", **kwargs)
+    page = {
+        "entries": journal_entries(rows),
+        "has_more": has_more,
+        "total": store.count_journal_movements(**kwargs),
+    }
+    if filters.get("with_facets"):
+        page["facets"] = store.journal_facets()
+    return page
 
 
 def display_product_name(payload):

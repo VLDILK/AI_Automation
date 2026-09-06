@@ -62,6 +62,7 @@ import servers_registry
 import standard_menu_cloud
 import update_check
 from settings import SettingsStore
+from journal_window import LocalJournalSource, open_journal_window
 from role_buttons_window import LocalRoleSource, open_role_buttons_window
 from warehouse_data import (
     sync_sheet_to_excel,
@@ -451,7 +452,6 @@ class ClientApp(ctk.CTk):
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
 
         self.journals_window = None
-        self.journals_list_frame = None
         self._action_log_detail_windows = {}
         self.personnel_window = None
         self.personnel_list_frame = None
@@ -522,7 +522,6 @@ class ClientApp(ctk.CTk):
         self._update_ready_to_install = False
         self._update_install_in_progress = False
         self._downloaded_update_target = None
-        self._journals_fetch_limit = 50
 
         self._build_main_screen()
         self._refresh_webapp_status_text()
@@ -3826,239 +3825,22 @@ class ClientApp(ctk.CTk):
     # реальний баг z-order (вікно миттю опинялось позаду головного). "Журнал
     # виконаних робіт" (dev work log) свідомо НЕ переносимо - це внутрішні
     # нотатки розробника, не потрібні бізнес-клієнту.
+    # Задача користувача (2026-09-06): «приведемо журнал в порядок для
+    # користувачів» - «Журналы» тепер відкриває журнал операцій (рухи
+    # складу: час, документ, хто, товар, ± шт/од., залишок, причина) з
+    # фільтром у кожному заголовку - journal_window.py, спільне з домашкою.
+    # Старий технічний журнал повідомлень боту з клієнта прибрано (рішення
+    # користувача: лишається лише в домашці, «Журнал дій»).
     def _open_journals_window(self):
-        if self.journals_window is not None and self.journals_window.winfo_exists():
-            self.journals_window.deiconify()
-            self.journals_window.lift()
-            self.journals_window.focus_force()
-            self._refresh_action_log()
-            return
-        window = tk.Toplevel(self)
-        window.title("Журнал действий")
-        window.geometry("820x560")
-        window.configure(bg=self._tk_color(COLOR_BG))
-        self.journals_window = window
-        self._build_journals_window(window)
+        open_journal_window(
+            self, "journals_window", self, LocalJournalSource(self.store), colors=self._journal_window_colors(),
+        )
 
-    def _build_journals_window(self, window):
-        top = ctk.CTkFrame(window, fg_color="transparent")
-        top.pack(fill="x", padx=16, pady=(16, 8))
-        ctk.CTkLabel(top, text="Журнал действий", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
-        ctk.CTkButton(
-            top, text="Очистить журнал", width=140, fg_color=COLOR_STOP, text_color=COLOR_STOP_TEXT,
-            hover_color=COLOR_HOVER, command=self._on_clear_action_log_clicked,
-        ).pack(side="right")
-        ctk.CTkButton(top, text="Обновить", width=100, command=self._refresh_action_log).pack(side="right", padx=(0, 8))
-
-        self.journals_list_frame = ctk.CTkScrollableFrame(window, fg_color="transparent")
-        self.journals_list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        self._refresh_action_log()
-
-    # Реальний баг (2026-08-13): "дуже лагає" - до 200 рядків по 5 CTk-
-    # віджетів (CTkFrame/CTkLabel/CTkButton) кожен - CustomTkinter суттєво
-    # важчий за звичайний tk (кожен заокруглений кут - окреме canvas-
-    # малювання), сотні таких віджетів синхронно на відкритті/оновленні
-    # відчутно "підвисають" інтерфейс. Рядки списку тепер звичайні tk-
-    # віджети (та сама логіка, що вже й у самому gui.py - там теж plain
-    # tk.Frame/tk.Label/tk.Button для journal/personnel рядків, не ttk чи
-    # CTk), а не 200 - ліміт 50 за раз, з кнопкою "Показать ещё".
-    def _refresh_action_log(self):
-        if self.journals_list_frame is None:
-            return
-        for child in self.journals_list_frame.winfo_children():
-            child.destroy()
-        rows = self.store.list_action_log(self._journals_fetch_limit)
-        if not rows:
-            tk.Label(
-                self.journals_list_frame, text="Журнал действий пока пуст.",
-                fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
-            ).pack(anchor="w", pady=8)
-            return
-        for log_id, action_type, details_json, created_at in rows:
-            self._build_action_log_row(log_id, action_type, details_json, created_at)
-        if len(rows) >= self._journals_fetch_limit:
-            tk.Button(
-                self.journals_list_frame, text="Показать ещё", command=self._on_show_more_logs_clicked,
-            ).pack(pady=8)
-
-    def _on_show_more_logs_clicked(self):
-        self._journals_fetch_limit += 50
-        self._refresh_action_log()
-
-    def _build_action_log_row(self, log_id, action_type, details_json, created_at):
-        details = self._parse_action_log_details(details_json)
-        summary = self._action_log_summary(action_type, details)
-        row_bg = self._tk_color(COLOR_ROW)
-        text_color = self._tk_color(COLOR_TEXT)
-        muted_color = self._tk_color(COLOR_TEXT_MUTED)
-
-        card = tk.Frame(self.journals_list_frame, bg=row_bg)
-        card.pack(fill="x", pady=(0, 6))
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_columnconfigure(1, weight=0)
-
-        headline = f"{self._format_log_time(created_at)} — {summary['user']} — {summary['status']}"
-        tk.Label(
-            card, text=headline, font=("Segoe UI", 10), fg=text_color, bg=row_bg, anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
-
-        buttons = tk.Frame(card, bg=row_bg)
-        buttons.grid(row=0, column=1, rowspan=2, sticky="e", padx=12, pady=8)
-        tk.Button(
-            buttons, text="Детально", width=9, command=lambda: self._open_action_log_details(log_id),
-        ).pack(side="left", padx=(0, 4))
-        tk.Button(
-            buttons, text="Удалить", width=9, fg="#B23B3B",
-            command=lambda: self._on_delete_action_log_clicked(log_id),
-        ).pack(side="left")
-
-        detail_text = f"{summary['action']}: {summary['text']}" if summary["text"] else summary["action"]
-        tk.Label(
-            card, text=self._short_text(detail_text, 90), font=("Segoe UI", 9), fg=muted_color, bg=row_bg, anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-
-    def _on_delete_action_log_clicked(self, log_id):
-        if not messagebox.askyesno("Журнал действий", f"Удалить запись журнала действий #{log_id}?", parent=self.journals_window):
-            return
-        self.store.delete_action_log(log_id)
-        self._refresh_action_log()
-
-    def _on_clear_action_log_clicked(self):
-        if not messagebox.askyesno(
-            "Журнал действий", "Удалить все записи журнала? Это действие нельзя отменить.", parent=self.journals_window,
-        ):
-            return
-        self.store.clear_action_log()
-        self._refresh_action_log()
-
-    def _open_action_log_details(self, log_id):
-        existing = self._action_log_detail_windows.get(log_id)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
-        row = self.store.get_action_log(log_id)
-        if not row:
-            messagebox.showinfo("Журнал действий", "Запись не найдена.")
-            return
-        _log_id, action_type, details_json, created_at = row
-        details = self._parse_action_log_details(details_json)
-
-        window = tk.Toplevel(self.journals_window)
-        window.title(f"Детали записи #{log_id}")
-        window.geometry("640x480")
-        self._action_log_detail_windows[log_id] = window
-
-        def close():
-            if self._action_log_detail_windows.get(log_id) is window:
-                del self._action_log_detail_windows[log_id]
-            window.destroy()
-
-        window.protocol("WM_DELETE_WINDOW", close)
-        window.bind("<Escape>", lambda event: close())
-
-        text_widget = tk.Text(window, wrap="word")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        text_widget.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
-        scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=12)
-        text_widget.insert("1.0", self._format_action_log_details_text(log_id, action_type, created_at, details))
-        text_widget.configure(state="disabled")
-
-    def _parse_action_log_details(self, details_json):
-        try:
-            data = json.loads(details_json) if details_json else {}
-        except json.JSONDecodeError:
-            data = {"raw": details_json}
-        return data if isinstance(data, dict) else {"raw": data}
-
-    def _action_log_summary(self, action_type, details):
-        telegram = details.get("telegram") or {}
-        text = details.get("incoming_text") or ""
-        if not text and isinstance(details.get("reply"), dict):
-            text = details["reply"].get("caption") or details["reply"].get("text") or ""
+    def _journal_window_colors(self):
         return {
-            "user": self._action_log_user_label(telegram),
-            "status": self._action_log_status_label(details.get("status", "")),
-            "action": self._action_log_action_label(details.get("recognized_command") or action_type),
-            "text": str(text).replace("\n", " "),
+            "bg": self._tk_color(COLOR_BG), "fg": self._tk_color(COLOR_TEXT), "muted": self._tk_color(COLOR_TEXT_MUTED),
+            "row": self._tk_color(COLOR_ROW), "line": self._tk_color(COLOR_HOVER),
         }
-
-    def _action_log_user_label(self, telegram):
-        full_name = telegram.get("full_name") or ""
-        username = telegram.get("username") or ""
-        user_id = telegram.get("user_id") or ""
-        if full_name and username:
-            return f"{full_name} / @{username}"
-        if full_name:
-            return str(full_name)
-        if username:
-            return f"@{username}"
-        if user_id:
-            return str(user_id)
-        return "Неизвестно"
-
-    def _action_log_status_label(self, status):
-        labels = {
-            "success": "Выполнено", "waiting": "Ожидает ответа", "error": "Ошибка",
-            "cancelled": "Отменено", "unknown": "Не распознано",
-        }
-        return labels.get(str(status or ""), str(status or "Неизвестно"))
-
-    def _action_log_action_label(self, action):
-        labels = {
-            "telegram_message": "Сообщение Telegram", "add_income": "Приход", "stock_balance": "Остаток",
-            "cancel_operation": "Отмена", "bot_selection": "Выбор бота", "bot_explanation": "Пояснение режимов",
-            "claude_key_saved": "Ключ Claude сохранен", "claude_key_rejected": "Ключ Claude не сохранен",
-            "claude_key_help": "Инструкция Claude API", "claude_chat": "Разговор с Claude",
-            "stock_income_history": "История прихода", "status": "Статус", "start": "Старт",
-            "help": "Помощь", "sheets": "Список листов", "first": "Первые строки", "unknown": "Не распознано",
-        }
-        return labels.get(str(action or ""), str(action or "Неизвестно"))
-
-    def _action_log_reply_label(self, reply):
-        if not isinstance(reply, dict):
-            return str(reply or "")
-        if reply.get("type") == "document":
-            path = reply.get("path", "")
-            caption = reply.get("caption", "")
-            return "\n".join(
-                part for part in [
-                    "Тип ответа: файл",
-                    f"Файл: {path}" if path else "",
-                    f"Подпись: {caption}" if caption else "",
-                ] if part
-            )
-        return str(reply.get("text", ""))
-
-    # Спрощена версія gui.py._format_action_log_details: без технічних
-    # деталей (pipeline_version/duration_ms/сирий JSON) - зайве для бізнес-
-    # клієнта, лишає лише те, що реально пояснює, що сталося.
-    def _format_action_log_details_text(self, log_id, action_type, created_at, details):
-        telegram = details.get("telegram") or {}
-        reply = details.get("reply") or {}
-        lines = [
-            f"Запись журнала: #{log_id}",
-            f"Время: {self._format_log_time(created_at)}",
-            f"Пользователь: {self._action_log_user_label(telegram)}",
-            "",
-            "Запрос пользователя:",
-            details.get("incoming_text") or "",
-            "",
-            f"Действие: {self._action_log_action_label(details.get('recognized_command') or action_type)}",
-            f"Статус: {self._action_log_status_label(details.get('status'))}",
-        ]
-        pending_before = details.get("pending_before")
-        pending_after = details.get("pending_after")
-        if pending_before:
-            lines.extend(["", "Операция до сообщения:", f"Тип: {pending_before.get('operation_type', '')}"])
-        if pending_after:
-            lines.extend(["", "Операция после сообщения:", f"Тип: {pending_after.get('operation_type', '')}"])
-        lines.extend(["", "Ответ пользователю:", self._action_log_reply_label(reply)])
-        if details.get("error"):
-            lines.extend(["", "Ошибка:", str(details.get("error"))])
-        return "\n".join(lines)
 
     def _format_log_time(self, created_at):
         try:

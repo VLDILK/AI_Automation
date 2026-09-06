@@ -24,6 +24,7 @@ from utils import (
     _normalize_phrase,
     _number_value,
 )
+from warehouse_data import JOURNAL_TYPE_LABELS, journal_entries, journal_page
 from warehouse_data import (
     signed_bot_number,
     apply_correction_operation,
@@ -2168,16 +2169,10 @@ class CoreDialogMixin:
     # ---------------- Адмін-форма (2026-09-06) ----------------
     # Журнал операцій і корекція залишків, лише роль адміністратора.
     _CORRECTION_CONFIRM_LABEL = "Записать коррекцию"
-    _ADMIN_JOURNAL_LABELS = {
-        "income": "Приход",
-        "sale": "Продажа",
-        "writeoff": "Списание",
-        "exchange_out": "Обмен: отдаём",
-        "exchange_in": "Обмен: получаем",
-        "antiseptic": "Антисептирование",
-        "correction": "Коррекция",
-    }
-    _ADMIN_JOURNAL_NEGATIVE = frozenset({"sale", "writeoff", "exchange_out"})
+    # Журнал операцій (2026-09-06): форматування й фільтри живуть у
+    # warehouse_data (journal_entries/journal_page) - ті самі для форми
+    # адміністратора, клієнта й домашки.
+    _ADMIN_JOURNAL_LABELS = JOURNAL_TYPE_LABELS
 
     def _require_admin(self, store, context):
         if self._current_user_role(store, context) == perm.ADMIN:
@@ -2185,64 +2180,10 @@ class CoreDialogMixin:
         return self._with_main_menu("Админ-форма доступна только администратору.", store)
 
     def _admin_journal_entries(self, rows):
-        entries = []
-        for row in rows:
-            created = row.get("created_at") or ""
-            try:
-                time_text = datetime.fromisoformat(created).strftime("%H:%M %Y.%m.%d")
-            except ValueError:
-                time_text = created
-            movement_type = row.get("movement_type") or ""
-            quantity = _number_value(row.get("quantity"))
-            measure_kind = item_measure_kind(row)
-            measure = _number_value(row.get(measure_kind)) if measure_kind else None
-            if movement_type != "correction":
-                sign = -1 if movement_type in self._ADMIN_JOURNAL_NEGATIVE else 1
-                quantity = abs(quantity) * sign
-                if measure is not None:
-                    measure = abs(measure) * sign
-            dims = [row.get("thickness"), row.get("width"), row.get("length")]
-            size = "x".join(_display_bot_number(v) for v in dims if v not in (None, "")) if any(v not in (None, "") for v in dims) else ""
-            entries.append({
-                "id": row.get("id"),
-                "time": time_text,
-                "type": movement_type,
-                "type_label": self._ADMIN_JOURNAL_LABELS.get(movement_type, movement_type),
-                "document": row.get("document") or "",
-                "who": row.get("full_name") or row.get("username") or "",
-                "product": row.get("product") or "",
-                "breed": row.get("breed") or "",
-                "condition": row.get("condition") or "",
-                "size": size,
-                "quantity": round(quantity, 6),
-                "measure_kind": measure_kind,
-                "measure": round(measure, 6) if measure is not None else None,
-                "unit": ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else "",
-                "balance_after": row.get("balance_after"),
-                "reason": row.get("reason") or "",
-            })
-        return entries
+        return journal_entries(rows)
 
     def _admin_journal_page(self, store, filters):
-        filters = filters if isinstance(filters, dict) else {}
-        types = filters.get("types")
-        types = [t for t in types if isinstance(t, str)] if isinstance(types, list) else None
-        try:
-            limit = max(1, min(int(filters.get("limit") or 50), 200))
-            offset = max(0, int(filters.get("offset") or 0))
-        except (TypeError, ValueError):
-            limit, offset = 50, 0
-        rows, has_more = store.list_journal_movements(
-            movement_types=types or None,
-            date_from=filters.get("date_from") or None,
-            date_to=filters.get("date_to") or None,
-            product=filters.get("product") or None,
-            who=filters.get("who") or None,
-            search=filters.get("search") or None,
-            limit=limit,
-            offset=offset,
-        )
-        return {"entries": self._admin_journal_entries(rows), "has_more": has_more}
+        return journal_page(store, filters)
 
     def _webapp_admin_context(self, store, context):
         categories = self._webapp_exchange_categories(

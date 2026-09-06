@@ -37,6 +37,7 @@ import permissions as perm
 import standard_menu_cloud
 from settings import SettingsStore
 from utils import measure_classification_data
+from warehouse_data import journal_page
 from warehouse_data import ExcelSqliteStore, low_stock_report_rows
 
 # Задача користувача: "чи є якийсь інший шлях?" (замість роздутого web_app
@@ -263,6 +264,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         if url_path == "/control/roles":
             self._handle_remote_roles(dict(parse_qsl(parsed.query)))
             return
+        if url_path == "/control/journal":
+            self._handle_remote_journal(dict(parse_qsl(parsed.query)))
+            return
         if url_path == "/control/action_log":
             self._handle_remote_action_log(dict(parse_qsl(parsed.query)))
             return
@@ -342,7 +346,8 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path not in (
             "/api/template", "/control/command", "/control/heartbeat", "/control/set_role",
-            "/control/custom_button_action", "/control/roles_action", "/control/save_standard_menu_to_cloud",
+            "/control/custom_button_action", "/control/roles_action", "/control/journal_delete",
+            "/control/save_standard_menu_to_cloud",
             "/control/payment_method_action", "/control/system_commands_save",
         ):
             self._send_json(404, {"ok": False, "error": "Не найдено."})
@@ -384,6 +389,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/control/roles_action":
             self._handle_roles_action_request(payload)
+            return
+        if self.path == "/control/journal_delete":
+            self._handle_journal_delete_request(payload)
             return
         if self.path == "/control/save_standard_menu_to_cloud":
             self._handle_save_standard_menu_to_cloud_request(payload)
@@ -880,6 +888,50 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
         self._send_json(200, result)
+
+    # Журнал операцій для домашки (2026-09-06): та сама сторінка, що й у
+    # формі адміністратора/клієнті (warehouse_data.journal_page), фільтри
+    # їдуть JSON-рядком у query.
+    def _handle_remote_journal(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        try:
+            filters = json.loads(query.get("filters") or "{}")
+        except ValueError:
+            filters = {}
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            page = journal_page(store, filters if isinstance(filters, dict) else {})
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, **page})
+
+    # Видалення запису журналу - лише з домашки (рішення користувача);
+    # залишок не чіпає, слід лишається в технічному журналі клієнта.
+    def _handle_journal_delete_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        movement_id = payload.get("id")
+        if not isinstance(movement_id, int) or isinstance(movement_id, bool):
+            self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            details = store.delete_journal_movement(movement_id, actor=payload.get("actor") or "домашняя программа")
+        except ValueError as exc:
+            self._send_json(404, {"ok": False, "error": str(exc)})
+            return
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, "deleted": details})
 
     def _handle_remote_action_log(self, query):
         if not self._remote_control_token_valid(self._remote_control_query_token(query)):

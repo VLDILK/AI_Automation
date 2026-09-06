@@ -41,6 +41,7 @@ import code_backup
 import config_backup
 import domain_info
 import remote_control_client
+from journal_window import RemoteJournalSource, open_journal_window
 from role_buttons_window import RemoteRoleSource, open_role_buttons_window
 import button_editor
 import servers_registry
@@ -1847,6 +1848,19 @@ class ExcelViewerApp:
 
         menu_panel = tk.Frame(self.journals_hub_frame)
         menu_panel.pack(expand=True)
+
+        # Задача користувача (2026-09-06): журнал операцій - той самий, що
+        # в клієнті й у формі адміністратора (journal_window.py), дані живого
+        # клієнта через тунель; тут, і лише тут, записи можна видаляти.
+        # «Журнал дій» (технічний журнал повідомлень боту) лишається окремо.
+        operations_journal_button = tk.Button(
+            menu_panel,
+            text=self._t("Журнал операцій"),
+            width=28,
+            height=2,
+            command=self._open_operations_journal_window,
+        )
+        operations_journal_button.pack(pady=8)
 
         action_log_button = tk.Button(
             menu_panel,
@@ -9438,6 +9452,18 @@ class ExcelViewerApp:
     def _role_chip_width(self):
         longest = max((len(role["label"]) + 2 for role in self._remote_roles()), default=0)
         return max(self._ROLE_CHIP_WIDTH, longest)
+
+    def _open_operations_journal_window(self):
+        theme = self._theme()
+        colors = {
+            "bg": theme["bg"], "fg": theme["fg"], "muted": theme["muted_fg"], "row": theme["panel_bg"],
+            "line": theme["border"],
+        }
+        open_journal_window(
+            self, "operations_journal_window", self.root,
+            RemoteJournalSource(remote_control_client, self._run_on_main_thread, actor="домашняя программа"),
+            colors=colors, title=self._t("Журнал операций"),
+        )
 
     def _open_role_buttons_window(self):
         theme = self._theme()
