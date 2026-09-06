@@ -102,7 +102,7 @@ class CorrectionWindow:
     # ---------------- дані ----------------
     @staticmethod
     def _empty_filters():
-        return {"product": None, "breed": None, "condition": None, "size": "", "now_min": "", "now_max": "",
+        return {"product": None, "breed": None, "condition": None, "size": None, "now_min": "", "now_max": "",
                 "only_edited": False, "sign_plus": True, "sign_minus": True}
 
     def reload(self):
@@ -115,11 +115,9 @@ class CorrectionWindow:
 
     def _passes(self, row):
         f = self.filters
-        for key in ("product", "breed", "condition"):
+        for key in ("product", "breed", "condition", "size"):
             if f[key] is not None and str(row.get(key) or "") not in f[key]:
                 return False
-        if f["size"].strip() and f["size"].strip().lower().replace("×", "x") not in str(row.get("size") or "").lower():
-            return False
         now = _number_value(row.get("now"))
         if str(f["now_min"]).strip() and now < _number_value(f["now_min"]):
             return False
@@ -244,7 +242,7 @@ class CorrectionWindow:
         f = self.filters
         return {
             "product": f["product"] is not None, "breed": f["breed"] is not None, "condition": f["condition"] is not None,
-            "size": bool(f["size"].strip()), "now": bool(str(f["now_min"]).strip() or str(f["now_max"]).strip()),
+            "size": f["size"] is not None, "now": bool(str(f["now_min"]).strip() or str(f["now_max"]).strip()),
             "new": f["only_edited"], "delta": not (f["sign_plus"] and f["sign_minus"]),
         }.get(key, False)
 
@@ -274,7 +272,7 @@ class CorrectionWindow:
         heading = next(column["label"] for column in COLUMNS if column["key"] == key)
         tk.Label(frame, text=heading, font=("Segoe UI", 11, "bold"), bg=colors["row"], fg=colors["fg"]).pack(anchor="w")
         actions = []
-        if key in ("product", "breed", "condition"):
+        if key in ("product", "breed", "condition", "size"):
             values = self.facet(key)
             chosen = f[key]
             vars_by_value = {value: tk.BooleanVar(value=(chosen is None or value in chosen)) for value in values}
@@ -292,13 +290,6 @@ class CorrectionWindow:
                 f[key] = None if len(selected) == len(values) else selected
 
             actions.append(apply_choice)
-        elif key == "size":
-            var = tk.StringVar(value=f["size"])
-            field = entry(frame, colors, var, placeholder="напр. 47x150")
-            field.pack(anchor="w", pady=(4, 0))
-            field.focus_set()
-            field.bind("<Return>", lambda event: self._apply_popup(actions))
-            actions.append(lambda: f.__setitem__("size", var.get()))
         elif key == "now":
             min_var = tk.StringVar(value=str(f["now_min"]))
             max_var = tk.StringVar(value=str(f["now_max"]))
@@ -333,10 +324,8 @@ class CorrectionWindow:
     def _clear_column(self, key):
         empty = self._empty_filters()
         f = self.filters
-        if key in ("product", "breed", "condition"):
+        if key in ("product", "breed", "condition", "size"):
             f[key] = None
-        elif key == "size":
-            f["size"] = ""
         elif key == "now":
             f["now_min"], f["now_max"] = "", ""
         elif key == "new":

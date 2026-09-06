@@ -4478,7 +4478,7 @@ class ExcelSqliteStore:
     def _journal_where(self, movement_types=None, date_from=None, date_to=None, product=None, who=None,
                        search=None, documents=None, who_list=None, product_list=None, size=None, sign=None,
                        qty_min=None, qty_max=None, measure_min=None, measure_max=None,
-                       balance_min=None, balance_max=None, reason=None):
+                       balance_min=None, balance_max=None, reason=None, size_list=None, reason_list=None):
         # SQLite lower() lowercases only ASCII - Cyrillic filters need a Python function.
         self.conn.create_function("py_lower", 1, lambda value: value.lower() if isinstance(value, str) else value)
         where = []
@@ -4542,6 +4542,20 @@ class ExcelSqliteStore:
         if size:
             where.append("py_lower(" + size_expr + ") LIKE ?")
             params.append("%" + str(size).lower().replace("×", "x").replace(" ", "") + "%")
+        if size_list is not None:
+            values = [str(v).replace("×", "x") for v in size_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append(size_expr + " IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if reason_list is not None:
+            values = [str(v) for v in reason_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append("coalesce(reason, '') IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
         if sign == "plus":
             where.append(signed_qty + " > 0")
         elif sign == "minus":
@@ -4589,7 +4603,15 @@ class ExcelSqliteStore:
         products = [row[0] for row in self.conn.execute(
             "SELECT DISTINCT coalesce(product, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
         ).fetchall() if row[0]]
-        return {"who": who, "products": products}
+        size_rows = self.conn.execute(
+            "SELECT DISTINCT coalesce(thickness, 0), coalesce(width, 0), coalesce(length, 0) FROM stock_movements"
+            " WHERE coalesce(thickness, width, length) IS NOT NULL ORDER BY 1, 2, 3"
+        ).fetchall()
+        sizes = ["x".join("%g" % _number_value(v) for v in row) for row in size_rows]
+        reasons = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT coalesce(reason, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
+        ).fetchall() if row[0]]
+        return {"who": who, "products": products, "sizes": sizes, "reasons": reasons}
 
     def delete_journal_movement(self, movement_id, actor=None):
         """Видалення запису журналу - лише з домашки (рішення користувача):
@@ -5699,6 +5721,8 @@ def _journal_filter_kwargs(filters):
         "who_list": listing("who_list"),
         "product_list": listing("product_list"),
         "size": text("size"),
+        "size_list": listing("size_list"),
+        "reason_list": listing("reason_list"),
         "sign": text("sign"),
         "qty_min": number("qty_min"), "qty_max": number("qty_max"),
         "measure_min": number("measure_min"), "measure_max": number("measure_max"),

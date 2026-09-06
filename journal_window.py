@@ -338,9 +338,9 @@ class JournalWindow:
     @staticmethod
     def _empty_column_filters():
         return {
-            "sort": "desc", "documents": "", "who": None, "product": None, "size": "",
+            "sort": "desc", "documents": "", "who": None, "product": None, "size": None,
             "sign_plus": True, "sign_minus": True, "qty_min": "", "qty_max": "",
-            "measure_min": "", "measure_max": "", "balance_min": "", "balance_max": "", "reason": "",
+            "measure_min": "", "measure_max": "", "balance_min": "", "balance_max": "", "reason": None,
         }
 
     def _selected_types(self):
@@ -414,15 +414,15 @@ class JournalWindow:
             filters["who_list"] = sorted(cf["who"])
         if cf["product"] is not None:
             filters["product_list"] = sorted(cf["product"])
-        if cf["size"].strip():
-            filters["size"] = cf["size"].strip()
+        if cf["size"] is not None:
+            filters["size_list"] = sorted(cf["size"])
         if not (cf["sign_plus"] and cf["sign_minus"]):
             filters["sign"] = "plus" if cf["sign_plus"] else ("minus" if cf["sign_minus"] else "none")
         for key in ("qty_min", "qty_max", "measure_min", "measure_max", "balance_min", "balance_max"):
             if str(cf[key]).strip():
                 filters[key] = str(cf[key]).strip().replace(",", ".")
-        if cf["reason"].strip():
-            filters["reason"] = cf["reason"].strip()
+        if cf["reason"] is not None:
+            filters["reason_list"] = sorted(cf["reason"])
         return filters
 
     def _column_active(self, key):
@@ -433,11 +433,11 @@ class JournalWindow:
             "document": bool(cf["documents"].strip()),
             "who": cf["who"] is not None,
             "product": cf["product"] is not None,
-            "size": bool(cf["size"].strip()),
+            "size": cf["size"] is not None,
             "qty": not (cf["sign_plus"] and cf["sign_minus"]) or bool(str(cf["qty_min"]).strip() or str(cf["qty_max"]).strip()),
             "measure": bool(str(cf["measure_min"]).strip() or str(cf["measure_max"]).strip()),
             "balance": bool(str(cf["balance_min"]).strip() or str(cf["balance_max"]).strip()),
-            "reason": bool(cf["reason"].strip()),
+            "reason": cf["reason"] is not None,
         }.get(key, False)
 
     def _render_headings(self):
@@ -610,17 +610,17 @@ class JournalWindow:
             row.pack(anchor="w", pady=(6, 0))
             ghost_button(row, colors, "Выбрать все", command=lambda: self._set_all_types(True), small=True, width=96).pack(side="left")
             ghost_button(row, colors, "Снять все", command=lambda: self._set_all_types(False), small=True, width=84).pack(side="left", padx=(4, 0))
-        elif key in ("document", "size", "reason"):
-            field = {"document": "documents", "size": "size", "reason": "reason"}[key]
-            hint = {"document": "номер документа, напр. 12 или 12, 15", "size": "напр. 47x150", "reason": "клиент, поставщик, причина"}[key]
-            var = tk.StringVar(value=cf[field])
-            field_entry = entry(frame, colors, var, placeholder=hint)
+        elif key == "document":
+            var = tk.StringVar(value=cf["documents"])
+            field_entry = entry(frame, colors, var, placeholder="номер документа, напр. 12 или 12, 15")
             field_entry.pack(anchor="w", pady=(4, 0))
             field_entry.focus_set()
-            apply_actions.append(lambda: cf.__setitem__(field, var.get()))
+            apply_actions.append(lambda: cf.__setitem__("documents", var.get()))
             field_entry.bind("<Return>", lambda event: self._apply_popup(apply_actions))
-        elif key in ("who", "product"):
-            values = self.facets.get("who" if key == "who" else "products") or []
+        elif key in ("who", "product", "size", "reason"):
+            # Вибір з наявних значень (рішення користувача 2026-09-06: жодних
+            # порожніх рядків там, де є з чого вибрати).
+            values = self.facets.get({"who": "who", "product": "products", "size": "sizes", "reason": "reasons"}[key]) or []
             chosen = cf[key]
             search_var = tk.StringVar()
             entry(frame, colors, search_var, placeholder="поиск…").pack(anchor="w", pady=(4, 0))
@@ -693,18 +693,14 @@ class JournalWindow:
             self._set_all_types(True)
         elif key == "document":
             cf["documents"] = ""
-        elif key in ("who", "product"):
+        elif key in ("who", "product", "size", "reason"):
             cf[key] = None
-        elif key == "size":
-            cf["size"] = ""
         elif key == "qty":
             cf.update({"sign_plus": True, "sign_minus": True, "qty_min": "", "qty_max": ""})
         elif key == "measure":
             cf.update({"measure_min": "", "measure_max": ""})
         elif key == "balance":
             cf.update({"balance_min": "", "balance_max": ""})
-        elif key == "reason":
-            cf["reason"] = ""
         self._close_popup()
         self.refresh()
 
