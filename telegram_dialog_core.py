@@ -5,6 +5,8 @@ import json
 import sqlite3
 import urllib.error
 import urllib.request
+
+import secure_http
 from datetime import datetime
 from pathlib import Path
 
@@ -2945,7 +2947,7 @@ class CoreDialogMixin:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with secure_http.urlopen(request, timeout=timeout) as response:
                 payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raise self._telegram_http_error(exc) from exc

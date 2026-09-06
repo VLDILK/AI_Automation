@@ -25,6 +25,8 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
+
+import secure_http
 import webbrowser
 from tkinter import ttk, messagebox, filedialog, simpledialog, colorchooser
 from tkinter import font as tkfont
@@ -78,7 +80,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.26"
+__version__ = "1.1.27"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -10431,7 +10433,7 @@ class ExcelViewerApp:
             self._webapp_last_probe_error = "нет активного адреса"
             return False
         try:
-            with urllib.request.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
+            with secure_http.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
                 ok = 200 <= response.status < 400
                 if not ok:
                     self._webapp_last_probe_error = f"HTTP {response.status}"

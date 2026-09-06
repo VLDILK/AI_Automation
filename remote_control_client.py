@@ -18,6 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import secure_http
+
 import paths
 
 # Задача користувача (2026-08-19): "щоб я міг перемикатись між цими
@@ -59,7 +61,7 @@ def fetch_remote_status(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -84,7 +86,7 @@ def fetch_remote_status_from(hostname, timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -103,7 +105,7 @@ def fetch_remote_personnel(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -121,7 +123,7 @@ def fetch_remote_personnel_payload(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -137,7 +139,7 @@ def fetch_remote_roles(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -157,7 +159,7 @@ def post_remote_roles_action(payload, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -170,7 +172,7 @@ def fetch_remote_journal(filters, timeout=15):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -187,7 +189,7 @@ def delete_remote_journal_entry(movement_id, actor=None, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -197,7 +199,7 @@ def fetch_remote_action_log(limit=50, timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -218,7 +220,7 @@ def send_home_heartbeat(timeout=10):
         method="POST",
     )
     try:
-        urllib.request.urlopen(request, timeout=timeout)
+        secure_http.urlopen(request, timeout=timeout)
     except (urllib.error.URLError, OSError):
         pass
 
@@ -245,7 +247,7 @@ def fetch_remote_standard_menu_cloud_path(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -261,7 +263,7 @@ def fetch_remote_custom_buttons(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -284,7 +286,7 @@ def _post_custom_button_action(payload, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -335,7 +337,7 @@ def fetch_remote_payment_methods(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -354,7 +356,7 @@ def _post_payment_method_action(payload, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -382,7 +384,7 @@ def fetch_remote_operations_tree(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -408,7 +410,7 @@ def save_standard_menu_to_cloud(timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -425,7 +427,7 @@ def fetch_remote_system_commands(timeout=10):
         headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -442,7 +444,7 @@ def save_remote_system_commands(commands, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -453,7 +455,7 @@ def set_remote_role(user_id, role, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -467,7 +469,7 @@ def send_remote_command(action, timeout=10):
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

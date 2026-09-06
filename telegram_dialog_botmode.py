@@ -5,6 +5,8 @@ import json
 import re
 import urllib.error
 import urllib.request
+
+import secure_http
 from datetime import datetime
 
 import permissions as perm
@@ -620,7 +622,7 @@ class BotModeDialogMixin:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with secure_http.urlopen(request, timeout=30) as response:
                 response_payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raise self._claude_http_error(exc) from exc

@@ -17,6 +17,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import secure_http
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
@@ -299,7 +301,7 @@ class TelegramBotWorker(TelegramDialogMixin):
         data = urllib.parse.urlencode(params or {}).encode("utf-8")
         request = urllib.request.Request(url, data=data, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with secure_http.urlopen(request, timeout=timeout) as response:
                 payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raise self._telegram_http_error(exc) from exc

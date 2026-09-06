@@ -43,6 +43,8 @@ import webbrowser
 from tkinter import ttk
 import urllib.error
 import urllib.request
+
+import secure_http
 from datetime import datetime
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox
@@ -106,7 +108,7 @@ import button_editor
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.32"
+__version__ = "0.3.33"
 
 # Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
 # remind_every_start - перемикач у Настройках ("Напоминать о недостающих
@@ -4756,7 +4758,7 @@ class ClientApp(ctk.CTk):
             self._webapp_last_probe_error = "нет активного адреса"
             return False
         try:
-            with urllib.request.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
+            with secure_http.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
                 ok = 200 <= response.status < 400
                 if not ok:
                     self._webapp_last_probe_error = f"HTTP {response.status}"

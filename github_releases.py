@@ -26,6 +26,8 @@ import mimetypes
 import shutil
 import urllib.error
 import urllib.request
+
+import secure_http
 import uuid
 import zipfile
 from pathlib import Path
@@ -103,7 +105,7 @@ def _request(url, token=None, method="GET", data=None, extra_headers=None, timeo
         headers.update(extra_headers)
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -450,10 +452,10 @@ def download_asset(url, destination_path, timeout=300, on_progress=None,
     справжній відсоток порахувати неможливо, тож просто мовчки нічого не
     повідомляємо, а не вигадуємо фальшиве значення."""
     request = _asset_request(url, api_url, token)
-    opener = urllib.request.build_opener(_NoAuthRedirect()) if (api_url and token) else None
+    opener = secure_http.build_opener(_NoAuthRedirect()) if (api_url and token) else None
     try:
         with (opener.open(request, timeout=timeout) if opener
-              else urllib.request.urlopen(request, timeout=timeout)) as response:
+              else secure_http.urlopen(request, timeout=timeout)) as response:
             total = response.headers.get("Content-Length")
             total = int(total) if total else None
             downloaded = 0

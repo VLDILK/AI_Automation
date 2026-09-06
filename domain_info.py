@@ -14,6 +14,8 @@ rdap.org - офіційний перенаправляч IANA: сам знахо
 import json
 import urllib.error
 import urllib.request
+
+import secure_http
 from datetime import datetime, timezone
 
 _RDAP_ROOT = "https://rdap.org/domain/"
@@ -67,7 +69,7 @@ def fetch_domain_info(domain, timeout=_TIMEOUT):
 
     request = urllib.request.Request(_RDAP_ROOT + domain, headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:

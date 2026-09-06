@@ -29,6 +29,8 @@ import re
 import urllib.error
 import urllib.request
 
+import secure_http
+
 API_ROOT = "https://api.cloudflare.com/client/v4"
 _TIMEOUT = 15
 
@@ -49,7 +51,7 @@ def _request(path, token, method="GET", payload=None, timeout=_TIMEOUT, with_sta
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         # Cloudflare і на помилку віддає свій JSON з errors[].message -
