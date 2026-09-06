@@ -17,6 +17,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 from ui_kit import DEFAULT_COLORS, CanvasTable, MultiChoice, Popup, accent_button, checkbox, entry, ghost_button
+from utils import LATH_MARK, plain_product_name
 from utils import _number_value
 
 COLUMNS = (
@@ -86,6 +87,7 @@ class CorrectionWindow:
         ).pack(fill="x", padx=16, pady=(0, 8))
 
         self.table = CanvasTable(window, colors, COLUMNS, on_heading_click=self._open_column_filter, on_cell_click=self._on_cell_click)
+        self.table.before_scroll = self._on_table_scroll
         self.table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
         bottom = ctk.CTkFrame(window, fg_color="transparent")
@@ -107,16 +109,26 @@ class CorrectionWindow:
 
     def reload(self):
         self.all_rows = list(self.load_rows())
+        conditions = {str(row.get("condition") or "").strip() for row in self.all_rows} - {""}
+        for row in self.all_rows:
+            row["product_label"] = _product_label(row, conditions)
         self.rows_by_id = {row["row_id"]: row for row in self.all_rows}
         self.render()
 
+    @staticmethod
+    def _field(row, key):
+        # «Продукт» показується без стану: «Доска», а не «Доска AD» (стан у
+        # своїй колонці) - рішення користувача 2026-09-07. Для запису
+        # rows_by_id зберігає первинну назву в row["product"].
+        return row.get("product_label") if key == "product" else row.get(key)
+
     def facet(self, key):
-        return sorted({str(row.get(key) or "") for row in self.all_rows if row.get(key) not in (None, "")})
+        return sorted({str(self._field(row, key) or "") for row in self.all_rows if self._field(row, key) not in (None, "")})
 
     def _passes(self, row):
         f = self.filters
         for key in ("product", "breed", "condition", "size"):
-            if f[key] is not None and str(row.get(key) or "") not in f[key]:
+            if f[key] is not None and str(self._field(row, key) or "") not in f[key]:
                 return False
         now = _number_value(row.get("now"))
         if str(f["now_min"]).strip() and now < _number_value(f["now_min"]):
@@ -147,7 +159,7 @@ class CorrectionWindow:
             table_rows.append({
                 "id": row["row_id"],
                 "values": {
-                    "product": row.get("product") or "", "breed": row.get("breed") or "", "condition": row.get("condition") or "",
+                    "product": row.get("product_label") or row.get("product") or "", "breed": row.get("breed") or "", "condition": row.get("condition") or "",
                     "size": str(row.get("size") or "").replace("x", "×"), "now": _fmt(now),
                     "new": _fmt(new) if new is not None else "",
                     "delta": _signed(delta) if new is not None and abs(delta) > 1e-9 else "",
@@ -189,24 +201,47 @@ class CorrectionWindow:
                               fg_color=self.colors["row"], border_color=self.colors["accent"], text_color=self.colors["fg"], justify="right")
         editor.place(x=x + 4, y=y + 3)
         editor.focus_set()
-        self.editor = editor
         row_id = row["row_id"]
+        self.editor = editor
+        self.editor_var = var
+        self.editor_row_id = row_id
+        self.editor_previous = self.edits.get(row_id)
 
+        # Рішення користувача (2026-09-07): «потрібно ввести і натиснути
+        # ентер - безтолкова дія; не натиснув - не зберігає». Цифра
+        # зберігається з кожною клавішею, а будь-яке закриття редактора
+        # (Enter, Tab, клік по іншій клітинці, «Записать», фільтр) її
+        # лишає. Лише Esc повертає, як було.
         def commit(_event=None):
             if self.editor is not editor:
                 return
-            self.set_edit(row_id, var.get())
             self._close_editor()
             self.render()
 
         def cancel(_event=None):
-            self._close_editor()
+            if self.editor is editor:
+                self._cancel_editor()
+                self.render()
             return "break"
 
         editor.bind("<Return>", commit)
         editor.bind("<Tab>", commit)
         editor.bind("<FocusOut>", commit)
         editor.bind("<Escape>", cancel)
+        editor.bind("<KeyRelease>", lambda _event: self._on_editor_typed())
+
+    def _on_table_scroll(self):
+        # Редактор не їде за прокруткою: перед нею закривається, зберігши
+        # цифру в своєму рядку (2026-09-07).
+        if self.editor is not None:
+            self._close_editor()
+            self.render()
+
+    def _on_editor_typed(self):
+        if self.editor is None:
+            return
+        self.set_edit(self.editor_row_id, self.editor_var.get())
+        self._refresh_button()
 
     def set_edit(self, row_id, text):
         """Порожньо - прибрати правку; число ≥ 0 - запам'ятати."""
@@ -224,13 +259,26 @@ class CorrectionWindow:
         return True
 
     def _close_editor(self):
+        """Закрити редактор, ЗБЕРІГШИ набране."""
         if self.editor is not None:
             editor, self.editor = self.editor, None
+            self.set_edit(self.editor_row_id, self.editor_var.get())
+            editor.destroy()
+
+    def _cancel_editor(self):
+        """Закрити редактор, повернувши значення, яке було до нього."""
+        if self.editor is not None:
+            editor, self.editor = self.editor, None
+            if self.editor_previous is None:
+                self.edits.pop(self.editor_row_id, None)
+            else:
+                self.edits[self.editor_row_id] = self.editor_previous
             editor.destroy()
 
     def _on_escape(self):
         if self.editor is not None:
-            self._close_editor()
+            self._cancel_editor()
+            self.render()
             return
         if self.popup is not None:
             self._close_popup()
@@ -358,6 +406,21 @@ class CorrectionWindow:
         self._close_popup()
         if self.window.winfo_exists():
             self.window.destroy()
+
+
+def _product_label(row, conditions=()):
+    """«Доска AD» → «Доска»; «Доска AD (рейка)» → «Доска (рейка)». Зрізається
+    будь-який відомий стан (AD/KD…), бо продукт стан не носить - він у своїй
+    колонці (рішення користувача 2026-09-07)."""
+    product = str(row.get("product") or "")
+    base = plain_product_name(product) or ""
+    had_mark = base != product
+    known = {str(row.get("condition") or "").strip()} | {str(value).strip() for value in conditions}
+    for condition in sorted((c for c in known if c), key=len, reverse=True):
+        if base.lower().endswith(" " + condition.lower()):
+            base = base[: -len(condition)].rstrip()
+            break
+    return (base + " " + LATH_MARK) if had_mark else base
 
 
 def open_correction_window(owner, attr, parent, load_rows, apply_edits, colors=None):

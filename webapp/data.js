@@ -523,6 +523,14 @@
     rebuild();
     return {
       result: function () {
+        // Вибране у списку, але ще не додане кнопкою, теж рахується
+        // (рішення користувача 2026-09-07).
+        if (select.value !== "__none__") {
+          var pending = values[Number(select.value)];
+          if (pending !== undefined && chosen.indexOf(pending) === -1) {
+            chosen.push(pending);
+          }
+        }
         return chosen.length ? new Set(chosen) : null;
       },
     };

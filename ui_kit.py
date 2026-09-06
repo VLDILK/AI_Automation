@@ -117,7 +117,10 @@ class MultiChoice:
             cross.bind("<Button-1>", lambda event, v=value: self.remove(v))
 
     def result(self):
-        """Множина вибраних або None, коли нічого не додано (= усі)."""
+        """Множина вибраних або None, коли нічого не додано (= усі).
+        Вибране у списку, але ще не додане кнопкою, теж рахується
+        (рішення користувача 2026-09-07: «потрібен додатковий рух - помилка»)."""
+        self.add()
         return set(self.chosen) if self.chosen else None
 
 
@@ -191,7 +194,11 @@ class CanvasTable(tk.Frame):
         self.header.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.body = tk.Canvas(inner, bg=colors["row"], highlightthickness=0, bd=0)
         self.body.grid(row=1, column=0, sticky="nsew")
-        self.scroll = ttk.Scrollbar(inner, orient="vertical", command=self.body.yview)
+        self.scroll = ttk.Scrollbar(inner, orient="vertical", command=self._yview)
+        # Гачок «перед прокруткою» (2026-09-07): вікно корекції закриває
+        # редактор клітинки, інакше поле, покладене на полотно за пікселями,
+        # «їде» на інший рядок разом із прокруткою.
+        self.before_scroll = None
         self.scroll.grid(row=1, column=1, sticky="ns")
         self.body.configure(yscrollcommand=self.scroll.set)
         self.body.bind("<Configure>", lambda event: self._layout())
@@ -202,7 +209,14 @@ class CanvasTable(tk.Frame):
     # Колесо не веде за межі вмісту (2026-09-06: «при прокрутці вгору
     # з'являється порожній простір») - вище першого рядка й нижче
     # останнього не крутиться.
+    def _yview(self, *args):
+        if self.before_scroll is not None:
+            self.before_scroll()
+        return self.body.yview(*args)
+
     def _on_wheel(self, event):
+        if self.before_scroll is not None:
+            self.before_scroll()
         first, last = self.body.yview()
         if event.delta > 0 and first <= 0:
             return "break"
