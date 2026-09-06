@@ -197,7 +197,19 @@ class CanvasTable(tk.Frame):
         self.body.bind("<Configure>", lambda event: self._layout())
         self.header.bind("<Button-1>", self._on_header_click)
         self.body.bind("<Button-1>", self._on_body_click)
-        self.body.bind("<MouseWheel>", lambda event: self.body.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+        self.body.bind("<MouseWheel>", self._on_wheel)
+
+    # Колесо не веде за межі вмісту (2026-09-06: «при прокрутці вгору
+    # з'являється порожній простір») - вище першого рядка й нижче
+    # останнього не крутиться.
+    def _on_wheel(self, event):
+        first, last = self.body.yview()
+        if event.delta > 0 and first <= 0:
+            return "break"
+        if event.delta < 0 and last >= 1:
+            return "break"
+        self.body.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
 
     # --- геометрія ---
     def _layout(self):
@@ -368,4 +380,6 @@ class CanvasTable(tk.Frame):
                 else:
                     self._draw_cell(column, x0, span, top, row.get("values") or {}, row.get("signs") or {}, row.get("badges"))
             top += height
-        body.configure(scrollregion=(0, 0, width, max(top, 1)))
+        # Область прокрутки не менша за видиму частину: коротка таблиця не
+        # «пливе» вниз, лишаючи порожнє місце над першим рядком.
+        body.configure(scrollregion=(0, 0, width, max(top, body.winfo_height(), 1)))

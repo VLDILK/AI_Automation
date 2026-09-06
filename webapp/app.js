@@ -4488,15 +4488,25 @@
       var whatEl = document.createElement("span");
       whatEl.textContent = what + " ";
       line.appendChild(whatEl);
-      var qty = Number(entry.quantity) || 0;
-      var delta = document.createElement("span");
-      delta.className = qty < 0 ? "journal-minus" : "journal-plus";
-      var deltaText = signed(qty) + " шт";
-      if (entry.measure !== null && entry.measure !== undefined && entry.unit) {
-        deltaText += " · " + signed(entry.measure) + " " + entry.unit;
+      // Антисептик (2026-09-06): без «± шт / ± м3», лише дохід; продаж - рух
+      // і сума. quantity === null означає «не рух складу».
+      if (entry.quantity !== null && entry.quantity !== undefined) {
+        var qty = Number(entry.quantity) || 0;
+        var delta = document.createElement("span");
+        delta.className = qty < 0 ? "journal-minus" : "journal-plus";
+        var deltaText = signed(qty) + " шт";
+        if (entry.measure !== null && entry.measure !== undefined && entry.unit) {
+          deltaText += " · " + signed(entry.measure) + " " + entry.unit;
+        }
+        delta.textContent = deltaText;
+        line.appendChild(delta);
       }
-      delta.textContent = deltaText;
-      line.appendChild(delta);
+      if (entry.amount !== null && entry.amount !== undefined && entry.amount !== "") {
+        var money = document.createElement("span");
+        money.className = "journal-money";
+        money.textContent = formatMoney(entry.amount) + " MDL";
+        line.appendChild(money);
+      }
       return line;
     }
     function documentElement(group) {

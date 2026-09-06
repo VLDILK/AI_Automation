@@ -50,13 +50,14 @@ TYPE_COLORS = {
 COLUMNS = (
     {"key": "time", "label": "Время", "width": 122, "weight": 0, "anchor": "w", "muted": True},
     {"key": "type", "label": "Операция", "width": 132, "weight": 0, "anchor": "w", "kind": "badge"},
-    {"key": "document", "label": "№", "width": 46, "weight": 0, "anchor": "e"},
+    {"key": "document", "label": "№", "width": 60, "weight": 0, "anchor": "e"},
     {"key": "who", "label": "Кто", "width": 120, "weight": 2, "anchor": "w"},
     {"key": "product", "label": "Товар", "width": 150, "weight": 3, "anchor": "w", "per_line": True, "prefixed": True},
     {"key": "size", "label": "Размер", "width": 104, "weight": 0, "anchor": "w", "per_line": True},
     {"key": "qty", "label": "± шт", "width": 72, "weight": 0, "anchor": "e", "kind": "signed", "per_line": True},
     {"key": "measure", "label": "± ед.", "width": 96, "weight": 0, "anchor": "e", "kind": "signed", "per_line": True},
     {"key": "balance", "label": "Остаток", "width": 74, "weight": 0, "anchor": "e", "per_line": True},
+    {"key": "amount", "label": "Сумма, MDL", "width": 96, "weight": 0, "anchor": "e"},
     {"key": "reason", "label": "Причина / клиент", "width": 140, "weight": 3, "anchor": "w"},
 )
 DELETE_COLUMN = {"key": "delete", "label": "", "width": 34, "weight": 0, "anchor": "center", "kind": "delete"}
@@ -73,6 +74,12 @@ def type_colors(type_key, dark=False, overrides=None):
     if pair is None:
         return ("#2A2F36", "#E5E7EA") if dark else ("#E4E8EE", "#20242A")
     return pair[1] if dark else pair[0]
+
+
+def _fmt_money(value):
+    if value in (None, ""):
+        return ""
+    return _display_bot_number(round(_number_value(value), 2))
 
 
 def _fmt_signed(value, unit=""):
@@ -518,6 +525,9 @@ class JournalWindow:
     def _render_headings(self):
         for column in COLUMNS:
             key = column["key"]
+            if key == "amount":
+                self.table.markers[key] = ""
+                continue
             marker = " ●" if self._column_active(key) else " ▾"
             if key == "time":
                 marker = (" ↑" if self.column_filters["sort"] == "asc" else " ↓") + marker
@@ -575,7 +585,9 @@ class JournalWindow:
         if entry.get("breed"):
             product += " / " + entry["breed"]
         values = {
-            "time": entry.get("time") or "", "type": entry.get("type_label") or "", "document": number,
+            # Знак «№» у самому рядку, не лише в заголовку (2026-09-06).
+            "time": entry.get("time") or "", "type": entry.get("type_label") or "", "document": ("№" + number) if number else "",
+            "amount": _fmt_money(entry.get("amount")),
             "who": entry.get("who") or "", "product": product, "size": (entry.get("size") or "").replace("x", "×"),
             "qty": _fmt_signed(entry.get("quantity")),
             "measure": _fmt_signed(entry.get("measure"), entry.get("unit") or "") if entry.get("measure") is not None else "",
@@ -652,7 +664,7 @@ class JournalWindow:
 
     def _open_column_filter(self, key, x_root=None, y_root=None):
         self._close_popup()
-        if key == "delete":
+        if key in ("delete", "amount"):
             return
         x = (x_root - 20) if x_root is not None else self.table.winfo_rootx()
         y = self.table.winfo_rooty() + CanvasTable.HEADER_H + 2
@@ -806,12 +818,13 @@ class JournalWindow:
             {"key": "time", "label": "Время"}, {"key": "type", "label": "Операция"}, {"key": "document", "label": "№"},
             {"key": "who", "label": "Кто"}, {"key": "product", "label": "Товар"}, {"key": "size", "label": "Размер"},
             {"key": "qty", "label": "± шт"}, {"key": "measure", "label": "± ед."}, {"key": "balance", "label": "Остаток, шт", "numeric": True},
-            {"key": "reason", "label": "Причина / клиент"},
+            {"key": "amount", "label": "Сумма, MDL", "numeric": True}, {"key": "reason", "label": "Причина / клиент"},
         ]
         rows = []
         for entry_data in entries:
             values = self._row_for(entry_data)["values"]
             row = {key: values.get(key, "") for key in ("time", "type", "document", "who", "product", "size", "qty", "measure", "reason")}
+            row["amount"] = entry_data.get("amount") if entry_data.get("amount") not in (None, "") else ""
             row["balance"] = entry_data.get("balance_after") if entry_data.get("balance_after") not in (None, "") else ""
             rows.append(row)
         period = ""

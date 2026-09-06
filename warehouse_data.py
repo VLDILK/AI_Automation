@@ -2146,6 +2146,9 @@ class ExcelSqliteStore:
         # Адмін-форма (2026-09-06): залишок після руху - щоб журнал показував
         # «остаток 380 → 368» без перерахунку заднім числом.
         self._ensure_column("stock_movements", "balance_after", "REAL")
+        # Сума операції в MDL (2026-09-06): продаж і антисептик у журналі
+        # показують дохід, а не «+м3».
+        self._ensure_column("stock_movements", "amount", "REAL")
         # Шаблони/недавні мега-форми (Задача користувача: "в історії
         # зберігається все... окрім ціни, штук") спершу забули адресу
         # вивантаження - вона теж мала зберігатись разом з клієнтом/оплатою.
@@ -2221,6 +2224,72 @@ class ExcelSqliteStore:
         self._backfill_bot_user_names()
         self._seed_known_personnel()
         self._normalize_existing_stock_once()
+        self._backfill_movement_amounts()
+
+    # Сума для старих рухів (2026-09-06): продаж - із листа ПРОДАЖА за
+    # документом, розміром і кількістю; антисептик - з листа АНТИСЕПТИРОВАНИЕ
+    # за датою й об'ємом (у руху не було номера послуги). Береться лише
+    # однозначний збіг, інакше сума лишається порожньою. Разово.
+    _MOVEMENT_AMOUNTS_KEY = "movement_amounts_v1"
+
+    def _backfill_movement_amounts(self, force=False):
+        if not force and self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (self._MOVEMENT_AMOUNTS_KEY,)).fetchone():
+            return 0
+        updated = 0
+        with self.conn:
+            sales_headers = self.get_headers(SALES_SHEET_NAME)
+            if sales_headers:
+                cols = sales_columns(sales_headers)
+                by_document = {}
+                for _row_id, values in self.fetch_rows(SALES_SHEET_NAME, 1000000, 0):
+                    document = str(row_value(values, cols.get("document")) or "").strip()
+                    if document:
+                        by_document.setdefault(document, []).append(values)
+                rows = self.conn.execute(
+                    "SELECT id, document, thickness, width, length, quantity FROM stock_movements"
+                    " WHERE movement_type = 'sale' AND amount IS NULL AND document IS NOT NULL"
+                ).fetchall()
+                for movement_id, document, thickness, width, length, quantity in rows:
+                    candidates = [
+                        values for values in by_document.get(str(document).strip(), [])
+                        if _same_number(row_value(values, cols.get("thickness")), thickness)
+                        and _same_number(row_value(values, cols.get("width")), width)
+                        and _same_number(row_value(values, cols.get("length")), length)
+                        and _same_number(row_value(values, cols.get("quantity")), quantity)
+                    ]
+                    amounts = {round(_sheet_amount(values, cols), 2) for values in candidates if _sheet_amount(values, cols) is not None}
+                    if len(amounts) == 1:
+                        self.conn.execute("UPDATE stock_movements SET amount = ? WHERE id = ?", (amounts.pop(), movement_id))
+                        updated += 1
+            anti_headers = self.get_headers(ANTISEPTIC_SHEET_NAME)
+            if anti_headers:
+                cols = antiseptic_columns(anti_headers)
+                by_day = {}
+                for _row_id, values in self.fetch_rows(ANTISEPTIC_SHEET_NAME, 1000000, 0):
+                    day = _parse_date_text(str(row_value(values, cols.get("date")) or "")[:10])
+                    if day:
+                        by_day.setdefault(day.isoformat(), []).append(values)
+                rows = self.conn.execute(
+                    "SELECT id, created_at, volume, document FROM stock_movements"
+                    " WHERE movement_type = 'antiseptic' AND amount IS NULL"
+                ).fetchall()
+                for movement_id, created_at, volume, document in rows:
+                    candidates = [
+                        values for values in by_day.get(str(created_at or "")[:10], [])
+                        if _same_number(row_value(values, cols.get("volume")), volume)
+                    ]
+                    amounts = {round(_sheet_amount(values, cols), 2) for values in candidates if _sheet_amount(values, cols) is not None}
+                    if len(amounts) != 1:
+                        continue
+                    numbers = {str(row_value(values, cols.get("service_number")) or "").strip() for values in candidates}
+                    number = numbers.pop() if len(numbers) == 1 else None
+                    self.conn.execute(
+                        "UPDATE stock_movements SET amount = ?, document = COALESCE(NULLIF(document, ''), ?) WHERE id = ?",
+                        (amounts.pop(), number, movement_id),
+                    )
+                    updated += 1
+            self.conn.execute("INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, '1')", (self._MOVEMENT_AMOUNTS_KEY,))
+        return updated
 
     def _ensure_column(self, table_name, column_name, column_sql):
         columns = {
@@ -4505,9 +4574,9 @@ class ExcelSqliteStore:
                 movement_type, source, telegram_user_id, username, full_name,
                 product, breed, condition, thickness, width, length,
                 quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at,
-                document, balance_after
+                document, balance_after, amount
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("movement_type", "income"),
@@ -4531,6 +4600,7 @@ class ExcelSqliteStore:
                 movement.get("created_at", datetime.now().isoformat(timespec="seconds")),
                 movement.get("document"),
                 movement.get("balance_after"),
+                movement.get("amount"),
             ),
         )
         if not was_in_transaction:
@@ -4648,7 +4718,7 @@ class ExcelSqliteStore:
         sql = (
             "SELECT id, movement_type, source, telegram_user_id, username, full_name, product, breed, condition,"
             " thickness, width, length, quantity, volume, area, linear, reason, sheet_row_id, created_at, document,"
-            " balance_after FROM stock_movements" + where_sql
+            " balance_after, amount FROM stock_movements" + where_sql
         )
         direction = "ASC" if str(sort).lower() == "asc" else "DESC"
         sql += " ORDER BY created_at %s, id %s LIMIT ? OFFSET ?" % (direction, direction)
@@ -5755,10 +5825,13 @@ def journal_entries(rows):
             "breed": row.get("breed") or "",
             "condition": row.get("condition") or "",
             "size": size,
-            "quantity": round(quantity, 6),
-            "measure_kind": measure_kind,
-            "measure": round(measure, 6) if measure is not None else None,
-            "unit": ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else "",
+            # Антисептик (2026-09-06): лише дохід, без «± шт / ± м3» - це
+            # послуга, а не рух на складі.
+            "quantity": None if movement_type == "antiseptic" else round(quantity, 6),
+            "measure_kind": None if movement_type == "antiseptic" else measure_kind,
+            "measure": None if movement_type == "antiseptic" or measure is None else round(measure, 6),
+            "unit": "" if movement_type == "antiseptic" else (ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else ""),
+            "amount": _number_value(row.get("amount")) if row.get("amount") not in (None, "") else None,
             "balance_after": row.get("balance_after"),
             "reason": row.get("reason") or "",
         })
@@ -6139,6 +6212,19 @@ def add_to_row_value(row_values, index, amount):
     while len(row_values) <= index:
         row_values.append("")
     row_values[index] = _number_value(row_values[index]) + _number_value(amount)
+
+
+def _sheet_amount(values, columns):
+    """Сума («Сумма» / «Стоимость, MDL») з рядка листа або None."""
+    index = columns.get("total_amount")
+    raw = row_value(values, index) if index is not None else ""
+    return _number_value(raw) if raw not in (None, "") else None
+
+
+def _same_number(left, right):
+    if left in (None, "") or right in (None, ""):
+        return False
+    return abs(_number_value(left) - _number_value(right)) < 1e-6
 
 
 def set_value(row_values, index, value):
@@ -7003,6 +7089,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                         "sheet_row_id": item.get("row_id"),
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "amount": _sheet_amount(sale_values, sales_columns(store.get_headers(SALES_SHEET_NAME))),
                         "balance_after": (_number_value(row_value(row_values, columns["balance_qty"])) if row_values else None),
                     }
                 )
@@ -8350,6 +8437,7 @@ def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
         store.conn.execute("BEGIN IMMEDIATE")
         values = antiseptic_sheet_values(store, payload, now)
         insert_sheet_row(store, ANTISEPTIC_SHEET_NAME, values, now)
+        antiseptic_cols = antiseptic_columns(store.get_headers(ANTISEPTIC_SHEET_NAME))
         user = payload.get("user") or {}
         store.add_stock_movement(
             {
@@ -8360,6 +8448,9 @@ def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
                 "full_name": user.get("full_name"),
                 "product": "Антисептирование",
                 "volume": payload.get("volume"),
+                # Журнал (2026-09-06): антисептик - лише дохід, з номером послуги.
+                "document": (str(row_value(values, antiseptic_cols.get("service_number")) or "").strip() or None),
+                "amount": _sheet_amount(values, antiseptic_cols),
                 "original_text": payload.get("original_text"),
                 "created_at": now,
             }
