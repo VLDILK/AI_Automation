@@ -276,28 +276,18 @@ class JournalWindow:
             button.pack(side="left", padx=(0, 4))
             self.preset_buttons[days] = button
 
-        ops = ctk.CTkFrame(filters, fg_color="transparent")
-        ops.pack(side="left", anchor="n", padx=(18, 0), pady=8)
-        caption(ops, colors, "ОПЕРАЦИЯ").pack(anchor="w")
-        ops_row = ctk.CTkFrame(ops, fg_color="transparent")
-        ops_row.pack(anchor="w", pady=(4, 0))
+        # Rows of operation checkboxes at the top were removed (user, 2026-09-06):
+        # the same filter lives in the "Операция" column header.
         self.type_checkboxes = {}
-        for label, group in JOURNAL_FILTER_GROUPS:
-            var = tk.BooleanVar(value=True)
-            self.type_vars[label] = var
-            _bg, fg = self._type_colors(group[0])
-            box = checkbox(ops_row, colors, label, var, text_color=fg, accent=fg)
-            box.pack(side="left", padx=(0, 10))
-            self.type_checkboxes[label] = box
-        ghost_button(ops_row, colors, "Выбрать все", command=lambda: self._set_all_types(True), small=True, width=96).pack(side="left", padx=(4, 4))
-        ghost_button(ops_row, colors, "Снять все", command=lambda: self._set_all_types(False), small=True, width=84).pack(side="left")
+        for label, _group in JOURNAL_FILTER_GROUPS:
+            self.type_vars[label] = tk.BooleanVar(value=True)
 
         actions = ctk.CTkFrame(filters, fg_color="transparent")
         actions.pack(side="right", anchor="n", padx=(0, 12), pady=8)
         caption(actions, colors, " ").pack(anchor="w")
         actions_row = ctk.CTkFrame(actions, fg_color="transparent")
         actions_row.pack(anchor="e", pady=(2, 0))
-        accent_button(actions_row, colors, "Показать", command=self.refresh, width=110).pack(side="left")
+        accent_button(actions_row, colors, "Обновить", command=self.refresh, width=110).pack(side="left")
         ghost_button(actions_row, colors, "Сбросить фильтры", command=self.reset_filters, width=140).pack(side="left", padx=(6, 0))
 
         columns = list(COLUMNS) + ([DELETE_COLUMN] if source.can_delete else [])
