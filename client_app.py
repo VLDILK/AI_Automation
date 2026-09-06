@@ -1334,13 +1334,14 @@ class ClientApp(ctk.CTk):
             ("journals", "Журналы", self._open_journals_window),
             ("personnel", "Персонал", self._open_personnel_window),
             ("document", "Коррекция остатков", self._open_correction_window),
-            ("refresh", "Обновить эксели", self._on_refresh_excel_clicked),
             ("barchart", "Открыть данные в браузере", self._on_open_data_in_browser_clicked),
         ]
+        # Задача користувача (2026-09-06): кнопки «Обновить эксели» на
+        # головному екрані більше нема - таблицю звіряє й дописує сама
+        # перевірка Excel (колокольчик); self.refresh_excel_button лишається
+        # None, _on_excel_refresh_finished це враховує.
         for index, (icon, label, handler) in enumerate(items):
-            button = self._build_row_button(menu, icon, label, handler, first=(index == 0))
-            if label == "Обновить эксели":
-                self.refresh_excel_button = button
+            self._build_row_button(menu, icon, label, handler, first=(index == 0))
             if index < len(items) - 1:
                 ctk.CTkFrame(menu, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
         ctk.CTkFrame(menu, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
@@ -3329,8 +3330,8 @@ class ClientApp(ctk.CTk):
             recalc_row, text="", variable=self._group_recalc_switch_var, onvalue=1, offvalue=0,
             command=self._on_group_recalc_toggle_clicked, width=36,
         ).pack(side="right", padx=(0, 14))
-        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
-        self._build_row_button(card, "power", self._bot_toggle_label(), self._on_bot_toggle_row_clicked)
+        # Задача користувача (2026-09-06): рядок «Вкл./Выкл. бот» у
+        # налаштуваннях прибрано як зайвий (бот керується з шапки).
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
     # Задача користувача (2026-08-14, скріншот): "під таблицею щоб писало
@@ -3389,15 +3390,8 @@ class ClientApp(ctk.CTk):
             remind_row, text="", variable=self._excel_remind_switch_var, onvalue=1, offvalue=0,
             command=self._on_excel_remind_toggle_clicked, width=36,
         ).pack(side="right", padx=(0, 14))
-        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
-        # Задача користувача (2026-08-15): "додай туди кнопку оновити
-        # екселі" - той самий self._on_refresh_excel_clicked, що й у
-        # головному меню; self.refresh_excel_button і далі стежить лише
-        # за кнопкою з головного меню (текст "Обновление..."/блокування)
-        # - тут окремого відстеження нема, але спільний прапорець
-        # _excel_refresh_in_progress все одно захищає від подвійного
-        # запуску незалежно від того, яку з двох кнопок натиснули.
-        self._build_row_button(card, "refresh", "Обновить эксели", self._on_refresh_excel_clicked)
+        # Задача користувача (2026-09-06): «Обновить эксели» з налаштувань
+        # прибрано - цю роботу виконує перевірка Excel сама.
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
 
@@ -3839,7 +3833,8 @@ class ClientApp(ctk.CTk):
     def _journal_window_colors(self):
         return {
             "bg": self._tk_color(COLOR_BG), "fg": self._tk_color(COLOR_TEXT), "muted": self._tk_color(COLOR_TEXT_MUTED),
-            "row": self._tk_color(COLOR_ROW), "line": self._tk_color(COLOR_HOVER),
+            "row": self._tk_color(COLOR_ROW), "zebra": self._tk_color(COLOR_CARD), "head": self._tk_color(COLOR_CARD),
+            "line": self._tk_color(COLOR_DIVIDER), "hover": self._tk_color(COLOR_HOVER), "dark": bool(self._dark_mode),
         }
 
     def _format_log_time(self, created_at):

@@ -9459,6 +9459,7 @@ class ExcelViewerApp:
             "bg": theme["bg"], "fg": theme["fg"], "muted": theme["muted_fg"], "row": theme["panel_bg"],
             "line": theme["border"],
         }
+        colors.update({"zebra": theme["bg"], "head": theme["bg"], "hover": theme["select_bg"], "dark": bool(self._dark_mode)})
         open_journal_window(
             self, "operations_journal_window", self.root,
             RemoteJournalSource(remote_control_client, self._run_on_main_thread, actor="домашняя программа"),
