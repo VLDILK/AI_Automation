@@ -4215,6 +4215,7 @@
       chip.addEventListener("click", function () {
         chipState[pair[0]] = !chipState[pair[0]];
         chip.classList.toggle("on", chipState[pair[0]]);
+        loadJournal(true);
       });
       chipButtons[pair[0]] = chip;
       chipsRow.appendChild(chip);
@@ -4229,12 +4230,12 @@
     allChip.type = "button";
     allChip.className = "journal-mini";
     allChip.textContent = "Все";
-    allChip.addEventListener("click", function () { setAllChips(true); });
+    allChip.addEventListener("click", function () { setAllChips(true); loadJournal(true); });
     var noneChip = document.createElement("button");
     noneChip.type = "button";
     noneChip.className = "journal-mini";
     noneChip.textContent = "Ничего";
-    noneChip.addEventListener("click", function () { setAllChips(false); });
+    noneChip.addEventListener("click", function () { setAllChips(false); loadJournal(true); });
     chipsRow.appendChild(allChip);
     chipsRow.appendChild(noneChip);
     function baseType(type) {
@@ -4248,35 +4249,68 @@
       }
       return labels[type] || type;
     }
+    // Рішення користувача (2026-09-06, живий тест): замість списку
+    // продуктів - період «с» і «до» з вибором дати, завжди видно; швидкі
+    // періоди лишаються і заповнюють дати; усе застосовується одразу.
     var periodSelect = makeSelect([["all", "За всё время"], ["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["custom", "Свой период"]]);
-    var productOptions = [["", "Все продукты"]];
-    (ctx.products || []).forEach(function (product) {
-      productOptions.push([product, product]);
-    });
-    var productSelect = makeSelect(productOptions);
+    var dateRow = document.createElement("div");
+    dateRow.className = "journal-date-row";
     var dateFrom = document.createElement("input");
     dateFrom.type = "date";
     dateFrom.className = "journal-date";
-    dateFrom.style.display = "none";
     var dateTo = document.createElement("input");
     dateTo.type = "date";
     dateTo.className = "journal-date";
-    dateTo.style.display = "none";
+    var fromLabel = document.createElement("label");
+    fromLabel.textContent = "с";
+    var toLabel = document.createElement("label");
+    toLabel.textContent = "до";
+    [fromLabel, dateFrom, toLabel, dateTo].forEach(function (el) {
+      dateRow.appendChild(el);
+    });
     var searchInput = document.createElement("input");
     searchInput.type = "text";
     searchInput.className = "journal-search";
     searchInput.placeholder = "Размер, порода, № документа";
-    var applyButton = document.createElement("button");
-    applyButton.type = "button";
-    applyButton.className = "add-position-button journal-apply";
-    applyButton.textContent = "Показать";
-    [chipsRow, periodSelect, productSelect, dateFrom, dateTo, searchInput, applyButton].forEach(function (el) {
+    [chipsRow, periodSelect, dateRow, searchInput].forEach(function (el) {
       filtersBar.appendChild(el);
     });
+    function applyPreset() {
+      var today = new Date();
+      var value = periodSelect.value;
+      if (value === "today") {
+        dateFrom.value = isoDate(today);
+        dateTo.value = isoDate(today);
+      } else if (value === "week") {
+        dateFrom.value = isoDate(new Date(today.getTime() - 6 * 86400000));
+        dateTo.value = isoDate(today);
+      } else if (value === "month") {
+        dateFrom.value = isoDate(new Date(today.getTime() - 29 * 86400000));
+        dateTo.value = isoDate(today);
+      } else if (value === "all") {
+        dateFrom.value = "";
+        dateTo.value = "";
+      }
+    }
     periodSelect.addEventListener("change", function () {
-      var custom = periodSelect.value === "custom";
-      dateFrom.style.display = custom ? "" : "none";
-      dateTo.style.display = custom ? "" : "none";
+      applyPreset();
+      loadJournal(true);
+    });
+    [dateFrom, dateTo].forEach(function (input) {
+      input.addEventListener("change", function () {
+        periodSelect.value = "custom";
+        loadJournal(true);
+      });
+    });
+    var searchTimer = null;
+    searchInput.addEventListener("input", function () {
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+      }
+      searchTimer = setTimeout(function () {
+        searchTimer = null;
+        loadJournal(true);
+      }, 400);
     });
     var journalList = document.createElement("div");
     journalList.className = "journal-list";
@@ -4310,25 +4344,11 @@
       }
       var filters = {
         types: allOn ? [] : (chosenTypes.length ? chosenTypes : ["__none__"]),
-        product: productSelect.value || "",
+        product: "",
         search: searchInput.value.trim(),
+        date_from: dateFrom.value || "",
+        date_to: dateTo.value || "",
       };
-      var today = new Date();
-      if (periodSelect.value === "today") {
-        filters.date_from = isoDate(today);
-        filters.date_to = isoDate(today);
-      } else if (periodSelect.value === "week") {
-        var week = new Date(today.getTime() - 6 * 86400000);
-        filters.date_from = isoDate(week);
-        filters.date_to = isoDate(today);
-      } else if (periodSelect.value === "month") {
-        var month = new Date(today.getTime() - 29 * 86400000);
-        filters.date_from = isoDate(month);
-        filters.date_to = isoDate(today);
-      } else if (periodSelect.value === "custom") {
-        filters.date_from = dateFrom.value || "";
-        filters.date_to = dateTo.value || "";
-      }
       return filters;
     }
     function filtersAreDefault(filters) {
@@ -4420,7 +4440,9 @@
       var current = null;
       var currentKey = null;
       entries.forEach(function (entry) {
-        var key = (entry.document || ("#" + entry.id)) + "|" + baseType(entry.type);
+        // Старі записи без номера документа (один прихід на кілька позицій)
+        // тримаються разом за типом, часом і людиною.
+        var key = (entry.document || ("~" + entry.time + "|" + (entry.who || ""))) + "|" + baseType(entry.type);
         if (current && key === currentKey) {
           current.push(entry);
           return;
@@ -4480,9 +4502,6 @@
           moreButton.disabled = false;
         });
     }
-    applyButton.addEventListener("click", function () {
-      loadJournal(true);
-    });
     moreButton.addEventListener("click", function () {
       loadJournal(false);
     });

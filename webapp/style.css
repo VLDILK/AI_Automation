@@ -998,6 +998,24 @@ html, body {
   flex: 1 1 100%;
 }
 
+.journal-date-row {
+  flex: 1 1 100%;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.journal-date-row label {
+  font-size: 13px;
+  color: var(--tg-hint);
+  flex: 0 0 auto;
+}
+
+.journal-filters .journal-date-row .journal-date {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .journal-filters .journal-apply {
   flex: 1 1 100%;
   margin: 0;
