@@ -787,8 +787,8 @@
   // лише одне з двох). Для решти полів - просто саме значення input/select.
   // Рішення користувача (2026-09-06): довжина «3», «6», «4» - це метри,
   // переписується на 3000/6000/4000. Поріг той самий, що й на сервері
-  // (utils.LENGTH_METERS_MAX): коротшої за 100 мм дошки не буває.
-  var LENGTH_METERS_MAX = 100;
+  // (utils.LENGTH_METERS_MAX = 1000): коротшої за 1000 мм у продажу не буває.
+  var LENGTH_METERS_MAX = 1000;
   function normalizeLengthMm(value) {
     var text = String(value === undefined || value === null ? "" : value).trim().replace(",", ".");
     if (text === "") {
