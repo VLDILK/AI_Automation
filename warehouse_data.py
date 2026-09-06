@@ -6214,6 +6214,37 @@ def add_to_row_value(row_values, index, amount):
     row_values[index] = _number_value(row_values[index]) + _number_value(amount)
 
 
+def find_stock_row_id(store, position, item):
+    """Рядок СКЛАД за ознаками: продукт (без стану й позначки рейки), порода,
+    стан, розмір. Потрібен, коли номер рядка застарів після перечитування
+    Excel (кожен імпорт створює рядки заново)."""
+    _headers, columns, rows = warehouse_rows(store)
+    wanted_products = set()
+    for candidate in (position.get("product"), sheet_product_name(position)):
+        plain = _normalize_phrase(plain_product_name(candidate or "") or "")
+        if plain:
+            wanted_products.add(plain)
+    condition = _normalize_phrase(position.get("condition") or "")
+    if condition:
+        wanted_products |= {p[: -len(condition)].strip() for p in list(wanted_products) if p.endswith(" " + condition)}
+    wanted_breed = _normalize_phrase(position.get("breed") or "")
+    dims = [_number_value(item.get(key)) for key in ("thickness", "width", "length")]
+    for row_id, row in rows:
+        product = _normalize_phrase(plain_product_name(row_value(row, columns.get("product")) or "") or "")
+        row_condition = _normalize_phrase(row_value(row, columns.get("condition")) or "")
+        if condition and product.endswith(" " + condition):
+            product = product[: -len(condition)].strip()
+        if product not in wanted_products:
+            continue
+        if wanted_breed and _normalize_phrase(row_value(row, columns.get("breed")) or "") != wanted_breed:
+            continue
+        if condition and row_condition and row_condition != condition:
+            continue
+        if all(abs(_number_value(row_value(row, columns.get(key))) - value) < 1e-6 for key, value in zip(("thickness", "width", "length"), dims)):
+            return row_id
+    return None
+
+
 def _sheet_amount(values, columns):
     """Сума («Сумма» / «Стоимость, MDL») з рядка листа або None."""
     index = columns.get("total_amount")
@@ -8299,6 +8330,13 @@ def apply_correction_operation(store, payload, sync_mode, dirty_notifier=None):
         for item in position.get("rows") or []:
             row_id = item.get("row_id")
             row_values = store.get_row(row_id) if row_id is not None else None
+            if not row_values:
+                # Номер рядка міг застаріти (перечитування Excel створює рядки
+                # заново): шукаємо за ознаками (2026-09-07).
+                row_id = find_stock_row_id(store, position_payload, item)
+                row_values = store.get_row(row_id) if row_id is not None else None
+                if row_values:
+                    item = {**item, "row_id": row_id}
             if not row_values:
                 return {
                     "ok": False,

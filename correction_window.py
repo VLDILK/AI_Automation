@@ -380,8 +380,42 @@ class CorrectionWindow:
             self.popup = None
 
     # ---------------- запис ----------------
+    @staticmethod
+    def _identity(row):
+        return (str(row.get("product") or "").strip().lower(), str(row.get("breed") or "").strip().lower(),
+                str(row.get("condition") or "").strip().lower(), str(row.get("size") or "").replace("×", "x").strip().lower())
+
+    def _refresh_row_ids(self):
+        """Перед записом: номери рядків складу могли змінитись (перечитування
+        Excel створює рядки заново) - переносимо правки на свіжі номери за
+        ознаками рядка. Повертає список правок, чиї рядки зникли."""
+        fresh = list(self.load_rows())
+        conditions = {str(row.get("condition") or "").strip() for row in fresh} - {""}
+        for row in fresh:
+            row["product_label"] = _product_label(row, conditions)
+        by_identity = {self._identity(row): row["row_id"] for row in fresh}
+        edits = {}
+        lost = []
+        for old_id, value in self.edits.items():
+            old_row = self.rows_by_id.get(old_id)
+            new_id = by_identity.get(self._identity(old_row)) if old_row else None
+            if new_id is None:
+                lost.append(old_row or {"row_id": old_id})
+            else:
+                edits[new_id] = value
+        self.edits = edits
+        self.all_rows = fresh
+        self.rows_by_id = {row["row_id"]: row for row in fresh}
+        return lost
+
     def write(self):
         self._close_editor()
+        lost = self._refresh_row_ids()
+        self.render()
+        if lost:
+            lines = ["%s %s %s" % (row.get("product_label") or row.get("product") or "", row.get("breed") or "", str(row.get("size") or "").replace("x", "×")) for row in lost]
+            messagebox.showerror("Коррекция остатков", "Эти позиции исчезли со склада после обновления таблицы:\n" + "\n".join(lines), parent=self.window)
+            return
         changed = self.changed()
         if not changed:
             return
