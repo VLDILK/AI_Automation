@@ -154,25 +154,45 @@ class WriteoffDialogMixin:
     # Мірне повторення _income_preview (кожен рядок за своїм виміром) -
     # _recognized_data_lines НЕ підходить тут: вона будує ПРОМІЖНИЙ
     # чек-лист-текст (без кількості/виміру за рядком), не фінальне прев'ю.
-    def _writeoff_preview(self, payload):
-        lines = [
-            "Списание:",
-            f"Товар: {display_product_name(payload)}",
-            f"Порода: {payload.get('breed')}",
-            "",
-        ]
-        for index, item in enumerate(payload["rows"], start=1):
-            measure_key = self._row_measure_kind(payload, item)
+    def _writeoff_row_lines(self, position, indent="", numbered=True):
+        lines = []
+        for index, item in enumerate(position.get("rows") or [], start=1):
+            measure_key = self._row_measure_kind(position, item)
             if measure_key is None:
-                lines.append(f"{index}. {income_item_size(item)} — {_display_bot_number(item['quantity'])} шт")
+                lines.append(f"{indent}{(str(index) + '. ') if numbered else ''}{income_item_size(item)} — {_display_bot_number(item['quantity'])} шт")
                 continue
             measure_value = item.get(measure_key)
             measure_unit = self._MEASURE_KIND_UNIT[measure_key]
             lines.append(
-                f"{index}. {income_item_size(item)} — "
+                f"{indent}{(str(index) + '. ') if numbered else ''}{income_item_size(item)} — "
                 f"{_display_bot_number(item['quantity'])} шт — "
                 f"{_display_bot_number(measure_value)} {measure_unit}"
             )
+        return lines
+
+    def _writeoff_preview(self, payload):
+        completed = payload.get("completed_positions") or []
+        if completed:
+            # Кілька позицій з форми (2026-09-06): нумеровані позиції, як у
+            # підтвердженні продажу/приходу.
+            positions = list(completed) + [{
+                "product": payload.get("product"), "condition": payload.get("condition"),
+                "breed": payload.get("breed"), "rows": payload.get("rows") or [],
+            }]
+            lines = ["Списание:", ""]
+            for number, position in enumerate(positions, start=1):
+                lines.append(f"{number}. {display_product_name(position)} / {position.get('breed')}")
+                lines.extend(self._writeoff_row_lines(position, indent="   ", numbered=False))
+                lines.append("")
+            lines.pop()
+        else:
+            lines = [
+                "Списание:",
+                f"Товар: {display_product_name(payload)}",
+                f"Порода: {payload.get('breed')}",
+                "",
+            ]
+            lines.extend(self._writeoff_row_lines(payload))
         if payload.get("comment"):
             lines.append("")
             lines.append(f"Причина: {payload['comment']}")

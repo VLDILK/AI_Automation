@@ -6723,195 +6723,193 @@ def writeoff_sheet_values(store, payload, item, now, document_number=None):
     return values
 
 
+def _writeoff_positions(payload):
+    """Позиції списання: completed_positions (кілька позицій з форми,
+    2026-09-06) + поточна. Кожна несе product/condition/breed/rows."""
+    positions = list(payload.get("completed_positions") or [])
+    positions.append({
+        "product": payload.get("product"),
+        "condition": payload.get("condition"),
+        "breed": payload.get("breed"),
+        "rows": payload.get("rows") or [],
+    })
+    return positions
+
+
 def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
     headers, columns, _ = warehouse_rows(store)
-    for item in payload["rows"]:
-        if _number_value(item.get("quantity")) <= 0:
-            return {
-                "ok": False,
-                "message": "Не удалось записать списание: количество не может быть отрицательным или равным нулю.",
-            }
-        # Той самий ОСБ-виняток, що й у apply_sale_operation/apply_income_
-        # operation: вимір перевіряємо лише коли він РЕАЛЬНО є в цієї
-        # позиції (item_measure_kind) - для ОСБ (кількість без фізичного
-        # виміру) 0 у "volume" - коректний, очікуваний стан, не помилка.
-        measure_kind = item_measure_kind(item)
-        if measure_kind is not None and _number_value(item.get(measure_kind)) <= 0:
-            return {
-                "ok": False,
-                "message": (
-                    "Не удалось записать списание: объём/площадь/погонные метры "
-                    "не могут быть отрицательными или равными нулю."
-                ),
-            }
-
-    now = datetime.now().isoformat(timespec="seconds")
-    updated = 0
-    with store.conn:
-        # Той самий TOCTOU-фікс (BEGIN IMMEDIATE), що й у apply_sale_
-        # operation/apply_income_operation — читання залишку й перевірка
-        # "чи вистачає" мають бути в одній нероздільній транзакції з
-        # фактичним записом.
-        store.conn.execute("BEGIN IMMEDIATE")
-        operation_id = resolve_operation_for_payload(store, "start_writeoff", "writeoff", payload)
-
-        row_values_by_row_id = {}
-        for item in payload["rows"]:
-            row_id = item.get("row_id")
-            if row_id is None:
-                continue
-            row_values = row_values_by_row_id.get(row_id)
-            if row_values is None:
-                row_values = store.get_row(row_id)
-                if not row_values:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: позиция больше не найдена на складе.\n"
-                            f"Позиция: {income_item_size(item)}"
-                        ),
-                    }
-                row_values_by_row_id[row_id] = row_values
-
-            is_area = item.get("area") is not None
-            is_linear = item.get("linear") is not None
-            balance_qty = _number_value(row_value(row_values, columns["balance_qty"]))
-            if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
+    # Кілька позицій з форми (2026-09-06): кожна позиція - свій продукт/
+    # порода/стан; усі перевірки до першого запису, запис - однією
+    # транзакцією й одним документом «Списание №N».
+    positions = [{**payload, **position} for position in _writeoff_positions(payload)]
+    for position_payload in positions:
+        for item in position_payload["rows"]:
+            if _number_value(item.get("quantity")) <= 0:
+                return {
+                    "ok": False,
+                    "message": "Не удалось записать списание: количество не может быть отрицательным или равным нулю.",
+                }
+            measure_kind = item_measure_kind(item)
+            if measure_kind is not None and _number_value(item.get(measure_kind)) <= 0:
                 return {
                     "ok": False,
                     "message": (
-                        "Не удалось записать списание: на складе уже недостаточно штук.\n"
-                        f"Доступно: {_display_bot_number(balance_qty)} шт."
+                        "Не удалось записать списание: объём/площадь/погонные метры "
+                        "не могут быть отрицательными или равными нулю."
                     ),
                 }
-            if is_area:
-                balance_area = _number_value(row_value(row_values, columns.get("balance_area")))
-                if _number_value(item.get("area")) > balance_area + INCOME_VOLUME_TOLERANCE:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: на складе уже недостаточно площади.\n"
-                            f"Доступно: {_display_bot_number(balance_area)} м2."
-                        ),
-                    }
-            elif is_linear:
-                balance_linear = _number_value(row_value(row_values, columns.get("balance_linear")))
-                if _number_value(item.get("linear")) > balance_linear + INCOME_VOLUME_TOLERANCE:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: на складе уже недостаточно погонных метров.\n"
-                            f"Доступно: {_display_bot_number(balance_linear)} мп."
-                        ),
-                    }
-            elif item.get("volume") is not None:
-                balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
-                if _number_value(item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: на складе уже недостаточно объема.\n"
-                            f"Доступно: {_display_bot_number(balance_volume)} м3."
-                        ),
-                    }
 
-            if operation_id is not None:
-                execute_operation_write(store, operation_id, item, row_values, columns)
-            else:
-                add_to_row_value(row_values, columns["balance_qty"], -_number_value(item["quantity"]))
+    now = datetime.now().isoformat(timespec="seconds")
+    updated = 0
+    row_values_by_row_id = {}
+    with store.conn:
+        store.conn.execute("BEGIN IMMEDIATE")
+        for position_payload in positions:
+            operation_id = resolve_operation_for_payload(store, "start_writeoff", "writeoff", position_payload)
+            for item in position_payload["rows"]:
+                row_id = item.get("row_id")
+                if row_id is None:
+                    continue
+                row_values = row_values_by_row_id.get(row_id)
+                if row_values is None:
+                    row_values = store.get_row(row_id)
+                    if not row_values:
+                        return {
+                            "ok": False,
+                            "message": (
+                                "Не удалось записать списание: позиция больше не найдена на складе.\n"
+                                f"Позиция: {income_item_size(item)}"
+                            ),
+                        }
+                    row_values_by_row_id[row_id] = row_values
+
+                is_area = item.get("area") is not None
+                is_linear = item.get("linear") is not None
+                balance_qty = _number_value(row_value(row_values, columns["balance_qty"]))
+                if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
+                    return {
+                        "ok": False,
+                        "message": (
+                            "Не удалось записать списание: на складе уже недостаточно штук.\n"
+                            f"Доступно: {_display_bot_number(balance_qty)} шт."
+                        ),
+                    }
                 if is_area:
-                    add_to_row_value(row_values, columns.get("balance_area"), -_number_value(item["area"]))
+                    balance_area = _number_value(row_value(row_values, columns.get("balance_area")))
+                    if _number_value(item.get("area")) > balance_area + INCOME_VOLUME_TOLERANCE:
+                        return {
+                            "ok": False,
+                            "message": (
+                                "Не удалось записать списание: на складе уже недостаточно площади.\n"
+                                f"Доступно: {_display_bot_number(balance_area)} м2."
+                            ),
+                        }
                 elif is_linear:
-                    add_to_row_value(row_values, columns.get("balance_linear"), -_number_value(item["linear"]))
+                    balance_linear = _number_value(row_value(row_values, columns.get("balance_linear")))
+                    if _number_value(item.get("linear")) > balance_linear + INCOME_VOLUME_TOLERANCE:
+                        return {
+                            "ok": False,
+                            "message": (
+                                "Не удалось записать списание: на складе уже недостаточно погонных метров.\n"
+                                f"Доступно: {_display_bot_number(balance_linear)} мп."
+                            ),
+                        }
                 elif item.get("volume") is not None:
-                    add_to_row_value(row_values, columns["balance_volume"], -_number_value(item["volume"]))
+                    balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
+                    if _number_value(item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
+                        return {
+                            "ok": False,
+                            "message": (
+                                "Не удалось записать списание: на складе уже недостаточно объема.\n"
+                                f"Доступно: {_display_bot_number(balance_volume)} м3."
+                            ),
+                        }
 
-            # Задача користувача: "додамо колонку причина списания в
-            # складі... там буде відображатись весь текст причини" — пише
-            # ПОВЕРХ (не accumulate), бо СКЛАД — агрегований рядок за
-            # SKU, а не журнал операцій; це і є "поточна причина останнього
-            # списання цього рядка", той самий принцип, що вже діє для
-            # balance_qty (завжди поточне значення, не історія). set_value
-            # безпечно ігнорує відсутню колонку (columns.get(...) is None)
-            # — старі встановлення без цієї колонки не ламаються.
-            if payload.get("comment"):
-                set_value(row_values, columns.get("writeoff_reason"), payload["comment"])
+                if operation_id is not None:
+                    execute_operation_write(store, operation_id, item, row_values, columns)
+                else:
+                    add_to_row_value(row_values, columns["balance_qty"], -_number_value(item["quantity"]))
+                    if is_area:
+                        add_to_row_value(row_values, columns.get("balance_area"), -_number_value(item["area"]))
+                    elif is_linear:
+                        add_to_row_value(row_values, columns.get("balance_linear"), -_number_value(item["linear"]))
+                    elif item.get("volume") is not None:
+                        add_to_row_value(row_values, columns["balance_volume"], -_number_value(item["volume"]))
+
+                if position_payload.get("comment"):
+                    set_value(row_values, columns.get("writeoff_reason"), position_payload["comment"])
 
         for row_id, row_values in row_values_by_row_id.items():
             store.update_row(row_id, row_values)
 
-        # Той самий персистентний _next_document_number, що вже мають
-        # продаж/антисептирование - один номер на ВЕСЬ виклик (усі позиції
-        # цього списання), не по одному на кожен рядок.
         existing_writeoff_count = len(store.fetch_rows(WRITEOFF_SHEET_NAME, 100000, 0))
         writeoff_document_number = (
             f"Списание №{_next_document_number(store, WRITEOFF_SHEET_NAME, existing_writeoff_count)}"
         )
-        for item in payload["rows"]:
-            writeoff_sheet_row = writeoff_sheet_values(store, payload, item, now, writeoff_document_number)
-            insert_sheet_row(store, WRITEOFF_SHEET_NAME, writeoff_sheet_row, now)
-
         user = payload.get("user") or {}
-        for item in payload["rows"]:
-            store.add_stock_movement(
-                {
-                    "movement_type": "writeoff",
-                    "source": "telegram",
-                    "telegram_user_id": user.get("id"),
-                    "username": user.get("username"),
-                    "full_name": user.get("full_name"),
-                    "product": sheet_product_name(payload),
-                    "breed": payload.get("breed"),
-                    "condition": payload.get("condition"),
-                    "thickness": item.get("thickness"),
-                    "width": item.get("width"),
-                    "length": item.get("length"),
-                    "quantity": item.get("quantity"),
-                    "volume": item.get("volume"),
-                    "area": item.get("area"),
-                    "linear": item.get("linear"),
-                    "reason": payload.get("comment"),
-                    "sheet_row_id": item.get("row_id"),
-                    "original_text": payload.get("original_text"),
-                    "created_at": now,
-                }
-            )
-            updated += 1
+        for position_payload in positions:
+            for item in position_payload["rows"]:
+                writeoff_sheet_row = writeoff_sheet_values(store, position_payload, item, now, writeoff_document_number)
+                insert_sheet_row(store, WRITEOFF_SHEET_NAME, writeoff_sheet_row, now)
+            for item in position_payload["rows"]:
+                store.add_stock_movement(
+                    {
+                        "movement_type": "writeoff",
+                        "source": "telegram",
+                        "telegram_user_id": user.get("id"),
+                        "username": user.get("username"),
+                        "full_name": user.get("full_name"),
+                        "product": sheet_product_name(position_payload),
+                        "breed": position_payload.get("breed"),
+                        "condition": position_payload.get("condition"),
+                        "thickness": item.get("thickness"),
+                        "width": item.get("width"),
+                        "length": item.get("length"),
+                        "quantity": item.get("quantity"),
+                        "volume": item.get("volume"),
+                        "area": item.get("area"),
+                        "linear": item.get("linear"),
+                        "reason": position_payload.get("comment"),
+                        "sheet_row_id": item.get("row_id"),
+                        "original_text": payload.get("original_text"),
+                        "created_at": now,
+                    }
+                )
+                updated += 1
 
     excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", WRITEOFF_SHEET_NAME], dirty_notifier)
 
-    # Задача користувача (2026-08-17): "Состояние має показуватись скрізь" -
-    # той самий заголовок "Позиция: Продукт / Порода / Состояние", що вже
-    # має apply_sale_operation/apply_income_operation. На відміну від них,
-    # списання завжди має РІВНО один product/breed/condition на весь виклик
-    # (payload-рівень, не по позиціях/рядках) - групувати нема чого,
-    # заголовок друкується один раз.
     lines = ["Списание записано:"]
-    header_parts = [
-        _esc(part) for part in (display_product_name(payload), payload.get("breed"), payload.get("condition")) if part
-    ]
-    if header_parts:
-        lines.append(f"Позиция: {' / '.join(header_parts)}")
-    for index, item in enumerate(payload["rows"], start=1):
-        measure_kind = item_measure_kind(item)
-        row_values = row_values_by_row_id.get(item.get("row_id"))
-        remaining_suffix = (
-            f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
-            if row_values is not None
-            else ""
-        )
-        if measure_kind is None:
-            lines.append(
-                f"{index}. {_esc(income_item_size(item))}: -{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+    index = 0
+    for position_payload in positions:
+        header_parts = [
+            _esc(part)
+            for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition"))
+            if part
+        ]
+        if header_parts:
+            lines.append(f"Позиция: {' / '.join(header_parts)}")
+        for item in position_payload["rows"]:
+            index += 1
+            measure_kind = item_measure_kind(item)
+            row_values = row_values_by_row_id.get(item.get("row_id"))
+            remaining_suffix = (
+                f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
+                if row_values is not None
+                else ""
             )
-            continue
-        measure_value = item.get(measure_kind)
-        measure_unit = ITEM_MEASURE_UNIT[measure_kind]
-        lines.append(
-            f"{index}. {_esc(income_item_size(item))}: -"
-            f"{_display_bot_number(item['quantity'])} шт, -"
-            f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
-        )
+            if measure_kind is None:
+                lines.append(
+                    f"{index}. {_esc(income_item_size(item))}: -{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+                )
+                continue
+            measure_value = item.get(measure_kind)
+            measure_unit = ITEM_MEASURE_UNIT[measure_kind]
+            lines.append(
+                f"{index}. {_esc(income_item_size(item))}: -"
+                f"{_display_bot_number(item['quantity'])} шт, -"
+                f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
+            )
     lines.append(f"Обновлено позиций: {updated}")
     if payload.get("comment"):
         lines.append(f"Причина: {_esc(payload['comment'])}")
@@ -6921,21 +6919,6 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
         lines.append("")
         lines.append(_esc(excel_warning))
     return {"ok": True, "message": "\n".join(lines)}
-
-
-# =============================================================================
-# Услуга антисептирования — окремий лист (АНТИСЕПТИРОВАНИЕ), НЕ рядок у
-# ПРОДАЖА МАТЕРИАЛА: інша структура колонок (Тип расчета/Статус оплаты/
-# Приход наличных/Приход по банку/Отражение в расчетах — ведеться окремий
-# готівка/банк розподіл, якого нема у звичайній продажі), і склад НЕ
-# списується (доска клієнта, не наша). Зверху листа (перед реальними
-# заголовками колонок) є інформаційний блок зведення (об'єм/вартість/
-# кількість послуг, скільки готівкою/по банку) — НЕ формули, статичні
-# значення в шаблоні, тому sync_antiseptic_to_excel перераховує їх сама при
-# кожній синхронізації (на відміну від sync_sheets_to_excel, яка для
-# СКЛАД/ПРОДАЖА просто дописує рядки без жодного зведення зверху).
-# =============================================================================
-
 
 def antiseptic_columns(headers):
     names = {

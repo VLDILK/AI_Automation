@@ -2574,6 +2574,22 @@
         setFormCollapsed(true);
         return;
       }
+      if (categoryKind(key) === "writeoff") {
+        var writeoffStockCheck = stockSufficiencyCheck(key, result.values);
+        if (!writeoffStockCheck.ok) {
+          errorEl.textContent = "На складе только " + writeoffStockCheck.available + " шт. Уменьшите количество.";
+          if (tg && tg.HapticFeedback) {
+            tg.HapticFeedback.notificationOccurred("error");
+          }
+          return;
+        }
+        var writeoffPosition = buildPosition(key, result.values);
+        cart.push({ position: writeoffPosition, summary: positionSummaryText(key, result.values) });
+        clearCategoryInputs(key);
+        renderCart();
+        setFormCollapsed(true);
+        return;
+      }
       var stockCheck = stockSufficiencyCheck(key, result.values);
       if (!stockCheck.ok) {
         errorEl.textContent = "На складе только " + stockCheck.available + " шт. Уменьшите количество.";
@@ -2614,13 +2630,12 @@
     // той самий кошик, що вже має продаж, тепер і для приходу.
     function updateAddPositionVisibility() {
       var currentKind = categoryKind(categorySelect.value);
+      // Рішення користувача (2026-09-06): та сама кнопка і хід для продажу,
+      // приходу, списання й антисептика.
       addPositionButton.style.display =
-        (currentKind === "sale" || currentKind === "antiseptic" || currentKind === "income") ? "" : "none";
-      addPositionButton.textContent = currentKind === "antiseptic"
-        ? "Продолжить"
-        : currentKind === "income"
-        ? "Продолжить приход"
-        : "Сохранить и продолжить";
+        (currentKind === "sale" || currentKind === "antiseptic" || currentKind === "income" || currentKind === "writeoff")
+          ? "" : "none";
+      addPositionButton.textContent = "Сохранить и продолжить";
     }
     var showCategoryOriginal = showCategory;
     showCategory = function (key) {
@@ -2800,7 +2815,7 @@
         });
         if (!antisepticCurrentResult.ok) {
           errorEl.textContent = antisepticPositions.length
-            ? 'Заполните все поля текущей позиции или нажмите "Продолжить".'
+            ? 'Заполните все поля текущей позиции или нажмите "Сохранить и продолжить".'
             : "Заполните все отмеченные поля.";
           if (tg && tg.HapticFeedback) {
             tg.HapticFeedback.notificationOccurred("error");
@@ -2861,7 +2876,48 @@
       // позицій, які варто накопичувати (одна операція = один розмір/
       // порода за раз). Прихід (2026-08-14) переїхав у власну гілку нижче -
       // тепер теж підтримує кошик, "так же як це реалізовано в реалізації".
-      if (kind === "service" || kind === "writeoff") {
+      if (kind === "writeoff") {
+        var currentWriteoffResult = collectCategoryFields(key);
+        var writeoffPositions = cart.map(function (item) {
+          return item.position;
+        });
+        if (!currentWriteoffResult.ok) {
+          errorEl.textContent = 'Заполните все поля текущей позиции или нажмите "Сохранить и продолжить".';
+          if (tg && tg.HapticFeedback) {
+            tg.HapticFeedback.notificationOccurred("error");
+          }
+          return;
+        }
+        if (!currentWriteoffResult.empty) {
+          var currentWriteoffStock = stockSufficiencyCheck(key, currentWriteoffResult.values);
+          if (!currentWriteoffStock.ok) {
+            errorEl.textContent = "На складе только " + currentWriteoffStock.available + " шт. Уменьшите количество.";
+            if (tg && tg.HapticFeedback) {
+              tg.HapticFeedback.notificationOccurred("error");
+            }
+            return;
+          }
+          writeoffPositions.push(buildPosition(key, currentWriteoffResult.values));
+        }
+        if (!writeoffPositions.length) {
+          errorEl.textContent = "Заполните хотя бы одну позицию.";
+          if (tg && tg.HapticFeedback) {
+            tg.HapticFeedback.notificationOccurred("error");
+          }
+          return;
+        }
+        if (!common.ok) {
+          errorEl.textContent = "Заполните все отмеченные поля.";
+          if (tg && tg.HapticFeedback) {
+            tg.HapticFeedback.notificationOccurred("error");
+          }
+          return;
+        }
+        var writeoffFinalPayload = applyCommon({ positions: writeoffPositions, positions_kind: "writeoff" }, common);
+        showConfirm(writeoffFinalPayload, buildSummaryElement(writeoffPositions, common.values));
+        return;
+      }
+      if (kind === "service") {
         var singleResult = collectCategoryFields(key);
         if (!singleResult.ok || singleResult.empty || !common.ok) {
           errorEl.textContent = "Заполните все отмеченные поля.";
@@ -2895,7 +2951,7 @@
           return item.position;
         });
         if (!currentIncomeResult.ok) {
-          errorEl.textContent = 'Заполните все поля текущей позиции или нажмите "Продолжить приход".';
+          errorEl.textContent = 'Заполните все поля текущей позиции или нажмите "Сохранить и продолжить".';
           if (tg && tg.HapticFeedback) {
             tg.HapticFeedback.notificationOccurred("error");
           }
@@ -2931,7 +2987,7 @@
         return item.position;
       });
       if (!currentResult.ok) {
-        errorEl.textContent = 'Заполните все поля текущей позиции или нажмите "Добавить позицию".';
+        errorEl.textContent = 'Заполните все поля текущей позиции или нажмите "Сохранить и продолжить".';
         if (tg && tg.HapticFeedback) {
           tg.HapticFeedback.notificationOccurred("error");
         }

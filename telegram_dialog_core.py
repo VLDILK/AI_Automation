@@ -646,6 +646,8 @@ class CoreDialogMixin:
         # позиції приходу помилково пішли б у продажний обробник.
         positions_data = submitted.get("positions")
         if isinstance(positions_data, list) and positions_data:
+            if submitted.get("positions_kind") == "writeoff":
+                return self._continue_writeoff_all_in_one_submission(store, context, submitted)
             if submitted.get("positions_kind") == "income":
                 return self._continue_income_all_in_one_multi_position(store, context, submitted, positions_data)
             return self._continue_sale_all_in_one_multi_position(store, context, submitted, positions_data)
@@ -1999,6 +2001,9 @@ class CoreDialogMixin:
             return denied
         store.delete_pending_operation(context["chat_id"], context["user_id"])
         submitted = dict(submitted) if isinstance(submitted, dict) else {}
+        positions_data = submitted.get("positions")
+        if isinstance(positions_data, list) and positions_data:
+            return self._continue_writeoff_all_in_one_multi_position(store, context, submitted, positions_data)
         operation_id = submitted.pop("category_operation_id", None)
         operation = store.get_operation(operation_id) if operation_id is not None else None
         if operation is None:
@@ -2023,11 +2028,91 @@ class CoreDialogMixin:
     # у _continue_sale_all_in_one_submission), а не за жодним клієнтським
     # прапорцем - позиції з positions[] завжди належать продажу (списання
     # кошика не будує).
+    _WRITEOFF_POSITION_FIELDS = ("product", "condition", "breed", "rows")
+
+    # Рішення користувача (2026-09-06): «Сохранить и продолжить» і для
+    # списання - форма шле positions[] (positions_kind="writeoff"). Дзеркало
+    # _continue_income_all_in_one_multi_position: кожна позиція розбирається
+    # окремо (категорія, вимір, рядок складу, залишок), остання стає
+    # payload, решта - completed_positions; далі звичайний крок списання.
+    def _continue_writeoff_all_in_one_multi_position(self, store, context, submitted, positions_data):
+        resolved = []
+        for position in positions_data:
+            if not isinstance(position, dict):
+                continue
+            position = dict(position)
+            operation_id = position.pop("category_operation_id", None)
+            operation = store.get_operation(operation_id) if operation_id is not None else None
+            if operation is None:
+                return self._with_main_menu(
+                    "Не удалось определить категорию одной из позиций. Начните списание заново.", store
+                )
+            _op_id, _code, kind, _requires_identity, _label, _parent, prefill_json, *_rest = operation
+            if kind != "writeoff":
+                return self._with_main_menu(
+                    "Эту позицию нельзя объединить со списанием в одной форме. "
+                    "Оформите её отдельным подтверждением.",
+                    store,
+                )
+            prefill = json.loads(prefill_json) if prefill_json else {}
+            item_payload = self._new_income_payload("", context)
+            item_payload["operation_kind"] = "writeoff"
+            item_payload["product"] = prefill.get("product")
+            if prefill.get("condition"):
+                item_payload["condition"] = prefill.get("condition")
+            self._merge_webapp_submission(item_payload, position)
+            self._canonicalize_income_values(store, item_payload)
+            missing_fields = self._income_missing_fields(store, item_payload, kind="writeoff")
+            if missing_fields:
+                return self._webapp_form_terminal_reply(
+                    store, context, self._writeoff_missing_prompt(missing_fields, item_payload)
+                )
+            amount_issue = self._prepare_income_amounts(item_payload)
+            if amount_issue:
+                return self._with_main_menu(
+                    "Не удалось рассчитать одну из позиций. Проверьте введённые данные и начните списание заново.",
+                    store,
+                )
+            match_issue = self._resolve_sale_rows(store, item_payload)
+            if match_issue:
+                message = match_issue.get("message")
+                if not message:
+                    item = match_issue["item"]
+                    message = (
+                        f"Не найдено на складе: {sale_position_text(item_payload, item)}.\n"
+                        "Проверьте продукт, породу, тип продукта или размер."
+                    )
+                return self._webapp_form_terminal_reply(
+                    store, context, message + "\n\nИсправьте позицию в той же форме и отправьте её заново."
+                )
+            stock_issue = self._sale_stock_issue(store, item_payload)
+            if stock_issue:
+                text = self._writeoff_stock_issue_text(item_payload, stock_issue)
+                text += "\n\nУменьшите количество в форме и отправьте её заново."
+                return self._webapp_form_terminal_reply(store, context, text)
+            resolved.append(item_payload)
+
+        if not resolved:
+            return self._with_main_menu("Не удалось определить ни одной позиции. Начните списание заново.", store)
+
+        payload = resolved[-1]
+        completed_positions = []
+        for item_payload in resolved[:-1]:
+            completed_positions.append(
+                {field: item_payload[field] for field in self._WRITEOFF_POSITION_FIELDS if field in item_payload}
+            )
+        payload["completed_positions"] = completed_positions
+        common = {key: value for key, value in submitted.items() if key not in ("positions", "positions_kind")}
+        self._merge_webapp_submission(payload, common)
+        return self._continue_writeoff_operation_impl(store, context, payload)
+
     def _continue_direct_open_webapp_submission(self, store, context, submitted):
         # Обмін позначає себе сам (positions_kind) - категорія тут не
         # підказка, бо позиції двох блоків належать різним розділам.
         if isinstance(submitted, dict) and submitted.get("positions_kind") == "exchange":
             return self._continue_exchange_all_in_one_submission(store, context, submitted)
+        if isinstance(submitted, dict) and submitted.get("positions_kind") == "writeoff":
+            return self._continue_writeoff_all_in_one_submission(store, context, submitted)
         # "Антисептирование (форма)" перевикористовує РЕАЛЬНІ sale-категорії
         # (Доска AD/KD/ОСБ/Вагонка) для вибору товару/розміру - тому
         # category_operation_id тут веде на operation[2] == "sale", той самий
