@@ -9,26 +9,23 @@ client_app.py (локальне сховище) і gui.py (через тунел
 PDF. Видалити запис можна лише з домашки (колонка «✕»). Кнопка «‹ Назад»
 угорі, Esc - назад, вікно з ручками зміни розміру.
 
-Вигляд (2026-09-06, «по візуалу 1999 рік»): як на затвердженому макеті -
-скруглені кнопки CustomTkinter, кольорові позначки операцій (приход зелений,
-продажа помаранчевий, списание червоний, обмен фіолетовий, антисептирование
-бірюзовий, коррекция синій), зелені/червоні ±, таблиця малюється на полотні
-(ttk.Treeview не вміє кольорову клітинку).
+Вигляд - як на затвердженому макеті (ui_kit.py: скруглені кнопки, таблиця на
+полотні з кольоровими позначками операцій і зеленими/червоними ±).
 
 UI-тексти - російською (мова користувачів програми)."""
 
 import json
 import threading
 import tkinter as tk
-import tkinter.font as tkfont
 import urllib.error
 from calendar import monthrange
 from datetime import date, datetime, timedelta
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
 import reports
+from ui_kit import DEFAULT_COLORS, CanvasTable, Popup, accent_button, caption, checkbox, entry, ghost_button
 from utils import _display_bot_number, _number_value
 from warehouse_data import JOURNAL_FILTER_GROUPS, journal_page
 
@@ -37,14 +34,9 @@ EXPORT_LIMIT = 5000
 MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
-DEFAULT_COLORS = {
-    "bg": "#EDEFF2", "fg": "#20242A", "muted": "#5B6470", "row": "#FFFFFF", "zebra": "#F7F8FA", "line": "#D5D9DF",
-    "head": "#E9ECF0", "accent": "#3B6EA5", "accent_fg": "#FFFFFF", "hover": "#DCE8F6",
-    "plus": "#0F6E56", "minus": "#B42318", "dark": False,
-}
-
 # Кольори операцій - ті самі, що на макеті і в формі: (тло, текст) для
-# світлої й темної теми.
+# світлої й темної теми. Клієнт може підмінити їх своїми (налаштування
+# кольорів) через colors["types"].
 TYPE_COLORS = {
     "income": (("#DDF3EA", "#0F6E56"), ("#173A2E", "#5FCFAA")),
     "sale": (("#FDE7D8", "#8A3A05"), ("#3A2A10", "#F5B14C")),
@@ -54,24 +46,29 @@ TYPE_COLORS = {
     "antiseptic": (("#D9F0F4", "#0E7490"), ("#123540", "#7CD4E6")),
     "correction": (("#DDE6FB", "#1D4ED8"), ("#1C2A4A", "#9DB9F7")),
 }
-GROUP_TYPE = {label: group[0] for label, group in JOURNAL_FILTER_GROUPS}
 
 COLUMNS = (
-    {"key": "time", "label": "Время", "width": 122, "weight": 0, "anchor": "w"},
-    {"key": "type", "label": "Операция", "width": 132, "weight": 0, "anchor": "w"},
+    {"key": "time", "label": "Время", "width": 122, "weight": 0, "anchor": "w", "muted": True},
+    {"key": "type", "label": "Операция", "width": 132, "weight": 0, "anchor": "w", "kind": "badge"},
     {"key": "document", "label": "№", "width": 46, "weight": 0, "anchor": "e"},
     {"key": "who", "label": "Кто", "width": 120, "weight": 2, "anchor": "w"},
     {"key": "product", "label": "Товар", "width": 140, "weight": 3, "anchor": "w"},
     {"key": "size", "label": "Размер", "width": 104, "weight": 0, "anchor": "w"},
-    {"key": "qty", "label": "± шт", "width": 72, "weight": 0, "anchor": "e"},
-    {"key": "measure", "label": "± ед.", "width": 96, "weight": 0, "anchor": "e"},
+    {"key": "qty", "label": "± шт", "width": 72, "weight": 0, "anchor": "e", "kind": "signed"},
+    {"key": "measure", "label": "± ед.", "width": 96, "weight": 0, "anchor": "e", "kind": "signed"},
     {"key": "balance", "label": "Остаток", "width": 74, "weight": 0, "anchor": "e"},
     {"key": "reason", "label": "Причина / клиент", "width": 140, "weight": 3, "anchor": "w"},
 )
-DELETE_COLUMN = {"key": "delete", "label": "", "width": 34, "weight": 0, "anchor": "center"}
+DELETE_COLUMN = {"key": "delete", "label": "", "width": 34, "weight": 0, "anchor": "center", "kind": "delete"}
 
 
-def type_colors(type_key, dark=False):
+def type_colors(type_key, dark=False, overrides=None):
+    """(тло, текст) позначки операції; overrides - {type: (bg, fg)} з налаштувань."""
+    base = type_key.replace("exchange_out", "exchange").replace("exchange_in", "exchange") if type_key else ""
+    if overrides:
+        custom = overrides.get(type_key) or overrides.get(base)
+        if custom:
+            return tuple(custom)
     pair = TYPE_COLORS.get(type_key)
     if pair is None:
         return ("#2A2F36", "#E5E7EA") if dark else ("#E4E8EE", "#20242A")
@@ -155,216 +152,6 @@ class RemoteJournalSource(JournalSource):
         threading.Thread(target=worker, daemon=True).start()
 
 
-# ---------------- віджети вигляду ----------------
-def ghost_button(parent, colors, text, command=None, width=None, small=False, **kwargs):
-    options = dict(
-        text=text, command=command, fg_color="transparent", hover_color=colors["hover"], text_color=colors["fg"],
-        border_width=1, border_color=colors["line"], corner_radius=8, height=26 if small else 32,
-        font=ctk.CTkFont(size=11 if small else 12),
-    )
-    if width is not None:
-        options["width"] = width
-    options.update(kwargs)
-    return ctk.CTkButton(parent, **options)
-
-
-def accent_button(parent, colors, text, command=None, width=None):
-    options = dict(text=text, command=command, fg_color=colors["accent"], hover_color=colors["accent"],
-                   text_color=colors["accent_fg"], corner_radius=8, height=32, font=ctk.CTkFont(size=12, weight="bold"))
-    if width is not None:
-        options["width"] = width
-    return ctk.CTkButton(parent, **options)
-
-
-def caption(parent, colors, text):
-    return ctk.CTkLabel(parent, text=text, text_color=colors["muted"], font=ctk.CTkFont(size=10))
-
-
-class JournalTable(tk.Frame):
-    """Таблиця на полотні: шапка з клікабельними заголовками, рядки із
-    зеброю, кольорова позначка операції, зелені/червоні ±, «✕» для домашки."""
-    HEADER_H = 34
-    ROW_H = 30
-
-    def __init__(self, parent, colors, columns, on_heading_click, on_cell_click=None):
-        super().__init__(parent, bg=colors["line"], bd=0, highlightthickness=0)
-        self.colors = colors
-        self.columns = list(columns)
-        self.on_heading_click = on_heading_click
-        self.on_cell_click = on_cell_click
-        self.markers = {column["key"]: " ▾" for column in self.columns}
-        self.rows = []
-        self.spans = []
-        self.font = tkfont.Font(family="Segoe UI", size=10)
-        self.bold = tkfont.Font(family="Segoe UI", size=10, weight="bold")
-        self.head_font = tkfont.Font(family="Segoe UI", size=9, weight="bold")
-        inner = tk.Frame(self, bg=colors["row"], bd=0, highlightthickness=0)
-        inner.pack(fill="both", expand=True, padx=1, pady=1)
-        inner.grid_rowconfigure(1, weight=1)
-        inner.grid_columnconfigure(0, weight=1)
-        self.header = tk.Canvas(inner, height=self.HEADER_H, bg=colors["head"], highlightthickness=0, bd=0)
-        self.header.grid(row=0, column=0, columnspan=2, sticky="ew")
-        self.body = tk.Canvas(inner, bg=colors["row"], highlightthickness=0, bd=0)
-        self.body.grid(row=1, column=0, sticky="nsew")
-        self.scroll = ttk.Scrollbar(inner, orient="vertical", command=self.body.yview)
-        self.scroll.grid(row=1, column=1, sticky="ns")
-        self.body.configure(yscrollcommand=self.scroll.set)
-        self.body.bind("<Configure>", lambda event: self._layout())
-        self.header.bind("<Button-1>", self._on_header_click)
-        self.body.bind("<Button-1>", self._on_body_click)
-        self.body.bind("<MouseWheel>", lambda event: self.body.yview_scroll(-1 if event.delta > 0 else 1, "units"))
-
-    # --- геометрія ---
-    def _layout(self):
-        total = max(self.body.winfo_width(), 200)
-        fixed = sum(column["width"] for column in self.columns if not column["weight"])
-        weights = sum(column["weight"] for column in self.columns) or 1
-        flex = max(total - fixed, 0)
-        self.spans = []
-        x = 0
-        for column in self.columns:
-            width = column["width"] if not column["weight"] else max(column["width"], int(flex * column["weight"] / weights))
-            self.spans.append((x, width))
-            x += width
-        self.redraw_header()
-        self.redraw()
-
-    def _column_at(self, x):
-        for column, (x0, width) in zip(self.columns, self.spans):
-            if x0 <= x < x0 + width:
-                return column["key"]
-        return None
-
-    def _on_header_click(self, event):
-        key = self._column_at(event.x)
-        if key and self.on_heading_click is not None:
-            self.on_heading_click(key, event.x_root, event.y_root)
-
-    def _on_body_click(self, event):
-        if self.on_cell_click is None:
-            return
-        index = int(self.body.canvasy(event.y) // self.ROW_H)
-        key = self._column_at(event.x)
-        if 0 <= index < len(self.rows) and key:
-            self.on_cell_click(index, key)
-
-    # --- малювання ---
-    def _ellipsis(self, text, max_width, font=None):
-        font = font or self.font
-        text = str(text or "")
-        if font.measure(text) <= max_width:
-            return text
-        while text and font.measure(text + "…") > max_width:
-            text = text[:-1]
-        return text + "…"
-
-    def heading_text(self, key):
-        column = next(c for c in self.columns if c["key"] == key)
-        return column["label"] + self.markers.get(key, "")
-
-    def set_marker(self, key, marker):
-        self.markers[key] = marker
-        self.redraw_header()
-
-    def redraw_header(self):
-        self.header.delete("all")
-        colors = self.colors
-        for column, (x0, width) in zip(self.columns, self.spans):
-            text = self.heading_text(column["key"])
-            active = "●" in self.markers.get(column["key"], "")
-            fill = colors["accent"] if active else colors["muted"]
-            if column["anchor"] == "e":
-                self.header.create_text(x0 + width - 8, self.HEADER_H / 2, text=text, anchor="e", font=self.head_font, fill=fill)
-            elif column["anchor"] == "center":
-                self.header.create_text(x0 + width / 2, self.HEADER_H / 2, text=text, anchor="center", font=self.head_font, fill=fill)
-            else:
-                self.header.create_text(x0 + 8, self.HEADER_H / 2, text=self._ellipsis(text, width - 12, self.head_font), anchor="w", font=self.head_font, fill=fill)
-        self.header.create_line(0, self.HEADER_H - 1, max(self.header.winfo_width(), 10), self.HEADER_H - 1, fill=colors["line"])
-
-    def set_rows(self, rows):
-        self.rows = list(rows)
-        self.redraw()
-
-    def append_rows(self, rows):
-        self.rows.extend(rows)
-        self.redraw()
-
-    def redraw(self):
-        body = self.body
-        body.delete("all")
-        colors = self.colors
-        width = max(body.winfo_width(), sum(w for _x, w in self.spans) if self.spans else 200)
-        for index, row in enumerate(self.rows):
-            y0 = index * self.ROW_H
-            if index % 2:
-                body.create_rectangle(0, y0, width, y0 + self.ROW_H, fill=colors["zebra"], outline="")
-            for column, (x0, span) in zip(self.columns, self.spans):
-                key = column["key"]
-                value = row["values"].get(key, "")
-                cy = y0 + self.ROW_H / 2
-                if key == "type":
-                    bg, fg = type_colors(row.get("type_key"), colors.get("dark"))
-                    label = self._ellipsis(value, span - 24, self.bold)
-                    text_width = self.bold.measure(label)
-                    body.create_rectangle(x0 + 8, y0 + 6, x0 + 8 + text_width + 14, y0 + self.ROW_H - 6, fill=bg, outline="")
-                    body.create_text(x0 + 15, cy, text=label, anchor="w", font=self.bold, fill=fg)
-                elif key in ("qty", "measure"):
-                    sign = row.get("sign", 0)
-                    fill = colors["plus"] if sign > 0 else (colors["minus"] if sign < 0 else colors["fg"])
-                    body.create_text(x0 + span - 8, cy, text=value, anchor="e", font=self.bold if sign else self.font, fill=fill)
-                elif key == "delete":
-                    body.create_text(x0 + span / 2, cy, text="✕", anchor="center", font=self.bold, fill=colors["minus"])
-                elif column["anchor"] == "e":
-                    body.create_text(x0 + span - 8, cy, text=value, anchor="e", font=self.font, fill=colors["fg"])
-                else:
-                    muted = key == "time"
-                    body.create_text(x0 + 8, cy, text=self._ellipsis(value, span - 14), anchor="w", font=self.font,
-                                     fill=colors["muted"] if muted else colors["fg"])
-        height = max(len(self.rows) * self.ROW_H, 1)
-        body.configure(scrollregion=(0, 0, width, height))
-
-
-class Popup:
-    """Спливаюче вікно біля елемента: без рамки, закривається по Esc, кліку
-    поза ним або «Применить»."""
-
-    def __init__(self, anchor, colors, x=None, y=None):
-        self.colors = colors
-        self.window = tk.Toplevel(anchor)
-        self.window.overrideredirect(True)
-        self.window.configure(bg=colors["line"])
-        self.frame = tk.Frame(self.window, bg=colors["row"], padx=12, pady=10)
-        self.frame.pack(padx=1, pady=1)
-        if x is None:
-            x = anchor.winfo_rootx()
-        if y is None:
-            y = anchor.winfo_rooty() + anchor.winfo_height()
-        self.window.geometry("+%d+%d" % (x, y))
-        self.window.bind("<Escape>", lambda event: self.close())
-        self.window.bind("<FocusOut>", self._on_focus_out)
-        self.window.after(50, lambda: self.window.focus_force() if self.window.winfo_exists() else None)
-
-    def _focused_inside(self):
-        try:
-            focused = self.window.focus_get()
-        except (KeyError, tk.TclError):
-            return False
-        return focused is not None and str(focused).startswith(str(self.window))
-
-    def _on_focus_out(self, event):
-        if self._focused_inside():
-            return
-        self.window.after(150, self._close_if_unfocused)
-
-    def _close_if_unfocused(self):
-        if self.window.winfo_exists() and not self._focused_inside():
-            self.close()
-
-    def close(self):
-        if self.window.winfo_exists():
-            self.window.destroy()
-
-
 class CalendarPopup(Popup):
     """Місяць сіткою, «‹ ›», клік по дню = вибір; «Готово» / «Очистить»."""
 
@@ -444,6 +231,7 @@ class JournalWindow:
         self.source = source
         self.colors = dict(DEFAULT_COLORS, **(colors or {}))
         colors = self.colors
+        self.type_overrides = colors.get("types") or {}
         self.entries = []
         self.total = 0
         self.has_more = False
@@ -452,6 +240,7 @@ class JournalWindow:
         self.popup = None
         self.date_from = None
         self.date_to = None
+        self.active_preset = 7
         self.type_vars = {}
         self.column_filters = self._empty_column_filters()
 
@@ -495,11 +284,8 @@ class JournalWindow:
         for label, group in JOURNAL_FILTER_GROUPS:
             var = tk.BooleanVar(value=True)
             self.type_vars[label] = var
-            bg, fg = type_colors(group[0], colors.get("dark"))
-            ctk.CTkCheckBox(
-                ops_row, text=label, variable=var, text_color=fg, fg_color=fg, hover_color=fg, border_color=colors["line"],
-                checkbox_width=18, checkbox_height=18, corner_radius=5, font=ctk.CTkFont(size=12, weight="bold"),
-            ).pack(side="left", padx=(0, 10))
+            _bg, fg = self._type_colors(group[0])
+            checkbox(ops_row, colors, label, var, text_color=fg, accent=fg).pack(side="left", padx=(0, 10))
         ghost_button(ops_row, colors, "Выбрать все", command=lambda: self._set_all_types(True), small=True, width=96).pack(side="left", padx=(4, 4))
         ghost_button(ops_row, colors, "Снять все", command=lambda: self._set_all_types(False), small=True, width=84).pack(side="left")
 
@@ -513,8 +299,8 @@ class JournalWindow:
 
         columns = list(COLUMNS) + ([DELETE_COLUMN] if source.can_delete else [])
         self.column_keys = [column["key"] for column in columns]
-        self.table = JournalTable(window, colors, columns, on_heading_click=self._open_column_filter,
-                                  on_cell_click=self._on_cell_click if source.can_delete else None)
+        self.table = CanvasTable(window, colors, columns, on_heading_click=self._open_column_filter,
+                                 on_cell_click=self._on_cell_click if source.can_delete else None)
         self.table.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
         bottom = ctk.CTkFrame(window, fg_color="transparent")
@@ -527,6 +313,9 @@ class JournalWindow:
         ghost_button(bottom, colors, "Excel", command=lambda: self.export("xlsx"), width=70).pack(side="right", padx=(0, 6))
         self._preset(7, refresh=False)
         self.refresh()
+
+    def _type_colors(self, type_key):
+        return type_colors(type_key, self.colors.get("dark"), self.type_overrides)
 
     # ---------------- фільтри ----------------
     @staticmethod
@@ -563,7 +352,7 @@ class JournalWindow:
         self.from_button.configure(text="С: %s  📅" % (self.date_from.strftime("%d.%m.%Y") if self.date_from else "—"))
         self.to_button.configure(text="По: %s  📅" % (self.date_to.strftime("%d.%m.%Y") if self.date_to else "—"))
         for days, button in self.preset_buttons.items():
-            active = days == getattr(self, "active_preset", 7)
+            active = days == self.active_preset
             button.configure(fg_color=self.colors["hover"] if active else "transparent",
                              border_color=self.colors["accent"] if active else self.colors["line"])
 
@@ -683,9 +472,9 @@ class JournalWindow:
         self.status.configure(text="Показано %d из %d" % (len(self.entries), self.total))
         self.more_button.configure(state="normal" if self.has_more else "disabled")
 
-    @staticmethod
-    def _row_for(entry):
+    def _row_for(self, entry):
         quantity = _number_value(entry.get("quantity"))
+        measure = _number_value(entry.get("measure")) if entry.get("measure") is not None else 0
         document = str(entry.get("document") or "")
         number = document.rsplit("№", 1)[-1].strip() if "№" in document else document
         product = entry.get("product") or ""
@@ -699,7 +488,12 @@ class JournalWindow:
             "balance": _display_bot_number(entry["balance_after"]) if entry.get("balance_after") not in (None, "") else "",
             "reason": entry.get("reason") or "", "delete": "✕",
         }
-        return {"id": entry.get("id"), "values": values, "type_key": entry.get("type"), "sign": 1 if quantity > 0 else (-1 if quantity < 0 else 0)}
+        sign = 1 if quantity > 0 else (-1 if quantity < 0 else 0)
+        return {
+            "id": entry.get("id"), "values": values,
+            "badges": {"type": self._type_colors(entry.get("type") or "")},
+            "signs": {"qty": sign, "measure": 1 if measure > 0 else (-1 if measure < 0 else 0)},
+        }
 
     def rows(self):
         return self.table.rows
@@ -721,7 +515,7 @@ class JournalWindow:
         if key == "delete":
             return
         x = (x_root - 20) if x_root is not None else self.table.winfo_rootx()
-        y = self.table.winfo_rooty() + JournalTable.HEADER_H + 2
+        y = self.table.winfo_rooty() + CanvasTable.HEADER_H + 2
         popup = Popup(self.table, self.colors, x=x, y=y)
         self.popup = popup
         frame = popup.frame
@@ -730,18 +524,6 @@ class JournalWindow:
         heading = next(column["label"] for column in COLUMNS if column["key"] == key)
         tk.Label(frame, text=heading, font=("Segoe UI", 11, "bold"), bg=colors["row"], fg=colors["fg"]).pack(anchor="w")
         apply_actions = []
-
-        def add_apply(func):
-            apply_actions.append(func)
-
-        def checkbox(parent, text, variable, text_color=None):
-            return ctk.CTkCheckBox(parent, text=text, variable=variable, text_color=text_color or colors["fg"], fg_color=colors["accent"],
-                                   hover_color=colors["accent"], border_color=colors["line"], checkbox_width=18, checkbox_height=18,
-                                   corner_radius=5, font=ctk.CTkFont(size=12))
-
-        def entry(parent, variable, width=220, placeholder=""):
-            return ctk.CTkEntry(parent, textvariable=variable, width=width, height=30, corner_radius=8, fg_color=colors["row"],
-                                border_color=colors["line"], text_color=colors["fg"], placeholder_text=placeholder)
 
         if key == "time":
             sort_var = tk.StringVar(value=cf["sort"])
@@ -754,11 +536,11 @@ class JournalWindow:
                          command=lambda: (popup.close(), self._open_calendar("from")), width=120, small=True).pack(side="left")
             ghost_button(row, colors, "По: %s" % (self.date_to.strftime("%d.%m.%Y") if self.date_to else "—"),
                          command=lambda: (popup.close(), self._open_calendar("to")), width=120, small=True).pack(side="left", padx=(4, 0))
-            add_apply(lambda: cf.__setitem__("sort", sort_var.get()))
+            apply_actions.append(lambda: cf.__setitem__("sort", sort_var.get()))
         elif key == "type":
             for label, group in JOURNAL_FILTER_GROUPS:
-                _bg, fg = type_colors(group[0], colors.get("dark"))
-                checkbox(frame, label, self.type_vars[label], text_color=fg).pack(anchor="w", pady=2)
+                _bg, fg = self._type_colors(group[0])
+                checkbox(frame, colors, label, self.type_vars[label], text_color=fg, accent=fg).pack(anchor="w", pady=2)
             row = tk.Frame(frame, bg=colors["row"])
             row.pack(anchor="w", pady=(6, 0))
             ghost_button(row, colors, "Выбрать все", command=lambda: self._set_all_types(True), small=True, width=96).pack(side="left")
@@ -767,16 +549,16 @@ class JournalWindow:
             field = {"document": "documents", "size": "size", "reason": "reason"}[key]
             hint = {"document": "номер документа, напр. 12 или 12, 15", "size": "напр. 47x150", "reason": "клиент, поставщик, причина"}[key]
             var = tk.StringVar(value=cf[field])
-            field_entry = entry(frame, var, placeholder=hint)
+            field_entry = entry(frame, colors, var, placeholder=hint)
             field_entry.pack(anchor="w", pady=(4, 0))
             field_entry.focus_set()
-            add_apply(lambda: cf.__setitem__(field, var.get()))
+            apply_actions.append(lambda: cf.__setitem__(field, var.get()))
             field_entry.bind("<Return>", lambda event: self._apply_popup(apply_actions))
         elif key in ("who", "product"):
             values = self.facets.get("who" if key == "who" else "products") or []
             chosen = cf[key]
             search_var = tk.StringVar()
-            entry(frame, search_var, placeholder="поиск…").pack(anchor="w", pady=(4, 0))
+            entry(frame, colors, search_var, placeholder="поиск…").pack(anchor="w", pady=(4, 0))
             box = tk.Frame(frame, bg=colors["row"])
             box.pack(anchor="w", pady=(6, 0))
             vars_by_value = {value: tk.BooleanVar(value=(chosen is None or value in chosen)) for value in values}
@@ -789,7 +571,7 @@ class JournalWindow:
                 for value in values:
                     if needle and needle not in value.lower():
                         continue
-                    checkbox(box, value, vars_by_value[value]).pack(anchor="w", pady=1)
+                    checkbox(box, colors, value, vars_by_value[value]).pack(anchor="w", pady=1)
                     shown += 1
                     if shown >= 12:
                         tk.Label(box, text="… уточните поиском", bg=colors["row"], fg=colors["muted"], font=("Segoe UI", 8)).pack(anchor="w")
@@ -806,23 +588,23 @@ class JournalWindow:
                 selected = {value for value, var in vars_by_value.items() if var.get()}
                 cf[key] = None if len(selected) == len(values) else selected
 
-            add_apply(apply_choice)
+            apply_actions.append(apply_choice)
         elif key in ("qty", "measure", "balance"):
             if key == "qty":
                 plus_var = tk.BooleanVar(value=cf["sign_plus"])
                 minus_var = tk.BooleanVar(value=cf["sign_minus"])
-                checkbox(frame, "Плюс (приход)", plus_var, text_color=colors["plus"]).pack(anchor="w", pady=2)
-                checkbox(frame, "Минус (расход)", minus_var, text_color=colors["minus"]).pack(anchor="w", pady=2)
-                add_apply(lambda: (cf.__setitem__("sign_plus", plus_var.get()), cf.__setitem__("sign_minus", minus_var.get())))
+                checkbox(frame, colors, "Плюс (приход)", plus_var, text_color=colors["plus"], accent=colors["plus"]).pack(anchor="w", pady=2)
+                checkbox(frame, colors, "Минус (расход)", minus_var, text_color=colors["minus"], accent=colors["minus"]).pack(anchor="w", pady=2)
+                apply_actions.append(lambda: (cf.__setitem__("sign_plus", plus_var.get()), cf.__setitem__("sign_minus", minus_var.get())))
             min_var = tk.StringVar(value=str(cf[key + "_min"]))
             max_var = tk.StringVar(value=str(cf[key + "_max"]))
             row = tk.Frame(frame, bg=colors["row"])
             row.pack(anchor="w", pady=(6, 0))
             tk.Label(row, text="от:", bg=colors["row"], fg=colors["fg"]).pack(side="left")
-            entry(row, min_var, width=80).pack(side="left", padx=(4, 10))
+            entry(row, colors, min_var, width=80).pack(side="left", padx=(4, 10))
             tk.Label(row, text="до:", bg=colors["row"], fg=colors["fg"]).pack(side="left")
-            entry(row, max_var, width=80).pack(side="left", padx=(4, 0))
-            add_apply(lambda: (cf.__setitem__(key + "_min", min_var.get()), cf.__setitem__(key + "_max", max_var.get())))
+            entry(row, colors, max_var, width=80).pack(side="left", padx=(4, 0))
+            apply_actions.append(lambda: (cf.__setitem__(key + "_min", min_var.get()), cf.__setitem__(key + "_max", max_var.get())))
 
         foot = tk.Frame(frame, bg=colors["row"])
         foot.pack(anchor="w", pady=(10, 0))
@@ -868,11 +650,12 @@ class JournalWindow:
 
     # ---------------- видалення (лише домашка) ----------------
     def _delete_entry(self, entry_id):
-        entry = next((e for e in self.entries if e.get("id") == entry_id), None)
-        if entry is None:
+        entry_data = next((e for e in self.entries if e.get("id") == entry_id), None)
+        if entry_data is None:
             return
         text = "Удалить запись журнала?\n\n%s · %s · %s %s — %s?" % (
-            entry.get("time"), entry.get("type_label"), entry.get("product"), entry.get("size"), _fmt_signed(entry.get("quantity"), "шт"),
+            entry_data.get("time"), entry_data.get("type_label"), entry_data.get("product"), entry_data.get("size"),
+            _fmt_signed(entry_data.get("quantity"), "шт"),
         )
         if not messagebox.askyesno("Журнал операций", text + "\n\nОстаток склада не изменится; след останется в журнале действий.", parent=self.window):
             return
@@ -912,10 +695,11 @@ class JournalWindow:
             {"key": "reason", "label": "Причина / клиент"},
         ]
         rows = []
-        for entry in entries:
-            values = self._row_for(entry)["values"]
-            rows.append({key: values.get(key, "") for key in ("time", "type", "document", "who", "product", "size", "qty", "measure", "reason")}
-                        | {"balance": entry.get("balance_after") if entry.get("balance_after") not in (None, "") else ""})
+        for entry_data in entries:
+            values = self._row_for(entry_data)["values"]
+            row = {key: values.get(key, "") for key in ("time", "type", "document", "who", "product", "size", "qty", "measure", "reason")}
+            row["balance"] = entry_data.get("balance_after") if entry_data.get("balance_after") not in (None, "") else ""
+            rows.append(row)
         period = ""
         if self.date_from or self.date_to:
             period = " за %s — %s" % (self.date_from.strftime("%d.%m.%Y") if self.date_from else "…", self.date_to.strftime("%d.%m.%Y") if self.date_to else "…")

@@ -62,6 +62,7 @@ import servers_registry
 import standard_menu_cloud
 import update_check
 from settings import SettingsStore
+from correction_window import open_correction_window
 from journal_window import LocalJournalSource, open_journal_window
 from role_buttons_window import LocalRoleSource, open_role_buttons_window
 from warehouse_data import (
@@ -2853,7 +2854,7 @@ class ClientApp(ctk.CTk):
                 }],
             })
         if not positions:
-            return {"ok": False, "message": "Ничего не изменилось: «Стало» совпадает с текущим остатком по всем позициям."}
+            return {"ok": False, "message": "Ничего не изменилось: «Изменить на» совпадает с текущим остатком по всем позициям."}
         payload = {
             "operation_kind": "correction",
             "source": "client",
@@ -2872,185 +2873,14 @@ class ClientApp(ctk.CTk):
         return result
 
     def _open_correction_window(self):
-        existing = getattr(self, "correction_window", None)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
-        window = tk.Toplevel(self)
-        window.title("Коррекция остатков")
-        window.geometry("860x580")
-        window.minsize(640, 420)
-        window.configure(bg=self._tk_color(COLOR_BG))
-        self.correction_window = window
-
-        top = ctk.CTkFrame(window, fg_color="transparent")
-        top.pack(fill="x", padx=16, pady=(12, 4))
-        ctk.CTkButton(top, text="‹ Назад", width=84, command=window.destroy).pack(side="left")
-        ctk.CTkLabel(top, text="Коррекция остатков", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(
-            window,
-            text=(
-                "Введите «Стало, шт» для нужных позиций (клик по ячейке). Разницу в штуках и в м3/м2/мп "
-                "программа посчитает сама. Одна запись — один документ «Коррекция №N», строка в листе КОРРЕКЦИЯ и в журнале."
-            ),
-            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=820,
-        ).pack(fill="x", padx=16, pady=(0, 8))
-
-        filters = ctk.CTkFrame(window, fg_color="transparent")
-        filters.pack(fill="x", padx=16, pady=(0, 6))
-        products, _rows = self._correction_stock_rows()
-        product_var = tk.StringVar(value="Все продукты")
-        search_var = tk.StringVar()
-        rows_by_id = {}
-        edits = {}
-        editor = {"entry": None}
-
-        table_frame = tk.Frame(window, bg=self._tk_color(COLOR_BG))
-        columns = ("product", "breed", "condition", "size", "now", "new", "delta")
-        tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
-        for key, title, width, anchor, stretch in (
-            ("product", "Продукт", 150, "w", True), ("breed", "Порода", 100, "w", False),
-            ("condition", "Состояние", 90, "w", False), ("size", "Размер", 130, "w", True),
-            ("now", "Сейчас, шт", 90, "e", False), ("new", "Стало, шт", 90, "e", False), ("delta", "±", 70, "e", False),
-        ):
-            tree.heading(key, text=title)
-            tree.column(key, width=width, anchor=anchor, stretch=stretch)
-        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scroll.set)
-
-        bottom = ctk.CTkFrame(window, fg_color="transparent")
-        reason_var = tk.StringVar(value="инвентаризация")
-        status = ctk.CTkLabel(bottom, text="", font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=480)
-        write_button = ctk.CTkButton(bottom, text="Записать", state="disabled")
-
-        def close_editor():
-            entry = editor["entry"]
-            if entry is not None:
-                entry.destroy()
-                editor["entry"] = None
-
-        def changed_rows():
-            return [(row_id, new) for row_id, new in edits.items()
-                    if row_id in rows_by_id and abs(new - rows_by_id[row_id]["now"]) > 1e-9]
-
-        def refresh_button():
-            count = len(changed_rows())
-            if not count:
-                write_button.configure(text="Записать", state="disabled")
-                return
-            word = "коррекцию" if count % 10 == 1 and count % 100 != 11 else (
-                "коррекции" if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14 else "коррекций")
-            write_button.configure(text="Записать %d %s" % (count, word), state="normal")
-
-        def fill(*_args):
-            close_editor()
-            tree.delete(*tree.get_children())
-            _products, rows = self._correction_stock_rows(product_var.get(), search_var.get())
-            rows_by_id.clear()
-            for info in rows:
-                rows_by_id[info["row_id"]] = info
-                new = edits.get(info["row_id"])
-                tree.insert("", "end", iid=str(info["row_id"]), values=(
-                    info["product"], info["breed"], info["condition"], info["size"],
-                    self._correction_format(info["now"]),
-                    "" if new is None else self._correction_format(new),
-                    "" if new is None else self._correction_signed(new - info["now"]),
-                ))
-            refresh_button()
-
-        def start_edit(event):
-            if tree.identify("region", event.x, event.y) != "cell":
-                return
-            if tree.identify_column(event.x) != "#6":
-                return
-            item = tree.identify_row(event.y)
-            if not item:
-                return
-            close_editor()
-            bbox = tree.bbox(item, "#6")
-            if not bbox:
-                return
-            x, y, width, height = bbox
-            var = tk.StringVar(value=tree.set(item, "new"))
-            entry = tk.Entry(tree, textvariable=var, justify="right")
-            entry.place(x=x, y=y, width=width, height=height)
-            entry.focus_set()
-            entry.select_range(0, "end")
-            editor["entry"] = entry
-            row_id = int(item)
-
-            def commit(_event=None):
-                if editor["entry"] is not entry:
-                    return
-                text = var.get().strip().replace(",", ".")
-                if text == "":
-                    edits.pop(row_id, None)
-                else:
-                    try:
-                        value = float(text)
-                    except ValueError:
-                        value = None
-                    if value is None or value < 0:
-                        entry.configure(bg="#ffdddd")
-                        return
-                    edits[row_id] = value
-                close_editor()
-                info = rows_by_id.get(row_id)
-                new = edits.get(row_id)
-                if info is not None:
-                    tree.set(item, "new", "" if new is None else self._correction_format(new))
-                    tree.set(item, "delta", "" if new is None else self._correction_signed(new - info["now"]))
-                refresh_button()
-
-            def cancel(_event=None):
-                close_editor()
-                return "break"
-
-            entry.bind("<Return>", commit)
-            entry.bind("<Tab>", commit)
-            entry.bind("<FocusOut>", commit)
-            entry.bind("<Escape>", cancel)
-
-        def write():
-            changed = changed_rows()
-            if not changed:
-                return
-            if not messagebox.askyesno(
-                "Коррекция остатков",
-                "Записать %d изменений одним документом «Коррекция №N»?" % len(changed),
-                parent=window,
-            ):
-                return
-            try:
-                result = self._apply_stock_corrections(rows_by_id, dict(edits), reason_var.get().strip())
-            except Exception as exc:
-                messagebox.showerror("Коррекция остатков", str(exc), parent=window)
-                return
-            text = re.sub(r"</?b>", "", result.get("message") or "")
-            if not result.get("ok"):
-                messagebox.showerror("Коррекция остатков", text, parent=window)
-                return
-            edits.clear()
-            fill()
-            status.configure(text=text.split("\n")[0])
-            messagebox.showinfo("Коррекция остатков", text, parent=window)
-
-        ctk.CTkComboBox(filters, values=["Все продукты"] + products, variable=product_var, width=220, command=fill).pack(side="left")
-        ctk.CTkEntry(filters, textvariable=search_var, placeholder_text="Поиск: размер, порода", width=240).pack(side="left", padx=(8, 0))
-        search_var.trace_add("write", fill)
-        table_frame.pack(fill="both", expand=True, padx=16, pady=(0, 6))
-        tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        tree.bind("<Button-1>", start_edit)
-        bottom.pack(fill="x", padx=16, pady=(0, 12))
-        ctk.CTkEntry(bottom, textvariable=reason_var, placeholder_text="Причина", width=260).pack(side="left")
-        status.pack(side="left", padx=(10, 0), fill="x", expand=True)
-        write_button.configure(command=write)
-        write_button.pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy() if editor["entry"] is None else None)
-        fill()
+        # Вигляд і фільтри - correction_window.py (як журнал операцій);
+        # дані й запис - _correction_stock_rows / _apply_stock_corrections.
+        open_correction_window(
+            self, "correction_window", self,
+            load_rows=lambda: self._correction_stock_rows()[1],
+            apply_edits=self._apply_stock_corrections,
+            colors=self._journal_window_colors(),
+        )
 
     def _open_rollback_window(self):
         if self.rollback_window is not None and self.rollback_window.winfo_exists():
