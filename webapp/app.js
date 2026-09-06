@@ -100,6 +100,7 @@
       link_color: "--tg-link",
       button_color: "--tg-button",
       button_text_color: "--tg-button-text",
+      destructive_text_color: "--error",
       secondary_bg_color: "--tg-secondary-bg",
     };
     Object.keys(map).forEach(function (key) {
@@ -702,7 +703,23 @@
   // залишку САМЕ для обраної породи+розміру - тап відразу підставляє це
   // число в поле. breedInput - select+manual породи (може бути відсутній,
   // якщо порода вже "відома" з чату і в формі взагалі не рендериться).
-  function wireDimensionCascade(rowInputs, combos, breedInput) {
+  // Розмір, набраний рукою («12.5»), у тому самому вигляді, що й у combos
+  // з сервера («12,5»), інакше пошук залишку його не знайде.
+  function sameDimensionText(value) {
+    var text = String(value === undefined || value === null ? "" : value).trim();
+    if (text === "") {
+      return text;
+    }
+    var number = Number(text.replace(",", "."));
+    return isNaN(number) ? text : formatServerNumber(number);
+  }
+
+  // options.noStock - рішення користувача (2026-09-06): у продажу, списанні
+  // та «отдаём» обміну, де залишок має реально списатись, замість «Всего: 0»
+  // або порожнього місця - дрібним червоним «нет остатка» (варіант 01). У
+  // приході, антисептику, «получаем» і таблицях цього напису нема.
+  function wireDimensionCascade(rowInputs, combos, breedInput, options) {
+    var showNoStock = !!(options && options.noStock);
     var thicknessSelect = rowInputs.thickness;
     var widthSelect = rowInputs.width;
     var lengthSelect = rowInputs.length;
@@ -778,11 +795,19 @@
         balanceHint.style.display = "none";
         return;
       }
-      var balance = findComboBalance(combos, breed, thickness, width, length);
-      if (balance === null) {
-        balanceHint.style.display = "none";
+      var balance = findComboBalance(combos, breed, sameDimensionText(thickness), sameDimensionText(width), sameDimensionText(length));
+      if (balance === null || Number(balance) <= 0) {
+        if (showNoStock) {
+          balanceHint.textContent = "нет остатка";
+          balanceHint.classList.add("no-stock");
+          delete balanceHint.dataset.value;
+          balanceHint.style.display = "";
+        } else {
+          balanceHint.style.display = "none";
+        }
         return;
       }
+      balanceHint.classList.remove("no-stock");
       var formatted = formatServerNumber(balance);
       balanceHint.textContent = "Всего: " + formatted + " шт";
       balanceHint.dataset.value = formatted.replace(",", ".");
@@ -812,6 +837,14 @@
       refreshBalanceHint();
     });
     lengthSelect.addEventListener("change", refreshBalanceHint);
+    // Rozmir, nabranyi rukoiu (allow_custom), tezh onovliuie pidkazku - inakshe
+    // pislia ruchnoho vvodu vona lyshalas zastariloiu (skrin korystuvacha
+    // 2026-09-06: OSB bez pidkazky pry ruchnykh rozmirakh).
+    [thicknessSelect, widthSelect, lengthSelect].forEach(function (select) {
+      if (select.manualInput) {
+        select.manualInput.addEventListener("input", refreshBalanceHint);
+      }
+    });
   }
 
   // Для select+allow_custom - справжнє значення бере поле, яке РЕАЛЬНО
@@ -1263,7 +1296,7 @@
       // Породу будуємо лише ЩОЙНО ВИЩЕ (identityFields) - тому викликаємо
       // wireDimensionCascade лише ТЕПЕР, коли flatInputs.breed уже існує.
       if (perRow.length) {
-        wireDimensionCascade(rowInputs, cat.dimension_combos, flatInputs.breed);
+        wireDimensionCascade(rowInputs, cat.dimension_combos, flatInputs.breed, { noStock: ctx.kind === "sale" || ctx.kind === "writeoff" });
         if (cat.kind === "antiseptic") {
           wireAntisepticVolumeHint(rowInputs);
         } else {
@@ -3285,7 +3318,7 @@
           flatInputs[field.key] = buildFieldElement(field, measureBlock);
         });
         if (perRow.length) {
-          wireDimensionCascade(rowInputs, cat.dimension_combos, flatInputs.breed);
+          wireDimensionCascade(rowInputs, cat.dimension_combos, flatInputs.breed, { noStock: side === "give" });
           wireMeasureHint(rowInputs, cat.product);
         }
         identityContainer.appendChild(identityBlock);
@@ -5086,7 +5119,7 @@
     // singleInputs.breed тоді просто undefined) будується ЩОЙНО ВИЩЕ -
     // тому кличемо каскад лише тепер.
     if (perRowFields.length) {
-      wireDimensionCascade(rowInputs, ctx.dimension_combos, singleInputs.breed);
+      wireDimensionCascade(rowInputs, ctx.dimension_combos, singleInputs.breed, { noStock: ctx.kind === "sale" || ctx.kind === "writeoff" });
       wireMeasureHint(rowInputs, ctx.product);
     }
 

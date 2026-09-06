@@ -18,7 +18,6 @@ _EFACTURA_DEFAULT_TEXT = "просьба принять информацию и 
 from settings import DisplaySettingsStore, SettingsStore
 from utils import normalize_length_mm
 from utils import (
-    measure_cell_filled,
     piece_measure,
     row_measure_kind,
     _display_bot_number,
@@ -416,29 +415,9 @@ class CoreDialogMixin:
     # _sale_stock_issue при самому записі. Товари без фізичного виміру (ОСБ)
     # не мають другого обмеження — balance_qty лишається як є.
     def _sellable_combo_quantity(self, product, columns, row, thickness, width, length, balance_qty):
-        measure_key = self._row_measure_kind(
-            {"product": product}, {"thickness": thickness, "width": width}
-        )
-        if measure_key is None:
-            return balance_qty
-        measure_column = self._MEASURE_KIND_BALANCE_COLUMN.get(measure_key)
-        measure_idx = columns.get(measure_column) if measure_column else None
-        if measure_idx is None:
-            return balance_qty
-        piece_amount = self._piece_measure(
-            {"thickness": thickness, "width": width, "length": length}, measure_key
-        )
-        if piece_amount <= 0:
-            return balance_qty
-        raw_measure = row_value(row, measure_idx)
-        if not measure_cell_filled(raw_measure) and balance_qty > 0:
-            # Вимір не проставлено (порожньо або 0) при наявних штуках -
-            # правда в штуках (2026-09-06: ОСБ без мп зникав з форми продажу,
-            # а сервер потім відповідав «Доступно: 9 шт»).
-            return balance_qty
-        balance_measure = _number_value(raw_measure)
-        measure_limited_qty = int((balance_measure + INCOME_VOLUME_TOLERANCE) / piece_amount + 1e-9)
-        return min(balance_qty, max(0, measure_limited_qty))
+        # Рішення користувача (2026-09-06): «правда - штуки». Вимір (м3/м2/мп)
+        # рахується зі штук і залишок позиції у формі ним не обмежується.
+        return balance_qty
 
     def _existing_dimension_combos(self, store, product, condition, require_balance=False):
         if not product:

@@ -6,7 +6,6 @@ import sqlite3
 
 import permissions as perm
 from utils import (
-    measure_cell_filled,
     piece_measure,
     _display_bot_number,
     _normalize_phrase,
@@ -4087,34 +4086,17 @@ class IncomeSaleFlowDialogMixin:
                 measure_unit = None
                 balance_measure = None
             else:
+                # Вимір лише для тексту «Доступно: N шт / M мп»; звіряються
+                # тільки штуки (рішення користувача 2026-09-06: правда - штуки).
                 measure_unit = self._MEASURE_KIND_UNIT[measure_key]
                 measure_column = self._MEASURE_KIND_BALANCE_COLUMN[measure_key]
-                raw_measure = row_value(row_values, columns.get(measure_column))
-                if not measure_cell_filled(raw_measure) and balance_qty > 0:
-                    # Вимір не проставлено (порожньо або 0) при наявних
-                    # штуках: звіряємо лише штуки (2026-09-06).
-                    measure_key = None
-                    measure_unit = None
-                    balance_measure = None
-                else:
-                    balance_measure = _number_value(raw_measure)
+                balance_measure = _number_value(row_value(row_values, columns.get(measure_column)))
             if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
                 return {
                     "kind": "quantity",
                     "row_index": row_index,
                     "requested": _number_value(item.get("quantity")),
                     "requested_unit": "шт",
-                    "balance_qty": balance_qty,
-                    "balance_measure": balance_measure,
-                    "measure_unit": measure_unit,
-                }
-            requested_measure = item.get("stock_" + measure_key, item.get(measure_key)) if measure_key else None
-            if measure_key is not None and _number_value(requested_measure) > balance_measure + INCOME_VOLUME_TOLERANCE:
-                return {
-                    "kind": measure_key,
-                    "row_index": row_index,
-                    "requested": _number_value(item.get(measure_key)),
-                    "requested_unit": measure_unit,
                     "balance_qty": balance_qty,
                     "balance_measure": balance_measure,
                     "measure_unit": measure_unit,

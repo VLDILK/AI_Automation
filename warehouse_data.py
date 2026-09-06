@@ -30,7 +30,7 @@ from openpyxl.worksheet.filters import AutoFilter
 import excel_source
 import xlsx_columns
 import permissions
-from utils import is_lath_row, is_piece_priced_product, lath_product_name, measure_cell_filled, plain_product_name
+from utils import is_lath_row, is_piece_priced_product, lath_product_name, plain_product_name
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
@@ -2472,12 +2472,74 @@ class ExcelSqliteStore:
     def normalize_lath_rows(self):
         return self.normalize_stock_rows()["lath"]
 
-    # Разовий дорахунок на ВЖЕ імпортованій базі (2026-09-06): раніше
+    def _stock_measure_plan(self, headers):
+        """(columns, by_header) для рядків СКЛАД; кешується за заголовками."""
+        key = tuple(headers)
+        cached = getattr(self, "_stock_plan_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        columns = warehouse_columns(headers)
+        by_header = {}
+        for index, header in enumerate(headers):
+            phrase = _normalize_phrase(header)
+            if phrase and phrase not in by_header:
+                by_header[phrase] = index
+        plan = (columns, by_header)
+        self._stock_plan_cache = (key, plan)
+        return plan
+
+    # Правда - штуки (рішення користувача 2026-09-06): для одного рядка СКЛАД
+    # кожна клітинка виміру (м3/м2/мп) = штуки × вимір за штуку в тій самій
+    # четвірці (начальный, приход, продано, остаток); заповнена клітинка теж
+    # перезаписується, коли не сходиться; при нулі штук - нуль. Одна й та
+    # сама функція для імпорту (normalize_stock_rows) і для кожного запису
+    # (update_row/add_row), тож вимір ніколи не розходиться зі штуками.
+    # Повертає (нові значення, скільки клітинок змінено).
+    def _measures_from_pieces(self, values, headers):
+        columns, by_header = self._stock_measure_plan(headers)
+        if any(columns.get(key) is None for key in ("product", "thickness", "width", "length")):
+            return values, 0
+        product = row_value(values, columns["product"])
+        if product in (None, ""):
+            return values, 0
+        thickness = row_value(values, columns["thickness"])
+        width = row_value(values, columns["width"])
+        length = row_value(values, columns["length"])
+        kind = _shared_row_measure_kind(plain_product_name(product), thickness, width)
+        if kind is None:
+            return values, 0
+        piece = _shared_piece_measure(thickness, width, length, kind)
+        if piece <= 0:
+            return values, 0
+        new_values = list(values)
+        changed = 0
+        for qty_header, measure_header in zip(_WAREHOUSE_QTY_HEADERS, _WAREHOUSE_MEASURE_HEADERS[kind]):
+            qty_index = by_header.get(_normalize_phrase(qty_header))
+            measure_index = by_header.get(_normalize_phrase(measure_header))
+            if qty_index is None or measure_index is None:
+                continue
+            quantity = row_value(values, qty_index)
+            if quantity in (None, ""):
+                continue
+            try:
+                quantity = float(str(quantity).replace(",", "."))
+            except ValueError:
+                continue
+            raw_measure = row_value(values, measure_index)
+            computed = round(quantity * piece, 6)
+            if raw_measure not in (None, "") and abs(_number_value(raw_measure) - computed) <= 1e-6:
+                continue
+            set_value(new_values, measure_index, computed)
+            changed += 1
+        return new_values, changed
+
+    # Разовий перерахунок на ВЖЕ імпортованій базі (2026-09-06): раніше
     # normalize_stock_rows викликався лише з import_workbook, тож база,
     # імпортована до появи «ОСБ у мп», лишалась із порожньою «Остаток, мп» і
     # одиницею «шт» - а порожній вимір обнуляв залишок ОСБ у формі продажу.
-    # Наступний імпорт Excel синхронізує дораховане назад у таблицю.
-    _STOCK_NORMALIZED_KEY = "stock_measures_normalized_v2"
+    # v3 - «правда - штуки»: перераховуються і заповнені клітинки.
+    # Наступний імпорт Excel синхронізує пораховане назад у таблицю.
+    _STOCK_NORMALIZED_KEY = "stock_measures_normalized_v3"
 
     def _normalize_existing_stock_once(self):
         if self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (self._STOCK_NORMALIZED_KEY,)).fetchone():
@@ -2493,10 +2555,11 @@ class ExcelSqliteStore:
 
     def normalize_stock_rows(self):
         """Після імпорту СКЛАД: позначка «(рейка)», одиниця виміру за видом
-        товару в «Основная ед. учета» і дорахунок порожніх клітинок виміру з
-        кількості штук (рішення користувача 2026-09-06: «таблиця має сама
-        дораховувати од вимірювання, якщо вказані лише штуки»). Заповнені
-        клітинки не чіпає. Повертає {"rows", "lath", "measures"}."""
+        товару в «Основная ед. учета» і перерахунок клітинок виміру з
+        кількості штук. Рішення користувача 2026-09-06: «правда - штуки; штук
+        0, значить одиниця виміру = 0; поправити можна самому» - вимір
+        завжди рахується зі штук, розбіжність перезаписується, без питань.
+        Повертає {"rows", "lath", "measures"}."""
         headers = self.get_headers("СКЛАД")
         if not headers:
             return {"rows": 0, "lath": 0, "measures": 0}
@@ -2528,31 +2591,7 @@ class ExcelSqliteStore:
                     set_value(new_values, columns["product"], lath_product_name(product, thickness, width))
                 if unit_column is not None:
                     set_value(new_values, unit_column, self._UNIT_LABEL_BY_KIND[kind])
-                piece = _shared_piece_measure(thickness, width, length, kind)
-                filled = 0
-                if piece > 0:
-                    for qty_header, measure_header in zip(_WAREHOUSE_QTY_HEADERS, _WAREHOUSE_MEASURE_HEADERS[kind]):
-                        qty_index = by_header.get(_normalize_phrase(qty_header))
-                        measure_index = by_header.get(_normalize_phrase(measure_header))
-                        if qty_index is None or measure_index is None:
-                            continue
-                        quantity = row_value(values, qty_index)
-                        if quantity in (None, ""):
-                            continue
-                        try:
-                            quantity = float(str(quantity).replace(",", "."))
-                        except ValueError:
-                            continue
-                        # Заповнена клітинка (ненульове число) не чіпається.
-                        # Порожня або 0 при штуках > 0 - «вимір не проставлено»,
-                        # дораховується (2026-09-06: ОСБ без мп зникав з форми).
-                        raw_measure = row_value(values, measure_index)
-                        if measure_cell_filled(raw_measure):
-                            continue
-                        if quantity <= 0 and raw_measure not in (None, ""):
-                            continue
-                        set_value(new_values, measure_index, round(quantity * piece, 6))
-                        filled += 1
+                new_values, filled = self._measures_from_pieces(new_values, headers)
                 if new_values == values:
                     continue
                 self.conn.execute(
@@ -2764,6 +2803,9 @@ class ExcelSqliteStore:
         row = self.conn.execute(
             "SELECT sheet_name FROM sheet_rows WHERE id = ?", (row_id,)
         ).fetchone()
+        if row and row[0] == "СКЛАД":
+            # Правда - штуки (2026-09-06): вимір рядка зі штук при кожному записі.
+            values, _changed = self._measures_from_pieces(list(values), self.get_headers("СКЛАД"))
         self.conn.execute(
             """
             UPDATE sheet_rows
@@ -2779,6 +2821,9 @@ class ExcelSqliteStore:
 
     def add_row(self, sheet_name, values):
         was_in_transaction = self.conn.in_transaction
+        if sheet_name == "СКЛАД":
+            # Правда - штуки (2026-09-06): нова позиція теж зі штук.
+            values, _changed = self._measures_from_pieces(list(values), self.get_headers("СКЛАД"))
         cursor = self.conn.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM sheet_rows WHERE sheet_name = ?",
             (sheet_name,),
@@ -6857,36 +6902,8 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                             f"Доступно: {_display_bot_number(balance_qty)} шт."
                         ),
                     }
-                if is_area:
-                    balance_area = _number_value(row_value(row_values, columns.get("balance_area")))
-                    if _number_value(item.get("area")) > balance_area + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать продажу: на складе уже недостаточно площади.\n"
-                                f"Доступно: {_display_bot_number(balance_area)} м2."
-                            ),
-                        }
-                elif is_linear:
-                    balance_linear = _number_value(row_value(row_values, columns.get("balance_linear")))
-                    if _number_value(item.get("linear")) > balance_linear + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать продажу: на складе уже недостаточно погонных метров.\n"
-                                f"Доступно: {_display_bot_number(balance_linear)} мп."
-                            ),
-                        }
-                else:
-                    balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
-                    if _number_value(stock_item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать продажу: на складе уже недостаточно объема.\n"
-                                f"Доступно: {_display_bot_number(balance_volume)} м3."
-                            ),
-                        }
+                # Сторожі виміру (м2/мп/м3) прибрано (2026-09-06): правда -
+                # штуки, вимір рахується зі штук і окремо не звіряється.
 
                 # Крок 3+ "Дії": якщо продукт/тип збігається із заведеною
                 # дією (ДОСКА AD/KD/ОСБ/ВАГОНКА) — запис веде конфігурований
@@ -7586,36 +7603,8 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
                             f"Доступно: {_display_bot_number(balance_qty)} шт."
                         ),
                     }
-                if is_area:
-                    balance_area = _number_value(row_value(row_values, columns.get("balance_area")))
-                    if _number_value(item.get("area")) > balance_area + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать списание: на складе уже недостаточно площади.\n"
-                                f"Доступно: {_display_bot_number(balance_area)} м2."
-                            ),
-                        }
-                elif is_linear:
-                    balance_linear = _number_value(row_value(row_values, columns.get("balance_linear")))
-                    if _number_value(item.get("linear")) > balance_linear + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать списание: на складе уже недостаточно погонных метров.\n"
-                                f"Доступно: {_display_bot_number(balance_linear)} мп."
-                            ),
-                        }
-                elif item.get("volume") is not None:
-                    balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
-                    if _number_value(item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать списание: на складе уже недостаточно объема.\n"
-                                f"Доступно: {_display_bot_number(balance_volume)} м3."
-                            ),
-                        }
+                # Сторожі виміру (м2/мп/м3) прибрано (2026-09-06): правда -
+                # штуки, вимір рахується зі штук і окремо не звіряється.
 
                 if operation_id is not None:
                     execute_operation_write(store, operation_id, item, row_values, columns)
