@@ -4165,11 +4165,56 @@
       });
       return select;
     }
-    var typeOptions = [["", "Все операции"]];
-    Object.keys(labels).forEach(function (key) {
-      typeOptions.push([key, labels[key]]);
+    // Рішення користувача (2026-09-06): фільтр за операціями - кольорові
+    // прапорці-чипи («Приход», «Обмен»…) з «Все» / «Ничего»; бачити лише
+    // приходи чи всі обміни - один дотик.
+    var groups = ctx.journal_groups || [];
+    var chipsRow = document.createElement("div");
+    chipsRow.className = "journal-chips";
+    var chipState = {};
+    var chipButtons = {};
+    groups.forEach(function (pair) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "journal-chip journal-chip-" + baseType(pair[1][0]) + " on";
+      chip.textContent = pair[0];
+      chipState[pair[0]] = true;
+      chip.addEventListener("click", function () {
+        chipState[pair[0]] = !chipState[pair[0]];
+        chip.classList.toggle("on", chipState[pair[0]]);
+      });
+      chipButtons[pair[0]] = chip;
+      chipsRow.appendChild(chip);
     });
-    var typeSelect = makeSelect(typeOptions);
+    function setAllChips(value) {
+      groups.forEach(function (pair) {
+        chipState[pair[0]] = value;
+        chipButtons[pair[0]].classList.toggle("on", value);
+      });
+    }
+    var allChip = document.createElement("button");
+    allChip.type = "button";
+    allChip.className = "journal-mini";
+    allChip.textContent = "Все";
+    allChip.addEventListener("click", function () { setAllChips(true); });
+    var noneChip = document.createElement("button");
+    noneChip.type = "button";
+    noneChip.className = "journal-mini";
+    noneChip.textContent = "Ничего";
+    noneChip.addEventListener("click", function () { setAllChips(false); });
+    chipsRow.appendChild(allChip);
+    chipsRow.appendChild(noneChip);
+    function baseType(type) {
+      return String(type || "").indexOf("exchange") === 0 ? "exchange" : String(type || "");
+    }
+    function groupLabelFor(type) {
+      for (var i = 0; i < groups.length; i++) {
+        if (groups[i][1].indexOf(type) !== -1) {
+          return groups[i][0];
+        }
+      }
+      return labels[type] || type;
+    }
     var periodSelect = makeSelect([["all", "За всё время"], ["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["custom", "Свой период"]]);
     var productOptions = [["", "Все продукты"]];
     (ctx.products || []).forEach(function (product) {
@@ -4192,7 +4237,7 @@
     applyButton.type = "button";
     applyButton.className = "add-position-button journal-apply";
     applyButton.textContent = "Показать";
-    [typeSelect, periodSelect, productSelect, dateFrom, dateTo, searchInput, applyButton].forEach(function (el) {
+    [chipsRow, periodSelect, productSelect, dateFrom, dateTo, searchInput, applyButton].forEach(function (el) {
       filtersBar.appendChild(el);
     });
     periodSelect.addEventListener("change", function () {
@@ -4218,7 +4263,23 @@
       return y + "-" + (m.length < 2 ? "0" + m : m) + "-" + (d.length < 2 ? "0" + d : d);
     }
     function currentFilters() {
-      var filters = { types: typeSelect.value ? [typeSelect.value] : [], product: productSelect.value || "", search: searchInput.value.trim() };
+      var chosenTypes = [];
+      var allOn = true;
+      groups.forEach(function (pair) {
+        if (chipState[pair[0]]) {
+          chosenTypes = chosenTypes.concat(pair[1]);
+        } else {
+          allOn = false;
+        }
+      });
+      if (!groups.length) {
+        allOn = true;
+      }
+      var filters = {
+        types: allOn ? [] : (chosenTypes.length ? chosenTypes : ["__none__"]),
+        product: productSelect.value || "",
+        search: searchInput.value.trim(),
+      };
       var today = new Date();
       if (periodSelect.value === "today") {
         filters.date_from = isoDate(today);
@@ -4240,15 +4301,21 @@
     function filtersAreDefault(filters) {
       return !filters.types.length && !filters.product && !filters.search && !filters.date_from && !filters.date_to;
     }
-    function entryElement(entry) {
-      var card = document.createElement("div");
-      card.className = "journal-entry journal-" + (entry.type || "");
-      var meta = document.createElement("div");
-      meta.className = "journal-meta";
-      meta.textContent = entry.time + " · " + (entry.document || entry.type_label) + (entry.document ? "" : "") + (entry.who ? " · " + entry.who : "");
-      card.appendChild(meta);
+    // Рішення користувача (2026-09-06): один документ - одна картка (обмін
+    // «отдаём + получаем» разом), смужка кольору операції зліва, кольорова
+    // позначка в шапці. Рухи одного документа йдуть підряд (той самий час),
+    // тож групуємо сусідні записи з однаковим документом.
+    var loadedEntries = [];
+    var ROLE_LABELS = { exchange_out: "отдаём", exchange_in: "получаем" };
+    function lineFor(entry) {
       var line = document.createElement("div");
       line.className = "journal-line";
+      if (ROLE_LABELS[entry.type]) {
+        var role = document.createElement("span");
+        role.className = "journal-role";
+        role.textContent = ROLE_LABELS[entry.type];
+        line.appendChild(role);
+      }
       var what = [entry.product, entry.breed, entry.condition && entry.condition !== entry.product ? entry.condition : "", entry.size].filter(function (v) { return v; }).join(" ");
       var whatEl = document.createElement("span");
       whatEl.textContent = what + " ";
@@ -4262,37 +4329,87 @@
       }
       delta.textContent = deltaText;
       line.appendChild(delta);
-      card.appendChild(line);
+      return line;
+    }
+    function documentElement(group) {
+      var first = group[0];
+      var base = baseType(first.type);
+      var card = document.createElement("div");
+      card.className = "journal-doc journal-doc-" + base;
+      var head = document.createElement("div");
+      head.className = "journal-doc-head";
+      var tag = document.createElement("span");
+      tag.className = "journal-tag journal-tag-" + base;
+      tag.textContent = first.document || groupLabelFor(first.type);
+      head.appendChild(tag);
+      var time = document.createElement("span");
+      time.className = "journal-meta";
+      time.textContent = first.time;
+      head.appendChild(time);
+      if (first.who) {
+        var who = document.createElement("b");
+        who.textContent = first.who;
+        head.appendChild(who);
+      }
+      card.appendChild(head);
+      group.slice().sort(function (a, b) {
+        return (a.type === "exchange_in" ? 1 : 0) - (b.type === "exchange_in" ? 1 : 0);
+      }).forEach(function (entry) {
+        card.appendChild(lineFor(entry));
+      });
+      var balances = [];
+      var reasons = [];
+      group.forEach(function (entry) {
+        if (entry.balance_after !== null && entry.balance_after !== undefined) {
+          balances.push(formatServerNumber(entry.balance_after));
+        }
+        if (entry.reason && reasons.indexOf(entry.reason) === -1) {
+          reasons.push(entry.reason);
+        }
+      });
       var tail = [];
-      if (entry.document && entry.type_label && entry.type !== "correction") {
-        tail.push(entry.type_label);
+      if (balances.length) {
+        tail.push("остаток → " + balances.join(" · ") + " шт");
       }
-      if (entry.balance_after !== null && entry.balance_after !== undefined) {
-        tail.push("остаток → " + formatServerNumber(entry.balance_after) + " шт");
-      }
-      if (entry.reason) {
-        tail.push("причина: " + entry.reason);
+      if (reasons.length) {
+        tail.push(reasons.join(" · "));
       }
       if (tail.length) {
         var tailEl = document.createElement("div");
-        tailEl.className = "journal-meta";
+        tailEl.className = "journal-meta journal-doc-tail";
         tailEl.textContent = tail.join(" · ");
         card.appendChild(tailEl);
       }
       return card;
     }
+    function groupEntries(entries) {
+      var result = [];
+      var current = null;
+      var currentKey = null;
+      entries.forEach(function (entry) {
+        var key = (entry.document || ("#" + entry.id)) + "|" + baseType(entry.type);
+        if (current && key === currentKey) {
+          current.push(entry);
+          return;
+        }
+        current = [entry];
+        currentKey = key;
+        result.push(current);
+      });
+      return result;
+    }
     function renderEntries(entries, append) {
-      if (!append) {
-        journalList.innerHTML = "";
-      }
-      if (!entries.length && !append) {
+      loadedEntries = append ? loadedEntries.concat(entries) : entries.slice();
+      journalList.innerHTML = "";
+      if (!loadedEntries.length) {
         var empty = document.createElement("div");
         empty.className = "journal-meta";
         empty.textContent = "Записей нет.";
         journalList.appendChild(empty);
+        return;
       }
-      entries.forEach(function (entry) {
-        journalList.appendChild(entryElement(entry));
+      groupEntries(loadedEntries).forEach(function (group) {
+        journalList.appendChild(documentElement(group));
       });
     }
     function loadJournal(reset) {

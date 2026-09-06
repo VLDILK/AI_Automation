@@ -24,7 +24,7 @@ from utils import (
     _normalize_phrase,
     _number_value,
 )
-from warehouse_data import JOURNAL_TYPE_LABELS, journal_entries, journal_page
+from warehouse_data import JOURNAL_FILTER_GROUPS, JOURNAL_TYPE_LABELS, journal_entries, journal_page
 from warehouse_data import (
     signed_bot_number,
     apply_correction_operation,
@@ -2205,6 +2205,8 @@ class CoreDialogMixin:
             "telegram_id": context["user_id"],
             "categories": categories,
             "operation_labels": dict(self._ADMIN_JOURNAL_LABELS),
+            # Прапорці фільтра у формі: «Обмен» = обидва боки (2026-09-06).
+            "journal_groups": [[label, list(types)] for label, types in JOURNAL_FILTER_GROUPS],
             "products": products,
             "journal": self._admin_journal_page(store, {"limit": 50}),
             **self._webapp_style_ctx(),

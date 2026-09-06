@@ -1003,6 +1003,103 @@ html, body {
   margin: 0;
 }
 
+/* Журнал (2026-09-06): кольори операцій - ті самі, що у вікнах програм;
+   змінні, щоб пізніше їх можна було задати з налаштувань клієнта. */
+:root {
+  --jc-income-bg: #ddf3ea; --jc-income-fg: #0f6e56;
+  --jc-sale-bg: #fde7d8; --jc-sale-fg: #8a3a05;
+  --jc-writeoff-bg: #fde8e6; --jc-writeoff-fg: #b42318;
+  --jc-exchange-bg: #e3e1f7; --jc-exchange-fg: #534ab7;
+  --jc-antiseptic-bg: #d9f0f4; --jc-antiseptic-fg: #0e7490;
+  --jc-correction-bg: #dde6fb; --jc-correction-fg: #1d4ed8;
+}
+
+.journal-chips {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.journal-chip,
+.journal-mini {
+  border-radius: 12px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--field-border);
+  background: transparent;
+  color: var(--tg-hint);
+  cursor: pointer;
+}
+
+.journal-mini {
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.journal-chip.on { border-color: transparent; }
+.journal-chip-income.on { background: var(--jc-income-bg); color: var(--jc-income-fg); }
+.journal-chip-sale.on { background: var(--jc-sale-bg); color: var(--jc-sale-fg); }
+.journal-chip-writeoff.on { background: var(--jc-writeoff-bg); color: var(--jc-writeoff-fg); }
+.journal-chip-exchange.on { background: var(--jc-exchange-bg); color: var(--jc-exchange-fg); }
+.journal-chip-antiseptic.on { background: var(--jc-antiseptic-bg); color: var(--jc-antiseptic-fg); }
+.journal-chip-correction.on { background: var(--jc-correction-bg); color: var(--jc-correction-fg); }
+
+.journal-doc {
+  background: var(--tg-secondary-bg);
+  border-radius: 10px;
+  border-left: 4px solid var(--field-border);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--tg-text);
+}
+
+.journal-doc-income { border-left-color: var(--jc-income-fg); }
+.journal-doc-sale { border-left-color: var(--jc-sale-fg); }
+.journal-doc-writeoff { border-left-color: var(--jc-writeoff-fg); }
+.journal-doc-exchange { border-left-color: var(--jc-exchange-fg); }
+.journal-doc-antiseptic { border-left-color: var(--jc-antiseptic-fg); }
+.journal-doc-correction { border-left-color: var(--jc-correction-fg); }
+
+.journal-doc-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+  margin-bottom: 3px;
+}
+
+.journal-tag {
+  display: inline-block;
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--field-border);
+}
+
+.journal-tag-income { background: var(--jc-income-bg); color: var(--jc-income-fg); }
+.journal-tag-sale { background: var(--jc-sale-bg); color: var(--jc-sale-fg); }
+.journal-tag-writeoff { background: var(--jc-writeoff-bg); color: var(--jc-writeoff-fg); }
+.journal-tag-exchange { background: var(--jc-exchange-bg); color: var(--jc-exchange-fg); }
+.journal-tag-antiseptic { background: var(--jc-antiseptic-bg); color: var(--jc-antiseptic-fg); }
+.journal-tag-correction { background: var(--jc-correction-bg); color: var(--jc-correction-fg); }
+
+.journal-role {
+  display: inline-block;
+  min-width: 64px;
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.journal-doc-tail {
+  margin-top: 2px;
+}
+
 .journal-entry {
   background: var(--tg-secondary-bg);
   border-radius: 10px;
