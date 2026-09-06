@@ -1404,8 +1404,9 @@ class CoreDialogMixin:
             ctx["resume"] = resume
         return ctx
 
-    def _exchange_resume_from_positions(self, give, take, comment):
-        """Форма відновлює обидва блоки з {category_operation_id, breed, rows}."""
+    def _exchange_resume_from_positions(self, exchanges, comment):
+        """Форма відновлює заміни з {give: [...], take: [...]}, кожна позиція -
+        {category_operation_id, breed, rows}."""
         def entries(positions):
             out = []
             for position in positions or []:
@@ -1417,8 +1418,15 @@ class CoreDialogMixin:
                     "rows": position.get("rows"),
                 })
             return out
-        resume = {"give": entries(give), "take": entries(take), "common": {"comment": comment}}
-        return resume if resume["give"] or resume["take"] else None
+        blocks = []
+        for block in exchanges or []:
+            if not isinstance(block, dict):
+                continue
+            give, take = entries(block.get("give")), entries(block.get("take"))
+            if give or take:
+                blocks.append({"give": give, "take": take})
+        resume = {"exchanges": blocks, "common": {"comment": comment}}
+        return resume if blocks else None
 
     def _build_exchange_resume(self, store, payload):
         """Те саме, але з уже розібраних позицій (після підтвердження)."""
@@ -1432,11 +1440,17 @@ class CoreDialogMixin:
                     continue
                 out.append({**position, "category_operation_id": operation_id})
             return out
-        return self._exchange_resume_from_positions(
-            with_operation(payload.get("give"), "start_writeoff", "writeoff"),
-            with_operation(payload.get("take"), "start_income", "income"),
-            payload.get("comment"),
-        )
+        give = with_operation(payload.get("give"), "start_writeoff", "writeoff")
+        take = with_operation(payload.get("take"), "start_income", "income")
+        numbers = sorted({int(p.get("block") or 1) for p in give + take})
+        exchanges = [
+            {
+                "give": [p for p in give if int(p.get("block") or 1) == number],
+                "take": [p for p in take if int(p.get("block") or 1) == number],
+            }
+            for number in numbers
+        ]
+        return self._exchange_resume_from_positions(exchanges, payload.get("comment"))
 
     def _exchange_all_in_one_webapp_button(self, store, resume=None):
         base_url = getattr(self, "webapp_public_url", None)
@@ -1537,35 +1551,57 @@ class CoreDialogMixin:
         comment = submitted.get("comment")
         if isinstance(comment, str):
             comment = comment.strip()
-        give_data = submitted.get("give") if isinstance(submitted.get("give"), list) else []
-        take_data = submitted.get("take") if isinstance(submitted.get("take"), list) else []
+        # Обмін блоками (2026-09-06): exchanges=[{give:[…], take:[…]}]; старий
+        # вигляд give/take - одна заміна.
+        exchanges_data = submitted.get("exchanges")
+        if not isinstance(exchanges_data, list):
+            exchanges_data = [{
+                "give": submitted.get("give") if isinstance(submitted.get("give"), list) else [],
+                "take": submitted.get("take") if isinstance(submitted.get("take"), list) else [],
+            }]
+        exchanges_data = [block for block in exchanges_data if isinstance(block, dict)]
 
         def back_to_form(message):
-            # Відповідь користувача 4: помилка не перериває й не губить
-            # введене - форма відкривається знову з обома блоками.
             return self._start_exchange_all_in_one_reply(
                 store, context,
-                resume=self._exchange_resume_from_positions(give_data, take_data, comment),
+                resume=self._exchange_resume_from_positions(exchanges_data, comment),
                 prefix_text="⚠️ " + message + "\n\nВведённое сохранено — откройте форму и исправьте.",
             )
 
-        if not give_data:
-            return back_to_form("В блоке «Отдаём» пока пусто — добавьте хотя бы одну позицию.")
-        if not take_data:
-            return back_to_form("В блоке «Получаем» пока пусто — добавьте хотя бы одну позицию.")
-        give, problem = self._exchange_positions_from_form(store, context, give_data, "start_writeoff", "writeoff")
-        if problem:
-            return back_to_form("Блок «Отдаём»: " + problem)
-        take, problem = self._exchange_positions_from_form(store, context, take_data, "start_income", "income")
-        if problem:
-            return back_to_form("Блок «Получаем»: " + problem)
-        if not give or not take:
-            return back_to_form("Не удалось определить ни одной позиции.")
+        if not exchanges_data:
+            return back_to_form("Добавьте хотя бы один обмен.")
+        give, take, exchanges = [], [], []
+        multi = len(exchanges_data) > 1
+        for number, block in enumerate(exchanges_data, start=1):
+            where = f"Замена {number}: " if multi else ""
+            give_data = block.get("give") if isinstance(block.get("give"), list) else []
+            take_data = block.get("take") if isinstance(block.get("take"), list) else []
+            if not give_data:
+                return back_to_form(where + "в блоке «Отдаём» пока пусто — добавьте хотя бы одну позицию.")
+            if not take_data:
+                return back_to_form(where + "в блоке «Получаем» пока пусто — добавьте позицию.")
+            take_rows = sum(len(p.get("rows") or []) for p in take_data if isinstance(p, dict))
+            if len(take_data) != 1 or take_rows != 1:
+                return back_to_form(where + "в блоке «Получаем» должен быть ровно один размер.")
+            block_give, problem = self._exchange_positions_from_form(store, context, give_data, "start_writeoff", "writeoff")
+            if problem:
+                return back_to_form(where + "блок «Отдаём»: " + problem)
+            block_take, problem = self._exchange_positions_from_form(store, context, take_data, "start_income", "income")
+            if problem:
+                return back_to_form(where + "блок «Получаем»: " + problem)
+            if not block_give or not block_take:
+                return back_to_form(where + "не удалось определить ни одной позиции.")
+            for position in block_give + block_take:
+                position["block"] = number
+            give.extend(block_give)
+            take.extend(block_take)
+            exchanges.append({"give": block_give, "take": block_take})
 
         payload = self._new_income_payload("", context)
         payload["operation_kind"] = "exchange"
         payload["give"] = give
         payload["take"] = take
+        payload["exchanges"] = exchanges
         payload["_from_webapp_form"] = True
         if comment:
             payload["comment"] = comment
@@ -1612,18 +1648,25 @@ class CoreDialogMixin:
                 text += ", новая позиция"
             return text
 
-        lines = ["Обмен — подтвердите:", "", "Отдаём:"]
-        index = 0
-        for position in payload["give"]:
-            for item in position["rows"]:
-                index += 1
-                lines.append(item_line(index, position, item, "-"))
-        lines += ["", "Получаем:"]
-        index = 0
-        for position in payload["take"]:
-            for item in position["rows"]:
-                index += 1
-                lines.append(item_line(index, position, item, "+"))
+        exchanges = payload.get("exchanges") or [{"give": payload.get("give") or [], "take": payload.get("take") or []}]
+        multi = len(exchanges) > 1
+        lines = ["Обмен — подтвердите:"]
+        for number, block in enumerate(exchanges, start=1):
+            lines.append("")
+            if multi:
+                lines.append("Замена %d" % number)
+            lines.append("Отдаём:")
+            index = 0
+            for position in block.get("give") or []:
+                for item in position["rows"]:
+                    index += 1
+                    lines.append(item_line(index, position, item, "-"))
+            lines.append("Получаем:")
+            index = 0
+            for position in block.get("take") or []:
+                for item in position["rows"]:
+                    index += 1
+                    lines.append(item_line(index, position, item, "+"))
         if payload.get("comment"):
             lines += ["", "Комментарий: %s" % payload["comment"]]
         return "\n".join(lines)

@@ -3087,8 +3087,6 @@
       return count + " позиций";
     }
 
-    // Той самий setFieldValue, що й у mainAllInOne (він там - замикання):
-    // select зі списку або ручне значення, якщо такого пункту немає.
     function setValueInto(input, value) {
       if (value === undefined || value === null || value === "") {
         return;
@@ -3129,7 +3127,11 @@
       return picked;
     }
 
-    function buildBlock(side, title, addLabel, cats) {
+    // Блок однієї сторони заміни. side="give" - список позицій зі своїм
+    // кошиком і «+ Добавить» (як було); side="take" (single=true) - рівно
+    // один розмір, поля завжди відкриті, без кошика (рішення користувача
+    // 2026-09-06: «на те, що міняємо, - лише 1»).
+    function buildBlock(side, title, addLabel, cats, single) {
       var block = document.createElement("div");
       block.className = "exchange-block exchange-block-" + side;
 
@@ -3141,7 +3143,9 @@
       var countEl = document.createElement("span");
       countEl.className = "exchange-block-count";
       head.appendChild(titleEl);
-      head.appendChild(countEl);
+      if (!single) {
+        head.appendChild(countEl);
+      }
       block.appendChild(head);
 
       var cartSection = document.createElement("div");
@@ -3150,7 +3154,9 @@
       var cartList = document.createElement("div");
       cartList.className = "cart-list";
       cartSection.appendChild(cartList);
-      block.appendChild(cartSection);
+      if (!single) {
+        block.appendChild(cartSection);
+      }
 
       var categoryWrap = document.createElement("div");
       categoryWrap.className = "field";
@@ -3168,15 +3174,9 @@
       });
       categoryWrap.appendChild(select);
 
-      // Зауваження користувача (2026-09-05, живий тест): "обмін і отримання
-      // займають критично багато місця... спочатку це має бути в згорнутому
-      // вигляді. коли тисну "додати" в один із розділів - тоді тільки має
-      // відобразитись поле вводу". Поля живуть у fieldsWrap, прихованому,
-      // доки не натиснуть "+ Добавить" саме в цьому блоці; щойно позиція
-      // лягла в кошик - ховаються знову (обраний варіант 01).
       var fieldsWrap = document.createElement("div");
       fieldsWrap.className = "exchange-fields";
-      fieldsWrap.style.display = "none";
+      fieldsWrap.style.display = single ? "" : "none";
       fieldsWrap.appendChild(categoryWrap);
       var identityContainer = document.createElement("div");
       var measureContainer = document.createElement("div");
@@ -3240,34 +3240,44 @@
         showCategory(select.value);
       }
 
-      var actions = document.createElement("div");
-      actions.className = "exchange-fields-actions";
-      var cancelButton = document.createElement("button");
-      cancelButton.type = "button";
-      cancelButton.className = "exchange-fields-btn";
-      cancelButton.textContent = "Отмена";
-      var commitButton = document.createElement("button");
-      commitButton.type = "button";
-      commitButton.className = "exchange-fields-btn primary";
-      commitButton.textContent = "Добавить";
-      actions.appendChild(cancelButton);
-      actions.appendChild(commitButton);
-      fieldsWrap.appendChild(actions);
+      var cancelButton = null;
+      var commitButton = null;
+      var openButton = null;
+      if (!single) {
+        var actions = document.createElement("div");
+        actions.className = "exchange-fields-actions";
+        cancelButton = document.createElement("button");
+        cancelButton.type = "button";
+        cancelButton.className = "exchange-fields-btn";
+        cancelButton.textContent = "Отмена";
+        commitButton = document.createElement("button");
+        commitButton.type = "button";
+        commitButton.className = "exchange-fields-btn primary";
+        commitButton.textContent = "Добавить";
+        actions.appendChild(cancelButton);
+        actions.appendChild(commitButton);
+        fieldsWrap.appendChild(actions);
 
-      var openButton = document.createElement("button");
-      openButton.type = "button";
-      openButton.className = "add-position-button";
-      openButton.textContent = addLabel;
-      block.appendChild(openButton);
+        openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "add-position-button";
+        openButton.textContent = addLabel;
+        block.appendChild(openButton);
+      }
 
       function fieldsOpen() {
         return fieldsWrap.style.display !== "none";
       }
       function openFields() {
         fieldsWrap.style.display = "";
-        openButton.style.display = "none";
+        if (openButton) {
+          openButton.style.display = "none";
+        }
       }
       function closeFields() {
+        if (single) {
+          return;
+        }
         fieldsWrap.style.display = "none";
         openButton.style.display = "";
       }
@@ -3334,6 +3344,13 @@
           }
         });
         if (!filledAny) {
+          Object.keys(st.rowInputs).concat(Object.keys(st.flatInputs)).forEach(function (k) {
+            var input = st.rowInputs[k] || st.flatInputs[k];
+            var wrap = input.closest(".field");
+            if (wrap) {
+              wrap.classList.remove("invalid");
+            }
+          });
           return { ok: true, empty: true, values: values };
         }
         return { ok: !missingAny, empty: false, values: values };
@@ -3364,7 +3381,6 @@
         if (!st) {
           return;
         }
-        // Спершу порода: від неї залежать списки товщини/ширини/довжини.
         Object.keys(st.flatInputs).forEach(function (k) {
           setValueInto(st.flatInputs[k], position[k]);
         });
@@ -3424,8 +3440,6 @@
             text += ", " + dims;
           }
           if (row.quantity) {
-            // Зауваження користувача (2026-09-05, живий тест): "додай до
-            // цифр з штуками - шт" - і в кошику, і на екрані перевірки.
             text += " × " + row.quantity + " шт";
           }
           var measureText = computeMeasureText(cat && cat.product, row.thickness, row.width, row.length, row.quantity);
@@ -3454,7 +3468,25 @@
         };
       }
 
+      function itemFromEntry(entry) {
+        var key = String(entry.category_operation_id);
+        if (!state[key]) {
+          return null;
+        }
+        var values = {};
+        if (entry.breed) {
+          values.breed = entry.breed;
+        }
+        if (entry.rows && entry.rows.length) {
+          values.rows = [pickRow(entry.rows[0])];
+        }
+        return makeItem(key, values);
+      }
+
       function refreshCount() {
+        if (single) {
+          return;
+        }
         if (!cart.length) {
           countEl.textContent = "пусто";
           return;
@@ -3476,6 +3508,9 @@
       }
 
       function renderCart() {
+        if (single) {
+          return;
+        }
         cartList.innerHTML = "";
         cartSection.style.display = cart.length ? "" : "none";
         cart.forEach(function (item, index) {
@@ -3488,12 +3523,6 @@
           text.textContent = (index + 1) + ". " + item.summary;
           textWrap.appendChild(text);
           row.appendChild(textWrap);
-          if (item.isNew) {
-            var badge = document.createElement("span");
-            badge.className = "cart-item-badge-new";
-            badge.textContent = "новая";
-            row.appendChild(badge);
-          }
           var actions = document.createElement("div");
           actions.className = "cart-item-actions";
           var editBtn = document.createElement("button");
@@ -3570,20 +3599,22 @@
         renderCart();
       }
 
-      openButton.addEventListener("click", function () {
-        errorEl.textContent = "";
-        openFields();
-        fieldsWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      });
-      commitButton.addEventListener("click", addCurrent);
-      cancelButton.addEventListener("click", function () {
-        clearInputs(select.value);
-        errorEl.textContent = "";
-        closeFields();
-      });
+      if (!single) {
+        openButton.addEventListener("click", function () {
+          errorEl.textContent = "";
+          openFields();
+          fieldsWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        });
+        commitButton.addEventListener("click", addCurrent);
+        cancelButton.addEventListener("click", function () {
+          clearInputs(select.value);
+          errorEl.textContent = "";
+          closeFields();
+        });
+      }
 
-      // Усе, що є в блоці зараз: кошик плюс заповнена, але ще не додана
-      // позиція. Наполовину заповнена - помилка, нічого не стирається.
+      // Усі позиції сторони: кошик + те, що в полях. null - помилка (текст
+      // уже показано). Порожні поля не заважають.
       function finalize() {
         if (!fieldsOpen()) {
           return cart.slice();
@@ -3606,29 +3637,58 @@
         return items;
       }
 
+      function isEmpty() {
+        if (cart.length) {
+          return false;
+        }
+        if (!fieldsOpen()) {
+          return true;
+        }
+        var result = collect(select.value);
+        return !!result.empty;
+      }
+
+      // Повернути позиції у блок: для «Отдаём» - у кошик, для «Получаем» -
+      // у поля (він один).
       function restore(entries) {
-        (entries || []).forEach(function (entry) {
-          var key = String(entry.category_operation_id);
-          if (!state[key]) {
-            return;
+        var items = (entries || []).map(itemFromEntry).filter(function (item) { return item; });
+        if (single) {
+          var item = items[0];
+          if (item) {
+            select.value = item.key;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+            populate(item.key, item.position);
           }
-          var values = {};
-          if (entry.breed) {
-            values.breed = entry.breed;
-          }
-          if (entry.rows && entry.rows.length) {
-            values.rows = [pickRow(entry.rows[0])];
-          }
-          cart.push(makeItem(key, values));
+          return;
+        }
+        items.forEach(function (item) {
+          cart.push(item);
         });
         renderCart();
       }
 
-      return { element: block, finalize: finalize, restore: restore, title: title };
+      function reset() {
+        cart = [];
+        clearInputs(select.value);
+        if (cats.length) {
+          select.value = String(cats[0].key);
+          showCategory(select.value);
+        }
+        closeFields();
+        renderCart();
+      }
+
+      return {
+        element: block, finalize: finalize, restore: restore, reset: reset, isEmpty: isEmpty,
+        itemsFromEntries: function (entries) {
+          return (entries || []).map(itemFromEntry).filter(function (item) { return item; });
+        },
+        title: title,
+      };
     }
 
-    var giveBlock = buildBlock("give", "Отдаём", "+ Добавить в «Отдаём»", ctx.give_categories || []);
-    var takeBlock = buildBlock("take", "Получаем", "+ Добавить в «Получаем»", ctx.take_categories || []);
+    var giveBlock = buildBlock("give", "Отдаём", "+ Добавить в «Отдаём»", ctx.give_categories || [], false);
+    var takeBlock = buildBlock("take", "Получаем", "", ctx.take_categories || [], true);
     rowsContainer.appendChild(giveBlock.element);
     rowsContainer.appendChild(takeBlock.element);
 
@@ -3637,25 +3697,184 @@
       commonInputs[field.key] = buildFieldElement(field, singleContainer);
     });
 
-    function buildSummary(giveItems, takeItems, comment) {
-      var wrap = document.createElement("div");
-      function section(title, cls, items) {
-        var heading = document.createElement("div");
-        heading.className = "exchange-summary-title " + cls;
-        heading.textContent = title;
-        wrap.appendChild(heading);
-        items.forEach(function (item, index) {
-          var line = document.createElement("div");
-          line.textContent = (index + 1) + ". " + item.summary + (item.isNew ? " — новая позиция" : "");
-          wrap.appendChild(line);
+    // Список замін (рішення користувача 2026-09-06): блок «Добавлено» з самого
+    // верху, «Сохранить и продолжить» згортає поточну заміну в рядок, далі
+    // видно лише список і «Добавить обмен» (CSS #form.collapsed).
+    var exchanges = [];
+    var exchangesSection = document.createElement("div");
+    exchangesSection.className = "cart-section";
+    exchangesSection.style.display = "none";
+    var exchangesHeader = document.createElement("div");
+    exchangesHeader.className = "cart-header";
+    exchangesHeader.textContent = "Добавлено:";
+    var exchangesList = document.createElement("div");
+    exchangesList.className = "cart-list";
+    exchangesSection.appendChild(exchangesHeader);
+    exchangesSection.appendChild(exchangesList);
+    formEl.insertBefore(exchangesSection, formEl.firstChild);
+
+    var addMoreButton = document.createElement("button");
+    addMoreButton.type = "button";
+    addMoreButton.className = "add-position-button add-more-button";
+    addMoreButton.textContent = "Добавить обмен";
+    formEl.insertBefore(addMoreButton, exchangesSection.nextSibling);
+
+    var saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "add-position-button";
+    saveButton.textContent = "Сохранить и продолжить";
+    rowsContainer.parentNode.insertBefore(saveButton, rowsContainer.nextSibling);
+
+    function setFormCollapsed(state) {
+      formEl.classList.toggle("collapsed", !!state && exchanges.length > 0);
+    }
+
+    function exchangeLines(block) {
+      var give = block.give.map(function (item) { return item.summary; }).join("; ");
+      var take = block.take.map(function (item) {
+        return item.summary + (item.isNew ? " — новая позиция" : "");
+      }).join("; ");
+      return { give: give, take: take };
+    }
+
+    function renderExchanges() {
+      exchangesList.innerHTML = "";
+      exchangesSection.style.display = exchanges.length ? "" : "none";
+      exchanges.forEach(function (block, index) {
+        var row = document.createElement("div");
+        row.className = "cart-item";
+        var textWrap = document.createElement("div");
+        textWrap.className = "cart-item-text-wrap";
+        var lines = exchangeLines(block);
+        var text = document.createElement("span");
+        text.className = "cart-item-text";
+        text.textContent = (index + 1) + ". Отдаём: " + lines.give;
+        textWrap.appendChild(text);
+        var takeLine = document.createElement("span");
+        takeLine.className = "cart-item-sum";
+        takeLine.textContent = "Получаем: " + lines.take;
+        textWrap.appendChild(takeLine);
+        row.appendChild(textWrap);
+        var actions = document.createElement("div");
+        actions.className = "cart-item-actions";
+        var editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "cart-item-btn";
+        editBtn.textContent = "✎";
+        editBtn.addEventListener("click", function () {
+          editExchange(index);
         });
+        actions.appendChild(editBtn);
+        var removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "cart-item-btn cart-item-btn-remove";
+        removeBtn.textContent = "✕";
+        removeBtn.addEventListener("click", function () {
+          exchanges.splice(index, 1);
+          renderExchanges();
+          if (!exchanges.length) {
+            setFormCollapsed(false);
+          }
+        });
+        actions.appendChild(removeBtn);
+        row.appendChild(actions);
+        exchangesList.appendChild(row);
+      });
+    }
+
+    // Поточна заміна з обох блоків: {give, take}; {empty:true}, якщо обидва
+    // порожні; null - помилка (текст уже показано).
+    function collectCurrentExchange() {
+      var giveItems = giveBlock.finalize();
+      if (giveItems === null) {
+        return null;
       }
-      section("Отдаём", "give", giveItems);
-      section("Получаем", "take", takeItems);
+      var takeItems = takeBlock.finalize();
+      if (takeItems === null) {
+        return null;
+      }
+      if (!giveItems.length && !takeItems.length) {
+        return { empty: true };
+      }
+      if (!giveItems.length) {
+        fail("В блоке «Отдаём» пока пусто — добавьте хотя бы одну позицию. Введённое сохранено.");
+        return null;
+      }
+      if (!takeItems.length) {
+        fail("В блоке «Получаем» пока пусто — укажите размер. Введённое сохранено.");
+        return null;
+      }
+      return { give: giveItems, take: takeItems };
+    }
+
+    function editExchange(index) {
+      var block = exchanges[index];
+      if (!block) {
+        return;
+      }
+      if (!giveBlock.isEmpty() || !takeBlock.isEmpty()) {
+        fail("Сначала сохраните или очистите текущий обмен.");
+        return;
+      }
+      exchanges.splice(index, 1);
+      giveBlock.reset();
+      takeBlock.reset();
+      giveBlock.restore(block.give.map(function (item) { return item.position; }));
+      takeBlock.restore(block.take.map(function (item) { return item.position; }));
+      errorEl.textContent = "";
+      renderExchanges();
+      setFormCollapsed(false);
+      giveBlock.element.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    saveButton.addEventListener("click", function () {
+      errorEl.textContent = "";
+      var block = collectCurrentExchange();
+      if (block === null) {
+        return;
+      }
+      if (block.empty) {
+        fail("Заполните обмен, прежде чем сохранять.");
+        return;
+      }
+      exchanges.push(block);
+      giveBlock.reset();
+      takeBlock.reset();
+      renderExchanges();
+      setFormCollapsed(true);
+      haptic("success");
+    });
+
+    addMoreButton.addEventListener("click", function () {
+      errorEl.textContent = "";
+      setFormCollapsed(false);
+    });
+
+    function buildSummary(blocks, comment) {
+      var wrap = document.createElement("div");
+      var multi = blocks.length > 1;
+      blocks.forEach(function (block, index) {
+        if (multi) {
+          var blockHeading = document.createElement("div");
+          blockHeading.className = "exchange-summary-title";
+          blockHeading.textContent = "Замена " + (index + 1);
+          wrap.appendChild(blockHeading);
+        }
+        function section(title, cls, items) {
+          var heading = document.createElement("div");
+          heading.className = "exchange-summary-title " + cls;
+          heading.textContent = title;
+          wrap.appendChild(heading);
+          items.forEach(function (item, itemIndex) {
+            var line = document.createElement("div");
+            line.textContent = (itemIndex + 1) + ". " + item.summary + (item.isNew ? " — новая позиция" : "");
+            wrap.appendChild(line);
+          });
+        }
+        section("Отдаём", "give", block.give);
+        section("Получаем", "take", block.take);
+      });
       if (comment) {
-        // Зауваження користувача (2026-09-05): "коментар виділи, щоб не
-        // зливався із отриманням" - окремий блок зі своїм заголовком і
-        // відступом, як у "Отдаём"/"Получаем".
         var commentHeading = document.createElement("div");
         commentHeading.className = "exchange-summary-title comment";
         commentHeading.textContent = "Комментарий";
@@ -3694,7 +3913,6 @@
         window.alert(json);
         return;
       }
-      // Той самий ліміт sendData (~4096 байт), що й у решти форми.
       if (new TextEncoder().encode(json).length > 4000) {
         window.alert("Слишком много позиций для одной отправки — разделите обмен на два.");
         return;
@@ -3712,38 +3930,51 @@
         return;
       }
       errorEl.textContent = "";
-      var giveItems = giveBlock.finalize();
-      if (giveItems === null) {
+      var blocks = exchanges.slice();
+      var current = collectCurrentExchange();
+      if (current === null) {
         return;
       }
-      var takeItems = takeBlock.finalize();
-      if (takeItems === null) {
-        return;
+      if (!current.empty) {
+        blocks.push(current);
       }
-      if (!giveItems.length) {
-        fail("В блоке «Отдаём» пока пусто — добавьте хотя бы одну позицию. Введённое сохранено.");
-        return;
-      }
-      if (!takeItems.length) {
-        fail("В блоке «Получаем» пока пусто — добавьте хотя бы одну позицию. Введённое сохранено.");
+      if (!blocks.length) {
+        fail("Добавьте хотя бы один обмен: что отдаём и что получаем.");
         return;
       }
       var comment = commonInputs.comment ? String(readFieldValue(commonInputs.comment) || "").trim() : "";
       var payload = {
         positions_kind: "exchange",
-        give: giveItems.map(function (item) { return item.position; }),
-        take: takeItems.map(function (item) { return item.position; }),
+        exchanges: blocks.map(function (block) {
+          return {
+            give: block.give.map(function (item) { return item.position; }),
+            take: block.take.map(function (item) { return item.position; }),
+          };
+        }),
       };
       if (comment) {
         payload.comment = comment;
       }
-      showConfirm(payload, buildSummary(giveItems, takeItems, comment));
+      showConfirm(payload, buildSummary(blocks, comment));
     }
 
     if (ctx.resume) {
-      giveBlock.restore(ctx.resume.give);
-      takeBlock.restore(ctx.resume.take);
-      if (ctx.resume.common && ctx.resume.common.comment && commonInputs.comment) {
+      var resumeBlocks = ctx.resume.exchanges;
+      if (!resumeBlocks && (ctx.resume.give || ctx.resume.take)) {
+        resumeBlocks = [{ give: ctx.resume.give || [], take: ctx.resume.take || [] }];
+      }
+      (resumeBlocks || []).forEach(function (entry) {
+        var give = giveBlock.itemsFromEntries(entry.give);
+        var take = takeBlock.itemsFromEntries(entry.take);
+        if (give.length || take.length) {
+          exchanges.push({ give: give, take: take });
+        }
+      });
+      renderExchanges();
+      if (exchanges.length) {
+        setFormCollapsed(true);
+      }
+      if (ctx.resume.common && commonInputs.comment) {
         setValueInto(commonInputs.comment, ctx.resume.common.comment);
       }
     }

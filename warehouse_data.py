@@ -4832,6 +4832,8 @@ _REQUIRED_OPERATION_AUTHOR_COLUMNS = [
     (SALES_SHEET_NAME, "Объем как продано, м3"),
     (SALES_SHEET_NAME, "Сумма как продано, MDL"),
     (SALES_SHEET_NAME, "Доход по пересчету, MDL"),
+    # Обмін блоками (2026-09-06): пара «що на що» в наявному листі ОБМЕН.
+    (EXCHANGE_SHEET_NAME, "Замена №"),
     (ANTISEPTIC_SHEET_NAME, "Ответственный"),
     (INCOME_SHEET_NAME, "Менеджер"),
 ]
@@ -4966,6 +4968,9 @@ _EXCHANGE_SHEET_HEADERS = [
     "Дата",
     "Время",
     "Обмен №",
+    # Обмін блоками (2026-09-06): номер заміни всередині одного обміну -
+    # рядки з одним «Обмен №» і одним «Замена №» - це одна пара «що на що».
+    "Замена №",
     "Отдаём / Получаем",
     "Продукт",
     "Порода",
@@ -7069,6 +7074,7 @@ def exchange_columns(headers):
         "date": ["Дата"],
         "time": ["Время"],
         "document": ["Обмен №", "Документ"],
+        "block": ["Замена №"],
         "side": ["Отдаём / Получаем", "Отдаем / Получаем"],
         "product": ["Продукт"],
         "breed": ["Порода"],
@@ -7093,6 +7099,7 @@ def exchange_sheet_values(store, position_payload, item, side_label, now, docume
     set_value(values, columns.get("date"), moment.date())
     set_value(values, columns.get("time"), moment.time())
     set_value(values, columns.get("document"), document_number)
+    set_value(values, columns.get("block"), position_payload.get("block"))
     set_value(values, columns.get("side"), side_label)
     set_value(values, columns.get("product"), sheet_product_name(position_payload))
     set_value(values, columns.get("breed"), position_payload.get("breed"))
@@ -7308,14 +7315,36 @@ def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
         return {"ok": False, "message": exc.message}
 
     excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", EXCHANGE_SHEET_NAME], dirty_notifier)
-    lines = ["<b>%s</b> записан." % _esc(document_number), "", "<b>Отдаём:</b>"]
-    for index, (position_payload, item, row_values) in enumerate(give_done, start=1):
-        head = " / ".join(_esc(part) for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition")) if part)
-        lines.append(_exchange_report_line(index, head, item, "\u2212", row_values, columns))
-    lines += ["", "<b>Получаем:</b>"]
-    for index, (position_payload, item, row_values, is_new) in enumerate(take_done, start=1):
-        head = " / ".join(_esc(part) for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition")) if part)
-        lines.append(_exchange_report_line(index, head, item, "+", row_values, columns, "(новая позиция)" if is_new else ""))
+    # Обмін блоками (2026-09-06): звіт по заміна́х - у кожній свої «Отдаём» і
+    # один «Получаем»; при одній заміні заголовка «Замена N» нема.
+    def _head(position_payload):
+        return " / ".join(
+            _esc(part)
+            for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition"))
+            if part
+        )
+
+    blocks = sorted({int(p.get("block") or 1) for p, _i, _r in give_done} | {int(p.get("block") or 1) for p, _i, _r, _n in take_done})
+    multi = len(blocks) > 1
+    lines = ["<b>%s</b> записан." % _esc(document_number)]
+    for block in blocks:
+        lines.append("")
+        if multi:
+            lines.append("<b>Замена %d</b>" % block)
+        lines.append("<b>Отдаём:</b>")
+        index = 0
+        for position_payload, item, row_values in give_done:
+            if int(position_payload.get("block") or 1) != block:
+                continue
+            index += 1
+            lines.append(_exchange_report_line(index, _head(position_payload), item, "\u2212", row_values, columns))
+        lines.append("<b>Получаем:</b>")
+        index = 0
+        for position_payload, item, row_values, is_new in take_done:
+            if int(position_payload.get("block") or 1) != block:
+                continue
+            index += 1
+            lines.append(_exchange_report_line(index, _head(position_payload), item, "+", row_values, columns, "(новая позиция)" if is_new else ""))
     if payload.get("comment"):
         lines.append("")
         lines.append("Комментарий: %s" % _esc(payload["comment"]))
