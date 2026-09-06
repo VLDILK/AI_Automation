@@ -5,7 +5,7 @@ import re
 import sqlite3
 from difflib import get_close_matches
 
-from utils import normalize_length_mm, plain_product_name
+from utils import is_piece_priced_product, normalize_length_mm, plain_product_name, row_measure_kind
 from utils import (
     _display_bot_number,
     _normalize_keyboard_code,
@@ -1390,7 +1390,7 @@ class IncomeSaleParsingDialogMixin:
                 # не треба.
                 missing.append(label)
             else:
-                unit_label = self._MEASURE_KIND_UNIT.get(self._payload_measure_kind(payload), "шт")
+                unit_label = self._price_unit_label(payload)
                 missing.append(f"{label} за {unit_label}")
         if "payment_method" in fields and not payload.get("payment_method"):
             missing.append(fields["payment_method"][3])
@@ -1404,7 +1404,7 @@ class IncomeSaleParsingDialogMixin:
             missing.append("Адрес выгрузки")
         has_price = _number_value(payload.get("price_per_unit")) > 0 or _number_value(payload.get("total_amount")) > 0
         if not has_price:
-            unit_label = self._MEASURE_KIND_UNIT.get(self._payload_measure_kind(payload), "шт")
+            unit_label = self._price_unit_label(payload)
             missing.append(f"Цена за {unit_label}")
         if not payload.get("payment_method"):
             missing.append("Способ оплаты")
@@ -1434,9 +1434,15 @@ class IncomeSaleParsingDialogMixin:
     # item["quantity"] замість фізичного виміру.
     def _row_amount_for_pricing(self, payload, item):
         measure_key = self._row_measure_kind(payload, item)
-        if measure_key is None:
+        # ОСБ (2026-09-06): облік у мп, але ціна за лист (рішення 2026-07-28).
+        if measure_key is None or is_piece_priced_product(payload.get("product")):
             return _number_value(item.get("quantity"))
         return _number_value(item.get(measure_key))
+
+    def _price_unit_label(self, payload):
+        if is_piece_priced_product(payload.get("product")):
+            return "шт"
+        return self._price_unit_label(payload)
 
     def _sale_total_amount(self, payload):
         total_amount = _number_value(payload.get("total_amount"))
@@ -1755,14 +1761,17 @@ class IncomeSaleParsingDialogMixin:
     # властивість (Вагонка) перевіряється ПЕРШОЮ — на практиці розміри
     # Вагонки (тонка, широка дошка) ніколи не збігаються з 25x50/30x50/
     # 50x50, але порядок перевірки все одно важливий для однозначності.
+    # Одне правило виду виміру на всіх (utils.row_measure_kind): бот, форма,
+    # таблиця - інакше ОСБ у мп (2026-09-06) рахувався б тут в м3.
     def _row_measure_kind(self, payload, item):
-        if self._is_quantity_only_product(payload.get("product")):
-            return None
-        if self._is_area_based_product(payload.get("product")):
-            return "area"
-        if self._is_linear_meter_size(item.get("thickness"), item.get("width")):
-            return "linear"
-        return "volume"
+        return row_measure_kind(payload.get("product"), item.get("thickness"), item.get("width"))
+
+    # Види виміру рядків для підпису ціни: товар «ціна за лист» (ОСБ) - «шт».
+    def _price_measure_kinds(self, payload):
+        rows = payload.get("rows") or []
+        if is_piece_priced_product(payload.get("product")):
+            return [None for _ in rows] or [None]
+        return [self._row_measure_kind(payload, item) for item in rows]
 
     # Для payload-рівневих підказок/міток (напр. "Цена за м3" у запиті
     # ціни), де ціна за одиницю — ОДНЕ значення на весь продаж/прихід, а не
@@ -1775,9 +1784,7 @@ class IncomeSaleParsingDialogMixin:
         rows = payload.get("rows") or []
         if rows:
             return self._row_measure_kind(payload, rows[0])
-        if self._is_quantity_only_product(payload.get("product")):
-            return None
-        return "area" if self._is_area_based_product(payload.get("product")) else "volume"
+        return row_measure_kind(payload.get("product"), None, None)
 
     def _canonical_income_text(self, value, existing_values, code_match=False):
         if value in (None, ""):

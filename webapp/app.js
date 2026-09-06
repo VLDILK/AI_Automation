@@ -245,7 +245,10 @@
   // measure_classification) - applyMeasureClassification (startForm)
   // перезаписує їх свіжими даними з сервера при кожному відкритті форми.
   var AREA_BASED_PRODUCTS = ["вагонка"];
-  var QUANTITY_ONLY_PRODUCTS = ["осб"];
+  var QUANTITY_ONLY_PRODUCTS = [];
+  // ОСБ (2026-09-06): облік у мп, ціна за лист.
+  var LINEAR_PRODUCTS = ["осб"];
+  var PIECE_PRICED_PRODUCTS = ["осб"];
   var LINEAR_METER_SIZES = [[25, 50], [30, 50], [50, 50]];
 
   function applyMeasureClassification(ctx) {
@@ -261,6 +264,12 @@
     }
     if (Array.isArray(data.linear_meter_sizes)) {
       LINEAR_METER_SIZES = data.linear_meter_sizes;
+    }
+    if (Array.isArray(data.linear_products)) {
+      LINEAR_PRODUCTS = data.linear_products;
+    }
+    if (Array.isArray(data.piece_priced_products)) {
+      PIECE_PRICED_PRODUCTS = data.piece_priced_products;
     }
   }
   var MEASURE_UNIT_BY_KIND = { volume: "м3", area: "м2", linear: "мп" };
@@ -311,7 +320,7 @@
     if (AREA_BASED_PRODUCTS.indexOf(normalized) !== -1) {
       return "area";
     }
-    if (isLinearMeterSize(thickness, width)) {
+    if (LINEAR_PRODUCTS.indexOf(normalized) !== -1 || isLinearMeterSize(thickness, width)) {
       return "linear";
     }
     return "volume";
@@ -1457,8 +1466,9 @@
               var priceKind = dimValues && dimValues.every(function (v) { return v !== null; })
                 ? rowMeasureKind(cat && cat.product, dimValues[0], dimValues[1])
                 : null;
-              priceUnit = priceKind ? MEASURE_UNIT_BY_KIND[priceKind] : "шт";
-              if (priceKind && dimValues && dimValues.every(function (v) { return v !== null; })) {
+              var piecePriced = PIECE_PRICED_PRODUCTS.indexOf(normalizeProductPhrase(cat && cat.product)) !== -1;
+              priceUnit = priceKind && !piecePriced ? MEASURE_UNIT_BY_KIND[priceKind] : "шт";
+              if (priceKind && !piecePriced && dimValues && dimValues.every(function (v) { return v !== null; })) {
                 totalAmount = pieceMeasure(dimValues[0], dimValues[1], dimValues[2], priceKind) * numberOrZero(quantityRawValue);
               } else if (quantityRawValue !== null) {
                 totalAmount = numberOrZero(quantityRawValue);

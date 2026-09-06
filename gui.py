@@ -870,6 +870,12 @@ class ExcelViewerApp:
                     "У листі СКЛАД позначено рядки рейки: {count} — «(рейка)» у продукті, одиниця «мп»."
                 ).format(count=lath_marked),
             )
+        measures_filled = getattr(self, "_measures_filled", 0)
+        if measures_filled:
+            messagebox.showinfo(
+                self._t("Таблиця Excel"),
+                self._t("У листі СКЛАД дораховано одиниць виміру з кількості штук: {count}.").format(count=measures_filled),
+            )
         repair_error = getattr(self, "_warehouse_repair_error", None)
         if repair_error is not None:
             messagebox.showwarning(
@@ -1022,11 +1028,11 @@ class ExcelViewerApp:
             # Рейка (2026-09-06): позначені рядки одразу пишуться назад у
             # таблицю; про правку файлу користувача повідомляє
             # _show_startup_notices нижче.
-            marked = target_store.last_lath_rows_marked
-            if marked:
+            if target_store.last_stock_rows_normalized:
                 try:
                     sync_sheet_to_excel(target_store, "СКЛАД")
-                    self._lath_rows_marked = marked
+                    self._lath_rows_marked = target_store.last_lath_rows_marked
+                    self._measures_filled = target_store.last_measures_filled
                 except Exception as exc:
                     self._warehouse_repair_error = exc
         finally:

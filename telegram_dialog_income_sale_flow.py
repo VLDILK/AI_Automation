@@ -3954,10 +3954,7 @@ class IncomeSaleFlowDialogMixin:
             )
         # Ціна за одиницю - те, що назвав клієнт. Досі в повідомленні
         # була лише сума, і перевірити ціну очима було ніде.
-        price_line = price_line_text(
-            position.get("price_per_unit"),
-            [self._row_measure_kind(position, item) for item in position.get("rows") or []],
-        )
+        price_line = price_line_text(position.get("price_per_unit"), self._price_measure_kinds(position))
         if price_line:
             lines.append(f"   {price_line}")
         position_total = self._sale_total_amount(position)

@@ -30,7 +30,7 @@ from openpyxl.worksheet.filters import AutoFilter
 import excel_source
 import xlsx_columns
 import permissions
-from utils import is_lath_row, lath_product_name
+from utils import is_lath_row, is_piece_priced_product, lath_product_name, plain_product_name
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
@@ -2201,13 +2201,15 @@ class ExcelSqliteStore:
         self._seed_builtin_migrated_custom_buttons()
         self._ensure_roles_seeded()
         self.last_lath_rows_marked = 0
+        self.last_measures_filled = 0
+        self.last_stock_rows_normalized = 0
         self._apply_standard_menu_policy()
         self._backfill_writeoff_root_action_code()
         self._backfill_writeoff_form_root_label()
         self._seed_builtin_operations()
         self._seed_report_operations()
         self._migrate_add_address_field()
-        self._migrate_osb_quantity_only()
+        self._migrate_osb_linear()
         self._fix_operation_field_language()
         self._simplify_measure_field_label()
         self._relabel_vagonka_measure_field()
@@ -2460,21 +2462,37 @@ class ExcelSqliteStore:
         # Рейка (2026-09-06): одразу після імпорту рядки з перерізом рейки
         # отримують «(рейка)» у продукті й «мп» в одиниці; викликач
         # (client_app/gui) синхронізує СКЛАД назад у Excel, якщо щось змінилось.
-        self.last_lath_rows_marked = self.normalize_lath_rows() if "СКЛАД" in workbook.sheetnames else 0
+        counts = self.normalize_stock_rows() if "СКЛАД" in workbook.sheetnames else {"rows": 0, "lath": 0, "measures": 0}
+        self.last_lath_rows_marked = counts["lath"]
+        self.last_measures_filled = counts["measures"]
+        self.last_stock_rows_normalized = counts["rows"]
         return self.last_lath_rows_marked
 
     def normalize_lath_rows(self):
-        """Позначає рядки рейки в СКЛАД. Повертає кількість змінених рядків;
-        повторний виклик нічого не змінює."""
+        return self.normalize_stock_rows()["lath"]
+
+    _UNIT_LABEL_BY_KIND = {"volume": "м3", "area": "м2", "linear": "мп"}
+
+    def normalize_stock_rows(self):
+        """Після імпорту СКЛАД: позначка «(рейка)», одиниця виміру за видом
+        товару в «Основная ед. учета» і дорахунок порожніх клітинок виміру з
+        кількості штук (рішення користувача 2026-09-06: «таблиця має сама
+        дораховувати од вимірювання, якщо вказані лише штуки»). Заповнені
+        клітинки не чіпає. Повертає {"rows", "lath", "measures"}."""
         headers = self.get_headers("СКЛАД")
         if not headers:
-            return 0
+            return {"rows": 0, "lath": 0, "measures": 0}
         columns = warehouse_columns(headers)
-        if any(columns.get(key) is None for key in ("product", "thickness", "width")):
-            return 0
+        if any(columns.get(key) is None for key in ("product", "thickness", "width", "length")):
+            return {"rows": 0, "lath": 0, "measures": 0}
+        by_header = {}
+        for index, header in enumerate(headers):
+            key = _normalize_phrase(header)
+            if key and key not in by_header:
+                by_header[key] = index
         unit_column = columns.get("unit")
         now = datetime.now().isoformat(timespec="seconds")
-        changed = 0
+        counts = {"rows": 0, "lath": 0, "measures": 0}
         with self.conn:
             for row_id, values in self.fetch_rows("СКЛАД", 100000, 0):
                 values = list(values)
@@ -2483,12 +2501,34 @@ class ExcelSqliteStore:
                     continue
                 thickness = row_value(values, columns["thickness"])
                 width = row_value(values, columns["width"])
-                if not is_lath_row(product, thickness, width):
+                length = row_value(values, columns["length"])
+                kind = _shared_row_measure_kind(plain_product_name(product), thickness, width)
+                if kind is None:
                     continue
                 new_values = list(values)
-                set_value(new_values, columns["product"], lath_product_name(product, thickness, width))
+                if is_lath_row(product, thickness, width):
+                    set_value(new_values, columns["product"], lath_product_name(product, thickness, width))
                 if unit_column is not None:
-                    set_value(new_values, unit_column, "мп")
+                    set_value(new_values, unit_column, self._UNIT_LABEL_BY_KIND[kind])
+                piece = _shared_piece_measure(thickness, width, length, kind)
+                filled = 0
+                if piece > 0:
+                    for qty_header, measure_header in zip(_WAREHOUSE_QTY_HEADERS, _WAREHOUSE_MEASURE_HEADERS[kind]):
+                        qty_index = by_header.get(_normalize_phrase(qty_header))
+                        measure_index = by_header.get(_normalize_phrase(measure_header))
+                        if qty_index is None or measure_index is None:
+                            continue
+                        if row_value(values, measure_index) not in (None, ""):
+                            continue
+                        quantity = row_value(values, qty_index)
+                        if quantity in (None, ""):
+                            continue
+                        try:
+                            quantity = float(str(quantity).replace(",", "."))
+                        except ValueError:
+                            continue
+                        set_value(new_values, measure_index, round(quantity * piece, 6))
+                        filled += 1
                 if new_values == values:
                     continue
                 self.conn.execute(
@@ -2496,29 +2536,12 @@ class ExcelSqliteStore:
                     (_serialize_row(new_values), now, row_id),
                 )
                 self._sync_warehouse_item(row_id, "СКЛАД", new_values)
-                changed += 1
-        return changed
+                counts["rows"] += 1
+                counts["measures"] += filled
+                if row_value(new_values, columns["product"]) != product:
+                    counts["lath"] += 1
+        return counts
 
-    # Задача користувача (2026-08-14): "ніяких перенесень. всі таблиці і
-    # дані з таблиць ЛИШЕ ПЕРСОНАЛЬНІ і не мають ЖОДНІ дані бути
-    # пов'язаними між таблицями, жодні" — приводом стало те, що номер
-    # документа ("Приход №28") діставався з наскрізного лічильника
-    # (document_counters), який не знав, що підключений файл змінився на
-    # зовсім інший, порожній. Тут — єдина точка (import_workbook, спільна
-    # для gui.py й client_app.py), де перевіряється, чи excel_source
-    # вказує на ІНШИЙ файл, ніж минулого разу; якщо так — стан, похідний
-    # від вмісту ПОПЕРЕДНЬОГО файлу, скидається, щоб не протікав у новий:
-    #   - document_counters (нумерація Приход/Продажа/Списание/Услуга)
-    #   - operation_recent_uses ("останні використані" підказки форми)
-    #   - client_name_aliases (вивчені виправлення одруків клієнтів)
-    #   - stock_movements (журнал приход/продажа/списание/антисептирование,
-    #     на якому побудований репорт бота "скільки прийшло за період") —
-    #     спершу лишав окремо (реальна історія, не кеш), але Задача
-    #     користувача (2026-08-14, одразу після пояснення що це таке):
-    #     "а, так, його скидаємо" — підтверджено явно, тож теж входить.
-    # Перший запуск (ще немає збереженого excel_source_identity) НІЧОГО
-    # не скидає — лише запам'ятовує поточний файл, щоб не знищити вже
-    # накопичені реальні дані існуючих встановлень одразу після оновлення.
     def _reset_file_scoped_state_if_source_changed(self):
         current_identity = excel_source.current_source_identity()
         row = self.conn.execute(
@@ -3657,29 +3680,51 @@ class ExcelSqliteStore:
     # треба. Ідемпотентно (як і сусідні одноразові міграції вище): якщо
     # поле вже відсутнє (попереднім запуском ЦІЄЇ міграції) — просто
     # пропускаємо.
-    def _migrate_osb_quantity_only(self):
-        for code in ("income_osb", "sale_osb"):
-            operation_row = self.conn.execute(
-                "SELECT id FROM bot_operations WHERE builtin_key = ?", (code,)
-            ).fetchone()
+    def _seed_measure_field(self, operation_id, kind, now, label="Количество, м3"):
+        """Поле виміру з прив'язками до колонок - те саме, що засіває
+        _seed_quantity_measure_fields, лише без поля кількості."""
+        measure_field_id = self._insert_operation_field(operation_id, "measure", label, False, "measure", now)
+        if kind == "income":
+            for suffix in ("volume", "area", "linear"):
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"income_{suffix}", "add", "generic", f"income_{suffix}", now)
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"balance_{suffix}", "add", "generic", f"balance_{suffix}", now)
+        elif kind == "sale":
+            for suffix in ("volume", "area", "linear"):
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"sold_{suffix}", "add", "generic", f"sold_{suffix}", now)
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"balance_{suffix}", "subtract", "generic", f"balance_{suffix}", now)
+                self._insert_operation_field_column(measure_field_id, SALES_SHEET_NAME, f"total_{suffix}", "add", "ledger", f"sales_total_{suffix}", now)
+        else:
+            for suffix in ("volume", "area", "linear"):
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"balance_{suffix}", "subtract", "generic", f"balance_{suffix}", now)
+        return measure_field_id
+
+    # ОСБ у мп (рішення користувача 2026-09-06): раніше _migrate_osb_quantity_
+    # only прибирала поле виміру з операцій ОСБ (облік лише в штуках) -
+    # тепер поле повертається з підписом «Количество, мп», одноразово
+    # (app_meta osb_linear_v1), щоб не сперечатись із правками адміністратора.
+    def _migrate_osb_linear(self):
+        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = 'osb_linear_v1'").fetchone():
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        for code, kind in (("income_osb", "income"), ("sale_osb", "sale"), ("writeoff_osb", "writeoff")):
+            operation_row = self.conn.execute("SELECT id FROM bot_operations WHERE builtin_key = ?", (code,)).fetchone()
             if operation_row is None:
                 continue
-            field_row = self.conn.execute(
-                "SELECT id, builtin_key FROM bot_operation_fields WHERE operation_id = ? AND field_key = 'measure'",
-                (operation_row[0],),
+            exists = self.conn.execute(
+                "SELECT 1 FROM bot_operation_fields WHERE operation_id = ? AND field_key = 'measure'", (operation_row[0],)
             ).fetchone()
-            if field_row is None:
-                continue
-            # Свіжий пере-аудит (New-Notable #7): без цієї перевірки міграція
-            # (виконується на КОЖЕН старт програми) видаляла б і поле, яке
-            # адміністратор навмисно ЗАНОВО додав через "Дії" - той самий
-            # provenance-гвард, що вже застосовує сусідня _remove_noop_
-            # identity_bindings (перевіряє builtin_key перед автовидаленням
-            # вручну доданих рядків). Видаляємо ЛИШЕ оригінально засіяне поле.
-            if field_row[1] != "measure":
+            if exists:
+                with self.conn:
+                    self.conn.execute(
+                        "UPDATE bot_operation_fields SET label = 'Количество, мп' WHERE operation_id = ? AND field_key = 'measure'"
+                        " AND builtin_key = 'measure' AND label = 'Количество, м3'",
+                        (operation_row[0],),
+                    )
                 continue
             with self.conn:
-                self.conn.execute("DELETE FROM bot_operation_fields WHERE id = ?", (field_row[0],))
+                self._seed_measure_field(operation_row[0], kind, now, label="Количество, мп")
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('osb_linear_v1', '1')")
 
     # Одноразове виправлення мови (Задача користувача, знайдено при
     # підключенні чек-листа до конфігурації): перший сідінг (Крок 3+
@@ -6295,7 +6340,9 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
         set_value(values, columns.get("total_linear"), item.get("linear"))
     # ОСБ (і будь-який інший товар без фізичного виміру): жодне з трьох
     # is_area/is_linear/is_volume не спрацьовує — рахуємо/показуємо "шт".
-    if is_linear:
+    if is_piece_priced_product(payload.get("product")):
+        price_unit = "шт"
+    elif is_linear:
         price_unit = "мп"
     elif is_area:
         price_unit = "м2"
@@ -6310,7 +6357,9 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
     set_value(values, columns.get("price_per_unit"), price_per_unit)
     total_amount = None if sold_as is not None else payload.get("total_amount")
     if total_amount in (None, "") and price_per_unit not in (None, ""):
-        if is_linear:
+        if is_piece_priced_product(payload.get("product")):
+            measure_for_price = item.get("quantity")
+        elif is_linear:
             measure_for_price = item.get("linear")
         elif is_area:
             measure_for_price = item.get("area")

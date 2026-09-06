@@ -197,7 +197,12 @@ def _sanitize_excel_value(value):
 # тепер лише тонкі методи-обгортки над цими самими функціями, поведінка бота
 # НЕ змінюється.
 _AREA_BASED_PRODUCT_NAMES = {"вагонка"}
-_QUANTITY_ONLY_PRODUCT_NAMES = {"осб"}
+# Рішення користувача (2026-09-06): ОСБ рахується в погонних метрах (довжина
+# листа × шт), товарів «лише штуки» більше нема; ціна ОСБ і далі за лист
+# (рішення 2026-07-28) - див. _PIECE_PRICED_PRODUCT_NAMES.
+_QUANTITY_ONLY_PRODUCT_NAMES = set()
+_LINEAR_PRODUCT_NAMES = {"осб"}
+_PIECE_PRICED_PRODUCT_NAMES = {"осб"}
 _LINEAR_METER_SIZES = {(25.0, 50.0), (30.0, 50.0), (50.0, 50.0)}
 
 
@@ -207,6 +212,15 @@ def is_area_based_product(value):
 
 def is_quantity_only_product(value):
     return _normalize_phrase(value) in _QUANTITY_ONLY_PRODUCT_NAMES
+
+
+def is_linear_product(value):
+    return _normalize_phrase(value) in _LINEAR_PRODUCT_NAMES
+
+
+def is_piece_priced_product(value):
+    """Ціна за штуку (лист), хоча облік у фізичній одиниці."""
+    return _normalize_phrase(value) in _PIECE_PRICED_PRODUCT_NAMES
 
 
 def is_linear_meter_size(thickness, width):
@@ -225,7 +239,7 @@ def row_measure_kind(product, thickness, width):
         return None
     if is_area_based_product(product):
         return "area"
-    if is_linear_meter_size(thickness, width):
+    if is_linear_product(product) or is_linear_meter_size(thickness, width):
         return "linear"
     return "volume"
 
@@ -247,7 +261,10 @@ def plain_product_name(value):
 
 
 def is_lath_row(product, thickness, width):
-    return row_measure_kind(plain_product_name(product), thickness, width) == "linear"
+    plain = plain_product_name(product)
+    if is_area_based_product(plain) or is_quantity_only_product(plain) or is_linear_product(plain):
+        return False
+    return is_linear_meter_size(thickness, width)
 
 
 def lath_product_name(product, thickness, width):
@@ -300,6 +317,8 @@ def measure_classification_data():
     return {
         "area_based_products": sorted(_AREA_BASED_PRODUCT_NAMES),
         "quantity_only_products": sorted(_QUANTITY_ONLY_PRODUCT_NAMES),
+        "linear_products": sorted(_LINEAR_PRODUCT_NAMES),
+        "piece_priced_products": sorted(_PIECE_PRICED_PRODUCT_NAMES),
         "linear_meter_sizes": [list(pair) for pair in sorted(_LINEAR_METER_SIZES)],
     }
 

@@ -5661,7 +5661,8 @@ class ClientApp(ctk.CTk):
                         # назад у таблицю; зайнятий файл - та сама причина й
                         # той самий текст, що й для дописування колонок.
                         lath_marked = thread_store.last_lath_rows_marked
-                        if lath_marked:
+                        measures_filled = thread_store.last_measures_filled
+                        if thread_store.last_stock_rows_normalized:
                             try:
                                 sync_sheet_to_excel(thread_store, "СКЛАД")
                             except Exception as exc:
@@ -5669,6 +5670,7 @@ class ClientApp(ctk.CTk):
                             else:
                                 report = dict(report or {"sheets": [], "columns": [], "writeoff_time_column": False, "warehouse": None})
                                 report["lath_marked"] = lath_marked
+                                report["measures_filled"] = measures_filled
                     finally:
                         thread_store.close()
                 finally:
@@ -5700,6 +5702,8 @@ class ClientApp(ctk.CTk):
                 "в листе СКЛАД — строк рейки помечено: %d («(рейка)» в продукте, ед. изм. «мп»)"
                 % report["lath_marked"]
             )
+        if report.get("measures_filled"):
+            lines.append("в листе СКЛАД — досчитано единиц измерения из количества штук: %d" % report["measures_filled"])
         return lines
 
     def _on_excel_refresh_finished(self, error, report=None, repair_error=None, apply_plan=None):
