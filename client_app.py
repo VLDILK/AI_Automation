@@ -64,6 +64,7 @@ import update_check
 from settings import SettingsStore
 from role_buttons_window import LocalRoleSource, open_role_buttons_window
 from warehouse_data import (
+    sync_sheet_to_excel,
     row_value,
     warehouse_rows,
     apply_correction_operation,
@@ -6049,6 +6050,18 @@ class ClientApp(ctk.CTk):
                     thread_store = ExcelSqliteStore(paths.DB_PATH)
                     try:
                         thread_store.import_workbook(workbook, READ_ONLY_SHEETS)
+                        # Рейка (2026-09-06): позначені рядки одразу пишуться
+                        # назад у таблицю; зайнятий файл - та сама причина й
+                        # той самий текст, що й для дописування колонок.
+                        lath_marked = thread_store.last_lath_rows_marked
+                        if lath_marked:
+                            try:
+                                sync_sheet_to_excel(thread_store, "СКЛАД")
+                            except Exception as exc:
+                                repair_error = repair_error or exc
+                            else:
+                                report = dict(report or {"sheets": [], "columns": [], "writeoff_time_column": False, "warehouse": None})
+                                report["lath_marked"] = lath_marked
                     finally:
                         thread_store.close()
                 finally:
@@ -6074,6 +6087,11 @@ class ClientApp(ctk.CTk):
             lines.append(
                 "в листе СКЛАД — столбцы: %s (заполнено значений: %s)"
                 % (", ".join(warehouse["headers"]), warehouse["filled_cells"])
+            )
+        if report.get("lath_marked"):
+            lines.append(
+                "в листе СКЛАД — строк рейки помечено: %d («(рейка)» в продукте, ед. изм. «мп»)"
+                % report["lath_marked"]
             )
         return lines
 

@@ -230,6 +230,50 @@ def row_measure_kind(product, thickness, width):
     return "volume"
 
 
+# --- Рейка (Задача користувача, 2026-09-06) ---
+# Рейка - не окремий продукт, а «Доска» з перерізом 25×50/30×50/50×50
+# (_LINEAR_METER_SIZES вище): рахується в мп. Рішення користувача: у клітинці
+# «Продукт» такі рядки позначаються «(рейка)» - видно і в Excel, і в боті, і
+# у формі. Усі порівняння назв ідуть через plain_product_name, тож позначка
+# ніколи не роздвоює залишок.
+LATH_MARK = "(рейка)"
+_LATH_MARK_RE = re.compile(r"\s*\(\s*рейка\s*\)", re.IGNORECASE)
+
+
+def plain_product_name(value):
+    if value in (None, ""):
+        return value
+    return _LATH_MARK_RE.sub("", str(value)).strip()
+
+
+def is_lath_row(product, thickness, width):
+    return row_measure_kind(plain_product_name(product), thickness, width) == "linear"
+
+
+def lath_product_name(product, thickness, width):
+    """«Доска AD» + 30×50 → «Доска AD (рейка)»; не рейка → назва без позначки."""
+    plain = plain_product_name(product)
+    if not plain:
+        return product
+    if is_lath_row(plain, thickness, width):
+        return plain + " " + LATH_MARK
+    return plain
+
+
+# Рішення користувача (2026-09-06): довжину «3», «6», «4» (метри) переписувати
+# на 3000/6000/4000. Дошки коротшої за 100 мм і довшої за 100 м не буває,
+# тому все, що менше за цей поріг, - метри.
+LENGTH_METERS_MAX = 100
+
+
+def normalize_length_mm(value):
+    number = _number_value(value)
+    if 0 < number < LENGTH_METERS_MAX:
+        result = number * 1000
+        return int(result) if float(result).is_integer() else round(result, 3)
+    return value
+
+
 # Аудит коду (minor, 2026-08-14): формула тут (для measure_kind="volume")
 # продубльована окремо в webapp/app.js::antisepticVolumeFor - клієнт
 # рахує об'єм антисептирування наживо (без мережевого round-trip при

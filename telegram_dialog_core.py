@@ -16,6 +16,7 @@ from paths import DISPLAY_SETTINGS_PATH, REPORT_BROADCAST_CHAT_ID, SETTINGS_PATH
 # клієнт. Редагується у вікні налаштувань, тут лише запасне значення.
 _EFACTURA_DEFAULT_TEXT = "просьба принять информацию и выпустить ЕФАКТУРУ."
 from settings import DisplaySettingsStore, SettingsStore
+from utils import normalize_length_mm
 from utils import (
     piece_measure,
     row_measure_kind,
@@ -592,6 +593,7 @@ class CoreDialogMixin:
         return self._start_sale_all_in_one_reply(store, context, resume_payload=payload)
 
     def _continue_operation_with_webapp_payload(self, store, context, pending, submitted):
+        self._normalize_submitted_lengths(submitted)
         # "Реализация (форма)" - на відміну від усіх інших форм, тут ЩЕ НЕ
         # відомо, яка саме операція (категорія дерева/антисептирование) -
         # її обирає сама форма (поле "Категория"), тож дисптечеризація за
@@ -2450,7 +2452,22 @@ class CoreDialogMixin:
             "reply_markup": self._correction_confirm_keyboard(),
         }
 
+    # Рішення користувача (2026-09-06): довжина «3»/«6» з форми - метри →
+    # 3000/6000. Форма переписує сама (app.js), тут - страховка для будь-якого
+    # подання (продаж, прихід, списання, обмін, корекція, «Вернуться в форму»).
+    def _normalize_submitted_lengths(self, data):
+        if isinstance(data, dict):
+            for key, value in list(data.items()):
+                if key in ("length", "stock_length") and value not in (None, ""):
+                    data[key] = normalize_length_mm(value)
+                else:
+                    self._normalize_submitted_lengths(value)
+        elif isinstance(data, list):
+            for value in data:
+                self._normalize_submitted_lengths(value)
+
     def _continue_direct_open_webapp_submission(self, store, context, submitted):
+        self._normalize_submitted_lengths(submitted)
         # Обмін позначає себе сам (positions_kind) - категорія тут не
         # підказка, бо позиції двох блоків належать різним розділам.
         if isinstance(submitted, dict) and submitted.get("positions_kind") == "exchange":

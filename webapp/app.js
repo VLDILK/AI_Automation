@@ -785,11 +785,47 @@
   // Для select+allow_custom - справжнє значення бере поле, яке РЕАЛЬНО
   // заповнене (взаємовиключність у buildFieldElement гарантує, що заповнене
   // лише одне з двох). Для решти полів - просто саме значення input/select.
-  function readFieldValue(input) {
-    if (input.manualInput && input.manualInput.value.trim() !== "") {
-      return input.manualInput.value.trim();
+  // Рішення користувача (2026-09-06): довжина «3», «6», «4» - це метри,
+  // переписується на 3000/6000/4000. Поріг той самий, що й на сервері
+  // (utils.LENGTH_METERS_MAX): коротшої за 100 мм дошки не буває.
+  var LENGTH_METERS_MAX = 100;
+  function normalizeLengthMm(value) {
+    var text = String(value === undefined || value === null ? "" : value).trim().replace(",", ".");
+    if (text === "") {
+      return text;
     }
-    return input.value.trim();
+    var number = Number(text);
+    if (!isFinite(number) || number <= 0 || number >= LENGTH_METERS_MAX) {
+      return text;
+    }
+    var result = number * 1000;
+    return String(Number.isInteger(result) ? result : Math.round(result * 1000) / 1000);
+  }
+  // Поле довжини (select з ручним введенням або звичайне число) після
+  // виходу з нього показує вже переписане значення - людина бачить 6000.
+  document.addEventListener("change", function (event) {
+    var element = event.target;
+    if (!element || (element.name !== "length" && element.name !== "length__manual")) {
+      return;
+    }
+    if (element.tagName === "SELECT") {
+      return;
+    }
+    var fixed = normalizeLengthMm(element.value);
+    if (fixed !== element.value.trim()) {
+      element.value = fixed;
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, true);
+
+  function readFieldValue(input) {
+    var raw;
+    if (input.manualInput && input.manualInput.value.trim() !== "") {
+      raw = input.manualInput.value.trim();
+    } else {
+      raw = input.value.trim();
+    }
+    return input.name === "length" ? normalizeLengthMm(raw) : raw;
   }
 
   // Задача користувача (скріншот екрана "Списание одной формой"): поруч із
@@ -1379,6 +1415,11 @@
           });
           if (dimValues.every(function (v) { return v !== null; })) {
             lines.push("Размер: " + dimValues.join("x"));
+            // Рейка (2026-09-06): у блоці «Добавлено» позиція з перерізом
+            // рейки підписується «(рейка)», як у боті й у таблиці.
+            if (cat && lines[0] === cat.label && rowMeasureKind(cat.product, dimValues[0], dimValues[1]) === "linear") {
+              lines[0] = cat.label + " (рейка)";
+            }
             if (row && row.stock_thickness !== undefined && row.stock_thickness !== null) {
               lines.push("Списывается: " + row.stock_thickness + "x" + row.stock_width + "x" + row.stock_length);
             }

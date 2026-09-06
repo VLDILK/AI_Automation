@@ -5,6 +5,7 @@ import re
 import sqlite3
 from difflib import get_close_matches
 
+from utils import normalize_length_mm, plain_product_name
 from utils import (
     _display_bot_number,
     _normalize_keyboard_code,
@@ -490,12 +491,15 @@ class IncomeSaleParsingDialogMixin:
             flags=re.IGNORECASE,
         )
         if not match:
-            return self._parse_number_with_thousands_separator(text)
+            return normalize_length_mm(self._parse_number_with_thousands_separator(text))
         value = self._parse_number_with_thousands_separator(match.group("value"))
         unit = (match.group("unit") or "").casefold()
         if unit in {"м", "m", "к", "k"}:
             return value * 1000
-        return value
+        if unit in {"мм", "mm"}:
+            return value
+        # Без одиниці: «6» - це метри (рішення користувача 2026-09-06).
+        return normalize_length_mm(value)
 
     def _parse_income_dimension_answer(self, answer, validation):
         if validation.get("field") == "length":
@@ -1552,7 +1556,10 @@ class IncomeSaleParsingDialogMixin:
         return unique
 
     def _split_product_condition(self, value, condition_values=None):
-        text = " ".join(str(value or "").strip().split())
+        # «(рейка)» - позначка на екрані й у таблиці, не частина назви:
+        # порівняння продуктів (пошук рядка складу, списки розмірів у формі,
+        # канонізація введеного) її не бачать.
+        text = " ".join(str(plain_product_name(value) or "").strip().split())
         if not text:
             return "", ""
         parts = text.split()

@@ -30,6 +30,7 @@ from openpyxl.worksheet.filters import AutoFilter
 import excel_source
 import xlsx_columns
 import permissions
+from utils import is_lath_row, lath_product_name
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
@@ -2199,6 +2200,7 @@ class ExcelSqliteStore:
         self._seed_builtin_bot_commands()
         self._seed_builtin_migrated_custom_buttons()
         self._ensure_roles_seeded()
+        self.last_lath_rows_marked = 0
         self._apply_standard_menu_policy()
         self._backfill_writeoff_root_action_code()
         self._backfill_writeoff_form_root_label()
@@ -2455,6 +2457,47 @@ class ExcelSqliteStore:
         self._reset_file_scoped_state_if_source_changed()
         for worksheet in workbook.worksheets:
             self.import_sheet(worksheet, worksheet.title in read_only_sheets)
+        # Рейка (2026-09-06): одразу після імпорту рядки з перерізом рейки
+        # отримують «(рейка)» у продукті й «мп» в одиниці; викликач
+        # (client_app/gui) синхронізує СКЛАД назад у Excel, якщо щось змінилось.
+        self.last_lath_rows_marked = self.normalize_lath_rows() if "СКЛАД" in workbook.sheetnames else 0
+        return self.last_lath_rows_marked
+
+    def normalize_lath_rows(self):
+        """Позначає рядки рейки в СКЛАД. Повертає кількість змінених рядків;
+        повторний виклик нічого не змінює."""
+        headers = self.get_headers("СКЛАД")
+        if not headers:
+            return 0
+        columns = warehouse_columns(headers)
+        if any(columns.get(key) is None for key in ("product", "thickness", "width")):
+            return 0
+        unit_column = columns.get("unit")
+        now = datetime.now().isoformat(timespec="seconds")
+        changed = 0
+        with self.conn:
+            for row_id, values in self.fetch_rows("СКЛАД", 100000, 0):
+                values = list(values)
+                product = row_value(values, columns["product"])
+                if product in (None, ""):
+                    continue
+                thickness = row_value(values, columns["thickness"])
+                width = row_value(values, columns["width"])
+                if not is_lath_row(product, thickness, width):
+                    continue
+                new_values = list(values)
+                set_value(new_values, columns["product"], lath_product_name(product, thickness, width))
+                if unit_column is not None:
+                    set_value(new_values, unit_column, "мп")
+                if new_values == values:
+                    continue
+                self.conn.execute(
+                    "UPDATE sheet_rows SET values_json = ?, updated_at = ? WHERE id = ?",
+                    (_serialize_row(new_values), now, row_id),
+                )
+                self._sync_warehouse_item(row_id, "СКЛАД", new_values)
+                changed += 1
+        return changed
 
     # Задача користувача (2026-08-14): "ніяких перенесень. всі таблиці і
     # дані з таблиць ЛИШЕ ПЕРСОНАЛЬНІ і не мають ЖОДНІ дані бути
@@ -5429,6 +5472,13 @@ def product_requires_type(product):
 
 
 def display_product_name(payload):
+    # Рейка (2026-09-06): позиція з перерізом рейки показується як
+    # «Доска AD (рейка)» у повідомленнях бота й у листах операцій.
+    product = payload.get("product") or ""
+    rows = payload.get("rows") or []
+    first = rows[0] if rows and isinstance(rows[0], dict) else None
+    if product and first:
+        return lath_product_name(product, first.get("thickness"), first.get("width"))
     # Задача користувача: "ніяких КД АД в продукті, лише в состоянии" -
     # раніше сюди дописувалась condition (AD/КД) для "Доска", хоча вона й
     # так завжди записується окремо в колонку "Состояние" (set_value(...,
@@ -6000,7 +6050,8 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
     set_value(
         values,
         columns.get("product"),
-        row_value(warehouse_row, warehouse_columns_map["product"]) or sheet_product_name(payload),
+        row_value(warehouse_row, warehouse_columns_map["product"])
+        or lath_product_name(sheet_product_name(payload), item.get("thickness"), item.get("width")),
     )
     set_value(
         values,
@@ -6154,7 +6205,8 @@ def income_sheet_values(store, payload, item, warehouse_row, warehouse_columns_m
     set_value(
         values,
         columns.get("product"),
-        row_value(warehouse_row, warehouse_columns_map["product"]) or sheet_product_name(payload),
+        row_value(warehouse_row, warehouse_columns_map["product"])
+        or lath_product_name(sheet_product_name(payload), item.get("thickness"), item.get("width")),
     )
     set_value(
         values,
@@ -6610,7 +6662,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
                         "full_name": user.get("full_name"),
-                        "product": sheet_product_name(position_payload),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
                         "thickness": stock_item.get("thickness"),
@@ -6916,7 +6968,7 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                     updated += 1
                 else:
                     values = [""] * len(headers)
-                    sheet_product = sheet_product_name(position_payload)
+                    sheet_product = lath_product_name(sheet_product_name(position_payload), item["thickness"], item["width"])
                     set_value(values, columns.get("product"), sheet_product)
                     set_value(values, columns.get("breed"), position_payload.get("breed"))
                     # Реальний баг (2026-08-14): "чому в них типу немає? я ж
@@ -6989,7 +7041,7 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
                         "full_name": user.get("full_name"),
-                        "product": sheet_product_name(position_payload),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
                         "thickness": item.get("thickness"),
@@ -7139,7 +7191,7 @@ def writeoff_sheet_values(store, payload, item, now, document_number=None):
     writeoff_date = _parse_date_text(payload.get("date")) or date.today()
     set_value(values, columns.get("date"), writeoff_date)
     set_value(values, columns.get("document"), document_number)
-    set_value(values, columns.get("product"), sheet_product_name(payload))
+    set_value(values, columns.get("product"), lath_product_name(sheet_product_name(payload), item.get("thickness"), item.get("width")))
     set_value(values, columns.get("breed"), payload.get("breed"))
     set_value(values, columns.get("condition"), payload.get("condition"))
     set_value(values, columns.get("thickness"), item.get("thickness"))
@@ -7288,7 +7340,7 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
                         "full_name": user.get("full_name"),
-                        "product": sheet_product_name(position_payload),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
                         "thickness": item.get("thickness"),
@@ -7526,7 +7578,7 @@ def exchange_sheet_values(store, position_payload, item, side_label, now, docume
     set_value(values, columns.get("document"), document_number)
     set_value(values, columns.get("block"), position_payload.get("block"))
     set_value(values, columns.get("side"), side_label)
-    set_value(values, columns.get("product"), sheet_product_name(position_payload))
+    set_value(values, columns.get("product"), lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")))
     set_value(values, columns.get("breed"), position_payload.get("breed"))
     set_value(values, columns.get("condition"), position_payload.get("condition"))
     set_value(values, columns.get("thickness"), item.get("thickness"))
@@ -7582,7 +7634,7 @@ def _exchange_measure_delta(row_values, columns, item, sign, prefix):
 
 def _new_warehouse_row_for_exchange(headers, columns, position_payload, item):
     values = [""] * len(headers)
-    sheet_product = sheet_product_name(position_payload)
+    sheet_product = lath_product_name(sheet_product_name(position_payload), item["thickness"], item["width"])
     set_value(values, columns.get("product"), sheet_product)
     set_value(values, columns.get("breed"), position_payload.get("breed"))
     set_value(values, columns.get("condition"), position_payload.get("condition"))
@@ -7720,7 +7772,7 @@ def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
                         "full_name": user.get("full_name"),
-                        "product": sheet_product_name(position_payload),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
                         "thickness": item.get("thickness"),
@@ -7812,7 +7864,7 @@ def correction_sheet_values(store, position_payload, item, now, document_number)
     set_value(values, columns.get("date"), moment.date())
     set_value(values, columns.get("time"), moment.time())
     set_value(values, columns.get("document"), document_number)
-    set_value(values, columns.get("product"), sheet_product_name(position_payload))
+    set_value(values, columns.get("product"), lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")))
     set_value(values, columns.get("breed"), position_payload.get("breed"))
     set_value(values, columns.get("condition"), position_payload.get("condition"))
     set_value(values, columns.get("thickness"), item.get("thickness"))
@@ -7907,7 +7959,7 @@ def apply_correction_operation(store, payload, sync_mode, dirty_notifier=None):
                 "telegram_user_id": user.get("id"),
                 "username": user.get("username"),
                 "full_name": user.get("full_name"),
-                "product": sheet_product_name(position_payload),
+                "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                 "breed": position_payload.get("breed"),
                 "condition": position_payload.get("condition"),
                 "thickness": entry.get("thickness"),

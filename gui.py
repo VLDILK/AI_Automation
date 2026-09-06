@@ -861,6 +861,14 @@ class ExcelViewerApp:
                 ).format(headers="\n".join("• " + header for header in plan["headers"]),
                          cells=plan["filled_cells"]),
             )
+        lath_marked = getattr(self, "_lath_rows_marked", 0)
+        if lath_marked:
+            messagebox.showinfo(
+                self._t("Таблиця Excel"),
+                self._t(
+                    "У листі СКЛАД позначено рядки рейки: {count} — «(рейка)» у продукті, одиниця «мп»."
+                ).format(count=lath_marked),
+            )
         repair_error = getattr(self, "_warehouse_repair_error", None)
         if repair_error is not None:
             messagebox.showwarning(
@@ -1008,7 +1016,18 @@ class ExcelViewerApp:
             self._warehouse_repair_error = exc
         workbook = excel_source.open_workbook(data_only=True)
         try:
-            (store or self.store).import_workbook(workbook, READ_ONLY_SHEETS)
+            target_store = store or self.store
+            target_store.import_workbook(workbook, READ_ONLY_SHEETS)
+            # Рейка (2026-09-06): позначені рядки одразу пишуться назад у
+            # таблицю; про правку файлу користувача повідомляє
+            # _show_startup_notices нижче.
+            marked = target_store.last_lath_rows_marked
+            if marked:
+                try:
+                    sync_sheet_to_excel(target_store, "СКЛАД")
+                    self._lath_rows_marked = marked
+                except Exception as exc:
+                    self._warehouse_repair_error = exc
         finally:
             workbook.close()
 
