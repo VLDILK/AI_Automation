@@ -184,7 +184,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
     def __init__(
         self, *args, db_path=None, get_token=None, get_fresh_context=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
-        handle_home_heartbeat=None, handle_set_role=None,
+        handle_home_heartbeat=None, handle_set_role=None, handle_roles_changed=None,
         get_form_content_enabled=None, get_onedrive_email=None, get_journal_page=None, **kwargs
     ):
         self.db_path = db_path
@@ -230,6 +230,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         # оновлення вікна "Персонал" - прикладна логіка client_app.py, не
         # цього HTTP-протоколу).
         self.handle_set_role = handle_set_role
+        self.handle_roles_changed = handle_roles_changed
         super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):
@@ -258,6 +259,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if url_path == "/control/custom_buttons":
             self._handle_remote_custom_buttons(dict(parse_qsl(parsed.query)))
+            return
+        if url_path == "/control/roles":
+            self._handle_remote_roles(dict(parse_qsl(parsed.query)))
             return
         if url_path == "/control/action_log":
             self._handle_remote_action_log(dict(parse_qsl(parsed.query)))
@@ -338,7 +342,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path not in (
             "/api/template", "/control/command", "/control/heartbeat", "/control/set_role",
-            "/control/custom_button_action", "/control/save_standard_menu_to_cloud",
+            "/control/custom_button_action", "/control/roles_action", "/control/save_standard_menu_to_cloud",
             "/control/payment_method_action", "/control/system_commands_save",
         ):
             self._send_json(404, {"ok": False, "error": "Не найдено."})
@@ -377,6 +381,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/control/custom_button_action":
             self._handle_custom_button_action_request(payload)
+            return
+        if self.path == "/control/roles_action":
+            self._handle_roles_action_request(payload)
             return
         if self.path == "/control/save_standard_menu_to_cloud":
             self._handle_save_standard_menu_to_cloud_request(payload)
@@ -463,9 +470,10 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         store = ExcelSqliteStore(self.db_path)
         try:
             users = store.list_users()
+            roles = store.list_roles()
         finally:
             store.close()
-        self._send_json(200, {"ok": True, "users": users})
+        self._send_json(200, {"ok": True, "users": users, "roles": roles})
 
     # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
     # той самий read-only принцип, що вже й _handle_remote_personnel вище
@@ -790,7 +798,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         # bool - підклас int у Python (isinstance(True, int) - True), тож
         # {"user_id": true} пройшов би перевірку нижче як user_id=1 без
         # цього виключення (нитпік з аудиту коду, 2026-08-16).
-        if not isinstance(user_id, int) or isinstance(user_id, bool) or role not in perm.ROLES:
+        if not isinstance(user_id, int) or isinstance(user_id, bool) or not isinstance(role, str) or not role:
             self._send_json(400, {"ok": False, "error": "Некорректные данные."})
             return
         if self.db_path is None:
@@ -798,6 +806,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         store = ExcelSqliteStore(self.db_path)
         try:
+            if store.get_role(role) is None:
+                self._send_json(400, {"ok": False, "error": "Такой роли нет."})
+                return
             row = store.get_user(user_id)
             if not row:
                 self._send_json(404, {"ok": False, "error": "Пользователь не найден."})
@@ -814,6 +825,61 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
                 # дія - сам запис ролі в БД уже успішний і не відкочується.
                 pass
         self._send_json(200, {"ok": True})
+
+    # «Кнопки ролей» з домашки (Задача користувача, 2026-09-06: однаково в
+    # клієнті й у домашці) - той самий принцип, що й редактор кнопок: домашка
+    # тягне живий стан клієнта й шле кожну дію одразу.
+    def _handle_remote_roles(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            payload = store.roles_payload()
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, **payload})
+
+    def _handle_roles_action_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        op = payload.get("op")
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            result = {"ok": True}
+            if op == "set_buttons":
+                ids = payload.get("button_ids")
+                if not isinstance(ids, list) or not all(isinstance(v, int) and not isinstance(v, bool) for v in ids):
+                    raise ValueError("Некорректные данные.")
+                result["count"] = store.set_role_buttons(payload.get("role_key"), ids)
+            elif op == "add":
+                result["key"] = store.add_role(payload.get("label"), payload.get("color_bg"))
+            elif op == "update":
+                store.update_role(payload.get("role_key"), label=payload.get("label"), color_bg=payload.get("color_bg"))
+            elif op == "delete":
+                store.delete_role(payload.get("role_key"), payload.get("move_users_to"))
+            else:
+                raise ValueError("Неизвестная операция.")
+            result.update(store.roles_payload())
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        finally:
+            store.close()
+        handler = getattr(self, "handle_roles_changed", None)
+        if handler is not None:
+            try:
+                handler()
+            except Exception:
+                pass
+        self._send_json(200, result)
 
     def _handle_remote_action_log(self, query):
         if not self._remote_control_token_valid(self._remote_control_query_token(query)):
@@ -1045,7 +1111,7 @@ class WebappServer:
     def __init__(
         self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None, get_journal_page=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
-        handle_home_heartbeat=None, handle_set_role=None,
+        handle_home_heartbeat=None, handle_set_role=None, handle_roles_changed=None,
         get_form_content_enabled=None, get_onedrive_email=None,
     ):
         self.port = port or paths.WEBAPP_LOCAL_PORT
@@ -1059,6 +1125,7 @@ class WebappServer:
         self.handle_remote_command = handle_remote_command
         self.handle_home_heartbeat = handle_home_heartbeat
         self.handle_set_role = handle_set_role
+        self.handle_roles_changed = handle_roles_changed
         self.get_form_content_enabled = get_form_content_enabled
         self.get_onedrive_email = get_onedrive_email
         self._httpd = None
@@ -1073,7 +1140,8 @@ class WebappServer:
             get_remote_control_token=self.get_remote_control_token,
             get_remote_status=self.get_remote_status, handle_remote_command=self.handle_remote_command,
             handle_home_heartbeat=self.handle_home_heartbeat,
-            handle_set_role=self.handle_set_role, get_form_content_enabled=self.get_form_content_enabled,
+            handle_set_role=self.handle_set_role, handle_roles_changed=self.handle_roles_changed,
+            get_form_content_enabled=self.get_form_content_enabled,
             get_onedrive_email=self.get_onedrive_email,
         )
         self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)

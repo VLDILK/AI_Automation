@@ -112,6 +112,54 @@ def fetch_remote_personnel(timeout=10):
     return users if isinstance(users, list) else None
 
 
+def fetch_remote_personnel_payload(timeout=10):
+    """Те саме, що fetch_remote_personnel, але разом зі списком ролей
+    (підписи/кольори бейджів беруться з клієнта, а не з permissions.py)."""
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/personnel",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok") or not isinstance(data.get("users"), list):
+        return None
+    return {"users": data["users"], "roles": data.get("roles") if isinstance(data.get("roles"), list) else []}
+
+
+def fetch_remote_roles(timeout=10):
+    """{"roles", "buttons", "allowed", "saved_at"} або None, якщо не вдалось."""
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/roles",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    return data
+
+
+def post_remote_roles_action(payload, timeout=10):
+    """Той самий exception-контракт, що й _post_custom_button_action: HTTPError
+    з JSON-тілом {"error": ...} - викликач читає текст сам."""
+    body = dict(payload)
+    body["token"] = paths.remote_control_token()
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/roles_action",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def fetch_remote_action_log(limit=50, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/action_log?limit={limit}",

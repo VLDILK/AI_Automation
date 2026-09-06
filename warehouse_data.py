@@ -1795,6 +1795,32 @@ class ExcelSqliteStore:
             CREATE INDEX IF NOT EXISTS idx_custom_menu_buttons_parent
                 ON custom_menu_buttons(parent_id, position);
 
+            -- Ролі (Задача користувача, 2026-09-06): раніше 5 жорстких ролей
+            -- у permissions.py; тепер список редагується в «Персонал» →
+            -- «Кнопки ролей»: свої ролі додаються/перейменовуються/
+            -- перефарбовуються/видаляються. builtin: 'admin' (не показується,
+            -- має все) і 'guest' (роль новачків бота: лише набір кнопок,
+            -- без перейменування/видалення). bot_users.role зберігає key.
+            CREATE TABLE IF NOT EXISTS bot_roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                color_bg TEXT NOT NULL,
+                color_fg TEXT NOT NULL,
+                builtin TEXT,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            -- Які кнопки бота (custom_menu_buttons.id) дозволені ролі. Кнопка-
+            -- батько (ДАННЫЕ) видима, коли дозволена хоч одна її дитина.
+            CREATE TABLE IF NOT EXISTS role_buttons (
+                role_key TEXT NOT NULL,
+                button_id INTEGER NOT NULL,
+                PRIMARY KEY (role_key, button_id)
+            );
+
             -- Задача користувача: "видаляю кнопку - вона потім знову
             -- з'являється". _seed_builtin_migrated_custom_buttons (нижче)
             -- звіряє лише "чи є ЗАРАЗ рядок із цим migration_key" - після
@@ -2172,6 +2198,7 @@ class ExcelSqliteStore:
             )
         self._seed_builtin_bot_commands()
         self._seed_builtin_migrated_custom_buttons()
+        self._ensure_roles_seeded()
         self._apply_standard_menu_policy()
         self._backfill_writeoff_root_action_code()
         self._backfill_writeoff_form_root_label()
@@ -3191,6 +3218,11 @@ class ExcelSqliteStore:
                     (row[0], now),
                 )
             self.conn.execute("DELETE FROM custom_menu_buttons WHERE id = ?", (node_id,))
+            # Дозволи ролей на видалену кнопку (і її дітей, знесених
+            # каскадом) більше ні на що не вказують - прибираємо.
+            self.conn.execute(
+                "DELETE FROM role_buttons WHERE button_id NOT IN (SELECT id FROM custom_menu_buttons)"
+            )
 
     # --- Крок 3+ "Дії": bot_operations / bot_operation_fields /
     # bot_operation_field_columns (дія-категорія -> поля-запити -> прив'язки
@@ -3901,6 +3933,296 @@ class ExcelSqliteStore:
                         self._insert_operation_field_column(
                             field_id, entry["sheet"], column_key, "info", "ledger", field_key, now
                         )
+
+
+    # ---------------- Ролі та кнопки ролей (2026-09-06) ----------------
+    # Початкові набори кнопок за ролями - з тих прав, що були зашиті в
+    # permissions.ROLE_PERMISSIONS до цього; далі все правиться руками в
+    # «Кнопки ролей». Ключі - migration_key з BUILTIN_MIGRATED_CUSTOM_BUTTONS.
+    _DEFAULT_ROLE_BUTTON_KEYS = {
+        permissions.WAREHOUSE: (
+            "income", "income_form", "sale", "sale_form", "antiseptic_form", "writeoff", "writeoff_form",
+            "exchange_form", "data_browser_form", "stock_report_section", "sales_report_section",
+            "antiseptic_report_section", "low_stock_report_section", "calculator", "help",
+        ),
+        permissions.ACCOUNTING: (
+            "sales_report_section", "antiseptic_report_section", "sales_by_client_report_section",
+            "low_stock_report_section", "data_browser_form", "help",
+        ),
+        permissions.GUEST: (),
+    }
+    _BUILTIN_ROLE_SEED = (
+        (permissions.ADMIN, "Администратор", "admin"),
+        (permissions.WAREHOUSE, "Склад", None),
+        (permissions.ACCOUNTING, "Бухгалтерия", None),
+        (permissions.GUEST, "Гость", "guest"),
+    )
+
+    def _ensure_roles_seeded(self):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            for position, (key, label, builtin) in enumerate(self._BUILTIN_ROLE_SEED):
+                bg, fg = permissions.ROLE_CHIP_COLORS[key]
+                self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO bot_roles (key, label, color_bg, color_fg, builtin, position, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (key, label, bg, fg, builtin, position, now, now),
+                )
+            # Рішення користувача (2026-09-06): «продажи відносяться напряму
+            # до складу» - ролі «Продажи» більше нема, її люди стають «Склад».
+            # Один раз: далі адміністратор вільний призначати що завгодно.
+            if not self.conn.execute("SELECT 1 FROM app_meta WHERE key = 'sales_role_merged'").fetchone():
+                self.conn.execute(
+                    "UPDATE bot_users SET role = ?, updated_at = ? WHERE lower(role) IN ('sales', 'продажи', 'продажі')",
+                    (permissions.WAREHOUSE, now),
+                )
+                self.conn.execute("INSERT INTO app_meta (key, value) VALUES ('sales_role_merged', '1')")
+            if not self.conn.execute("SELECT 1 FROM app_meta WHERE key = 'role_buttons_seeded'").fetchone():
+                for role_key, migration_keys in self._DEFAULT_ROLE_BUTTON_KEYS.items():
+                    for migration_key in migration_keys:
+                        row = self.conn.execute(
+                            "SELECT id FROM custom_menu_buttons WHERE migration_key = ?", (migration_key,)
+                        ).fetchone()
+                        if row:
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO role_buttons (role_key, button_id) VALUES (?, ?)",
+                                (role_key, row[0]),
+                            )
+                self.conn.execute("INSERT INTO app_meta (key, value) VALUES ('role_buttons_seeded', '1')")
+
+    def _role_row_to_dict(self, row):
+        key, label, color_bg, color_fg, builtin, position, users = row
+        return {
+            "key": key, "label": label, "color_bg": color_bg, "color_fg": color_fg,
+            "builtin": builtin, "position": position, "users": users,
+        }
+
+    def list_roles(self, include_admin=True):
+        rows = self.conn.execute(
+            """
+            SELECT r.key, r.label, r.color_bg, r.color_fg, r.builtin, r.position,
+                   (SELECT COUNT(*) FROM bot_users u WHERE u.role = r.key)
+            FROM bot_roles r
+            ORDER BY r.position, r.id
+            """
+        ).fetchall()
+        roles = [self._role_row_to_dict(row) for row in rows]
+        if not include_admin:
+            roles = [role for role in roles if role["builtin"] != "admin"]
+        return roles
+
+    def get_role(self, key):
+        if not key:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT r.key, r.label, r.color_bg, r.color_fg, r.builtin, r.position,
+                   (SELECT COUNT(*) FROM bot_users u WHERE u.role = r.key)
+            FROM bot_roles r WHERE r.key = ?
+            """,
+            (key,),
+        ).fetchone()
+        return self._role_row_to_dict(row) if row else None
+
+    # Підпис і кольори для бейджів «Персоналу» й повідомлень бота. Невідомий
+    # ключ (стара вільна назва ролі) - показується як є, сірим, без прав.
+    def role_label(self, key):
+        role = self.get_role(permissions.normalize_role(key))
+        if role:
+            return role["label"]
+        return str(key or "") or permissions.ROLE_LABELS_RU[permissions.GUEST]
+
+    def role_colors(self, key):
+        role = self.get_role(permissions.normalize_role(key))
+        if role:
+            return role["color_bg"], role["color_fg"]
+        return permissions.ROLE_CHIP_COLORS[permissions.GUEST]
+
+    @staticmethod
+    def contrast_text_color(color_bg):
+        """Світлий текст на темному тлі й навпаки - за яскравістю кольору."""
+        value = str(color_bg or "").lstrip("#")
+        try:
+            r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+        except (ValueError, IndexError):
+            return "#FFFFFF"
+        return "#1A1D21" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#F4F6F8"
+
+    def add_role(self, label, color_bg, color_fg=None):
+        label = " ".join(str(label or "").split())
+        if not label:
+            raise ValueError("Введите название роли.")
+        if any(role["label"].lower() == label.lower() for role in self.list_roles()):
+            raise ValueError("Роль с таким названием уже есть.")
+        color_bg = str(color_bg or "#6B7280")
+        color_fg = color_fg or self.contrast_text_color(color_bg)
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            position = self.conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM bot_roles").fetchone()[0]
+            cursor = self.conn.execute(
+                """
+                INSERT INTO bot_roles (key, label, color_bg, color_fg, builtin, position, created_at, updated_at)
+                VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+                """,
+                ("role_pending", label, color_bg, color_fg, position, now, now),
+            )
+            key = "role%d" % cursor.lastrowid
+            self.conn.execute("UPDATE bot_roles SET key = ? WHERE id = ?", (key, cursor.lastrowid))
+        return key
+
+    def update_role(self, key, label=None, color_bg=None, color_fg=None):
+        role = self.get_role(key)
+        if role is None:
+            raise ValueError("Роль не найдена.")
+        if role["builtin"]:
+            raise ValueError("Эту роль нельзя переименовать или перекрасить.")
+        new_label = " ".join(str(label if label is not None else role["label"]).split())
+        if not new_label:
+            raise ValueError("Введите название роли.")
+        if any(other["key"] != key and other["label"].lower() == new_label.lower() for other in self.list_roles()):
+            raise ValueError("Роль с таким названием уже есть.")
+        new_bg = str(color_bg or role["color_bg"])
+        new_fg = color_fg or (self.contrast_text_color(new_bg) if color_bg else role["color_fg"])
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE bot_roles SET label = ?, color_bg = ?, color_fg = ?, updated_at = ? WHERE key = ?",
+                (new_label, new_bg, new_fg, now, key),
+            )
+
+    def delete_role(self, key, move_users_to=None):
+        role = self.get_role(key)
+        if role is None:
+            raise ValueError("Роль не найдена.")
+        if role["builtin"]:
+            raise ValueError("Эту роль нельзя удалить.")
+        target = move_users_to or permissions.GUEST
+        if self.get_role(target) is None or target == key:
+            raise ValueError("Выберите роль, в которую перевести сотрудников.")
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE bot_users SET role = ?, updated_at = ? WHERE role = ?", (target, now, key)
+            )
+            self.conn.execute("DELETE FROM role_buttons WHERE role_key = ?", (key,))
+            self.conn.execute("DELETE FROM bot_roles WHERE key = ?", (key,))
+
+    def role_button_ids(self, key):
+        rows = self.conn.execute("SELECT button_id FROM role_buttons WHERE role_key = ?", (key,)).fetchall()
+        return {row[0] for row in rows}
+
+    def all_role_button_ids(self):
+        """{role_key: {button_id, ...}} для всіх ролей одразу."""
+        result = {role["key"]: set() for role in self.list_roles(include_admin=False)}
+        for role_key, button_id in self.conn.execute("SELECT role_key, button_id FROM role_buttons").fetchall():
+            result.setdefault(role_key, set()).add(button_id)
+        return result
+
+    def set_role_buttons(self, key, button_ids):
+        role = self.get_role(key)
+        if role is None:
+            raise ValueError("Роль не найдена.")
+        if role["builtin"] == "admin":
+            raise ValueError("У администратора всегда все кнопки.")
+        ids = sorted({int(value) for value in button_ids})
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute("DELETE FROM role_buttons WHERE role_key = ?", (key,))
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO role_buttons (role_key, button_id) VALUES (?, ?)",
+                [(key, button_id) for button_id in ids],
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('role_buttons_saved_at', ?)", (now,)
+            )
+        return len(ids)
+
+    def role_buttons_saved_at(self):
+        row = self.conn.execute("SELECT value FROM app_meta WHERE key = 'role_buttons_saved_at'").fetchone()
+        return row[0] if row else ""
+
+    def is_role_admin(self, key):
+        role = self.get_role(permissions.normalize_role(key))
+        return bool(role and role["builtin"] == "admin")
+
+    def is_button_allowed(self, role_key, button_id):
+        """Чи бачить роль цю кнопку: адміністратор - усі; батько - коли
+        дозволена хоч одна дитина; решта - за role_buttons."""
+        role_key = permissions.normalize_role(role_key)
+        if self.is_role_admin(role_key):
+            return True
+        if role_key is None:
+            return False
+        if self.conn.execute(
+            "SELECT 1 FROM role_buttons WHERE role_key = ? AND button_id = ?", (role_key, button_id)
+        ).fetchone():
+            return True
+        return bool(self.conn.execute(
+            """
+            SELECT 1 FROM role_buttons rb
+            JOIN custom_menu_buttons b ON b.id = rb.button_id
+            WHERE rb.role_key = ? AND b.parent_id = ? AND b.enabled = 1
+            """,
+            (role_key, button_id),
+        ).fetchone())
+
+    def role_allowed_action_codes(self, role_key):
+        """Коди дій увімкнених кнопок, дозволених ролі (для прав бота)."""
+        role_key = permissions.normalize_role(role_key)
+        if role_key is None:
+            return set()
+        rows = self.conn.execute(
+            """
+            SELECT b.action_code FROM role_buttons rb
+            JOIN custom_menu_buttons b ON b.id = rb.button_id
+            WHERE rb.role_key = ? AND b.enabled = 1 AND b.action_code IS NOT NULL AND b.action_code != ''
+            """,
+            (role_key,),
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def list_buttons_for_roles(self):
+        """Увімкнені кнопки бота для вікна «Кнопки ролей»: діти йдуть одразу
+        за батьком, підпис дитини - «Батько › Дитина»."""
+        rows = self.conn.execute(
+            """
+            SELECT id, parent_id, label, action_code, COALESCE(layout, 'full'), created_at, position
+            FROM custom_menu_buttons WHERE enabled = 1
+            ORDER BY position, id
+            """
+        ).fetchall()
+        by_parent = {}
+        labels = {}
+        for node_id, parent_id, label, action_code, layout, created_at, position in rows:
+            by_parent.setdefault(parent_id, []).append((node_id, label, action_code, layout, created_at))
+            labels[node_id] = label
+        result = []
+
+        def walk(parent_id, prefix):
+            for node_id, label, action_code, layout, created_at in by_parent.get(parent_id, []):
+                has_children = node_id in by_parent
+                result.append({
+                    "id": node_id, "parent_id": parent_id, "label": label,
+                    "display": (prefix + " › " + label) if prefix else label,
+                    "action_code": action_code, "layout": layout, "created_at": created_at,
+                    "has_children": has_children,
+                })
+                walk(node_id, (prefix + " › " + label) if prefix else label)
+
+        walk(None, "")
+        return result
+
+    def roles_payload(self):
+        """Усе для вікна «Кнопки ролей» одним запитом (локально або через тунель)."""
+        allowed = self.all_role_button_ids()
+        return {
+            "roles": self.list_roles(include_admin=False),
+            "buttons": self.list_buttons_for_roles(),
+            "allowed": {key: sorted(ids) for key, ids in allowed.items()},
+            "saved_at": self.role_buttons_saved_at(),
+        }
 
     def list_users(self):
         cursor = self.conn.execute(

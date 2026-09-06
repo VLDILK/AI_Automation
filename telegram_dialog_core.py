@@ -84,6 +84,11 @@ class CoreDialogMixin:
     # мовчать, як і задумано.
     def _build_reply_pipeline(self, text, store, message=None):
         context = self._message_context(message)
+        # Роль поточної людини потрібна там, де будується клавіатура
+        # головного меню без контексту під рукою (_main_menu_reply та ~13
+        # його викликачів): один опитувальний потік обробляє повідомлення
+        # послідовно, тож атрибут на час однієї відповіді безпечний.
+        self._reply_context = context
         if context.get("chat_type") in ("group", "supergroup"):
             command_word = text.strip().split(maxsplit=1)[0].split("@", 1)[0].lower() if text.strip() else ""
             if command_word != "/chatid":
@@ -194,6 +199,7 @@ class CoreDialogMixin:
     # payload, потім та сама continue_operation, що й вільний текст.
     def _build_reply_pipeline_web_app(self, web_app_data, store, message=None):
         context = self._message_context(message)
+        self._reply_context = context
         started_at = datetime.now()
         pending_before = None
         pending_after = None
@@ -2001,7 +2007,7 @@ class CoreDialogMixin:
         is_admin = role == perm.ADMIN
         ctx = self._webapp_data_browser_context(
             store, is_admin, telegram_id=context["user_id"],
-            can_view_sales=perm.has_permission(role, perm.SALE_VIEW),
+            can_view_sales=self._role_has_capability(store, role, perm.SALE_VIEW),
         )
         has_any_data = any(
             ctx[key]
@@ -2495,9 +2501,17 @@ class CoreDialogMixin:
     # Повертає None, якщо дія дозволена, інакше — готове повідомлення відмови.
     def _require_permission(self, store, context, capability):
         role = self._current_user_role(store, context)
-        if perm.has_permission(role, capability):
+        if self._role_has_capability(store, role, capability):
             return None
         return perm.permission_denied_reply(capability)
+
+    # Права ролі = права її дозволених кнопок («Кнопки ролей» у Персоналі);
+    # адміністратор має все. Без сховища - старий жорсткий список.
+    def _role_has_capability(self, store, role, capability):
+        if role == perm.ADMIN or (store is not None and store.is_role_admin(role)):
+            return True
+        allowed = store.role_allowed_action_codes(role) if store is not None else None
+        return perm.has_permission(role, capability, allowed_actions=allowed)
 
     # Задача користувача (2026-08-17): "додамо в налаштування ID чату, щоб
     # через файл приєднувало тхт" - той самий принцип, що вже має "ТГ
