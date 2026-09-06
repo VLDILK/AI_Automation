@@ -6,6 +6,7 @@ import sqlite3
 
 import permissions as perm
 from utils import (
+    measure_cell_filled,
     piece_measure,
     _display_bot_number,
     _normalize_phrase,
@@ -4088,7 +4089,15 @@ class IncomeSaleFlowDialogMixin:
             else:
                 measure_unit = self._MEASURE_KIND_UNIT[measure_key]
                 measure_column = self._MEASURE_KIND_BALANCE_COLUMN[measure_key]
-                balance_measure = _number_value(row_value(row_values, columns.get(measure_column)))
+                raw_measure = row_value(row_values, columns.get(measure_column))
+                if not measure_cell_filled(raw_measure) and balance_qty > 0:
+                    # Вимір не проставлено (порожньо або 0) при наявних
+                    # штуках: звіряємо лише штуки (2026-09-06).
+                    measure_key = None
+                    measure_unit = None
+                    balance_measure = None
+                else:
+                    balance_measure = _number_value(raw_measure)
             if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
                 return {
                     "kind": "quantity",

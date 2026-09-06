@@ -25,7 +25,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 import reports
-from ui_kit import DEFAULT_COLORS, CanvasTable, Popup, accent_button, caption, checkbox, entry, ghost_button
+from ui_kit import DEFAULT_COLORS, CanvasTable, MultiChoice, Popup, accent_button, caption, checkbox, entry, ghost_button
 from utils import _display_bot_number, _number_value
 from warehouse_data import JOURNAL_FILTER_GROUPS, journal_page
 
@@ -226,6 +226,77 @@ class CalendarPopup(Popup):
         self.close()
 
 
+class CustomPeriodDialog:
+    """«Свой период»: «С даты», «По дату» (календар), «Показать результат»."""
+
+    def __init__(self, parent, colors, date_from, date_to, on_apply):
+        self.colors = colors
+        self.on_apply = on_apply
+        self.date_from = date_from
+        self.date_to = date_to
+        self.popup = None
+        window = tk.Toplevel(parent)
+        self.window = window
+        window.title("Свой период")
+        window.configure(bg=colors["bg"])
+        window.transient(parent)
+        window.resizable(False, False)
+        top = tk.Frame(window, bg=colors["bg"])
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        ghost_button(top, colors, "‹ Назад", command=self.close, width=84, small=True).pack(side="left")
+        tk.Label(top, text="Свой период", font=("Segoe UI", 11, "bold"), bg=colors["bg"], fg=colors["fg"]).pack(side="left", padx=(10, 0))
+        body = tk.Frame(window, bg=colors["bg"])
+        body.pack(fill="both", expand=True, padx=14, pady=(4, 12))
+        tk.Label(body, text="С даты", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w")
+        self.from_button = ghost_button(body, colors, "", command=lambda: self._pick("from"), width=240)
+        self.from_button.pack(anchor="w", pady=(2, 8))
+        tk.Label(body, text="По дату", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w")
+        self.to_button = ghost_button(body, colors, "", command=lambda: self._pick("to"), width=240)
+        self.to_button.pack(anchor="w", pady=(2, 12))
+        accent_button(body, colors, "Показать результат", command=self.apply, width=240).pack(anchor="w")
+        window.bind("<Escape>", lambda event: self.close())
+        window.protocol("WM_DELETE_WINDOW", self.close)
+        self._render()
+
+    def _render(self):
+        self.from_button.configure(text="%s  📅" % (self.date_from.strftime("%d.%m.%Y") if self.date_from else "дд.мм.гггг"))
+        self.to_button.configure(text="%s  📅" % (self.date_to.strftime("%d.%m.%Y") if self.date_to else "дд.мм.гггг"))
+
+    def _pick(self, which):
+        if self.popup is not None:
+            self.popup.close()
+        anchor = self.from_button if which == "from" else self.to_button
+        initial = self.date_from if which == "from" else self.date_to
+        self.popup = CalendarPopup(anchor, self.colors, initial=initial, on_pick=lambda day: self._picked(which, day))
+
+    def _picked(self, which, day):
+        if which == "from":
+            self.set_from(day)
+        else:
+            self.set_to(day)
+
+    def set_from(self, day):
+        self.date_from = day
+        self._render()
+
+    def set_to(self, day):
+        self.date_to = day
+        self._render()
+
+    def apply(self):
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            self.date_from, self.date_to = self.date_to, self.date_from
+        self.on_apply(self.date_from, self.date_to)
+        self.close()
+
+    def close(self):
+        if self.popup is not None:
+            self.popup.close()
+            self.popup = None
+        if self.window.winfo_exists():
+            self.window.destroy()
+
+
 class JournalWindow:
     def __init__(self, parent, source, colors=None, title="Журнал операций"):
         self.source = source
@@ -266,15 +337,16 @@ class JournalWindow:
         caption(period, colors, "ПЕРИОД").pack(anchor="w")
         period_row = ctk.CTkFrame(period, fg_color="transparent")
         period_row.pack(anchor="w", pady=(2, 0))
-        self.from_button = ghost_button(period_row, colors, "С: —  📅", command=lambda: self._open_calendar("from"), width=136)
-        self.from_button.pack(side="left")
-        self.to_button = ghost_button(period_row, colors, "По: —  📅", command=lambda: self._open_calendar("to"), width=136)
-        self.to_button.pack(side="left", padx=(6, 10))
+        # Період як у формі антисептирування (рішення користувача 2026-09-06):
+        # швидкі кнопки + «Свой период…» з вікном «С даты / По дату».
         self.preset_buttons = {}
-        for text, days in (("Сегодня", 0), ("7 дней", 7), ("30 дней", 30), ("Все", None)):
-            button = ghost_button(period_row, colors, text, command=lambda d=days: self._preset(d), small=True, width=66)
+        for key, text in self.PRESETS:
+            button = ghost_button(period_row, colors, text, command=lambda k=key: self._preset(k), width=88)
             button.pack(side="left", padx=(0, 4))
-            self.preset_buttons[days] = button
+            self.preset_buttons[key] = button
+        self.custom_button = ghost_button(period_row, colors, "Свой период…", command=self.open_custom_period, width=150)
+        self.custom_button.pack(side="left", padx=(6, 0))
+        self.period_dialog = None
 
         # Rows of operation checkboxes at the top were removed (user, 2026-09-06):
         # the same filter lives in the "Операция" column header.
@@ -304,8 +376,10 @@ class JournalWindow:
         self.more_button.pack(side="left", padx=(12, 0))
         ghost_button(bottom, colors, "PDF", command=lambda: self.export("pdf"), width=70).pack(side="right")
         ghost_button(bottom, colors, "Excel", command=lambda: self.export("xlsx"), width=70).pack(side="right", padx=(0, 6))
-        self._preset(7, refresh=False)
+        self._preset("week", refresh=False)
         self.refresh()
+
+    PRESETS = (("today", "Сегодня"), ("yesterday", "Вчера"), ("week", "Неделя"), ("month", "Месяц"), ("all", "Весь период"))
 
     def _type_colors(self, type_key):
         return type_colors(type_key, self.colors.get("dark"), self.type_overrides)
@@ -344,45 +418,56 @@ class JournalWindow:
         for var in self.type_vars.values():
             var.set(value)
 
-    def _preset(self, days, refresh=True):
+    def _preset(self, key, refresh=True):
         today = date.today()
-        if days is None:
-            self.date_from, self.date_to = None, None
+        if key == "today":
+            self.date_from, self.date_to = today, today
+        elif key == "yesterday":
+            self.date_from, self.date_to = today - timedelta(days=1), today - timedelta(days=1)
+        elif key == "week":
+            self.date_from, self.date_to = today - timedelta(days=6), today
+        elif key == "month":
+            self.date_from, self.date_to = today - timedelta(days=29), today
         else:
-            self.date_from, self.date_to = today - timedelta(days=days), today
-        self.active_preset = days
+            key = "all"
+            self.date_from, self.date_to = None, None
+        self.active_preset = key
+        self._render_period()
+        if refresh:
+            self.refresh()
+
+    def set_custom_period(self, date_from, date_to, refresh=True):
+        self.date_from, self.date_to = date_from, date_to
+        self.active_preset = "custom" if (date_from or date_to) else "all"
         self._render_period()
         if refresh:
             self.refresh()
 
     def _render_period(self):
-        self.from_button.configure(text="С: %s  📅" % (self.date_from.strftime("%d.%m.%Y") if self.date_from else "—"))
-        self.to_button.configure(text="По: %s  📅" % (self.date_to.strftime("%d.%m.%Y") if self.date_to else "—"))
-        for days, button in self.preset_buttons.items():
-            active = days == self.active_preset
+        for key, button in self.preset_buttons.items():
+            active = key == self.active_preset
             button.configure(fg_color=self.colors["hover"] if active else "transparent",
                              border_color=self.colors["accent"] if active else self.colors["line"])
+        if self.active_preset == "custom":
+            text = "Свой период: %s — %s" % (self.date_from.strftime("%d.%m.%y") if self.date_from else "…",
+                                            self.date_to.strftime("%d.%m.%y") if self.date_to else "…")
+            self.custom_button.configure(text=text, fg_color=self.colors["hover"], border_color=self.colors["accent"], width=210)
+        else:
+            self.custom_button.configure(text="Свой период…", fg_color="transparent", border_color=self.colors["line"], width=150)
 
-    def _open_calendar(self, which):
+    def open_custom_period(self):
         self._close_popup()
-        anchor = self.from_button if which == "from" else self.to_button
-        initial = self.date_from if which == "from" else self.date_to
-
-        def picked(day):
-            if which == "from":
-                self.date_from = day
-            else:
-                self.date_to = day
-            self.active_preset = "custom"
-            self._render_period()
-            self.refresh()
-
-        self.popup = CalendarPopup(anchor, self.colors, initial=initial, on_pick=picked)
+        existing = self.period_dialog
+        if existing is not None and existing.window.winfo_exists():
+            existing.window.lift()
+            return existing
+        self.period_dialog = CustomPeriodDialog(self.window, self.colors, self.date_from, self.date_to, self.set_custom_period)
+        return self.period_dialog
 
     def reset_filters(self):
         self._set_all_types(True)
         self.column_filters = self._empty_column_filters()
-        self._preset(7, refresh=False)
+        self._preset("week", refresh=False)
         self._render_headings()
         self.refresh()
 
@@ -587,10 +672,7 @@ class JournalWindow:
                                    hover_color=colors["accent"], border_color=colors["line"], font=ctk.CTkFont(size=12)).pack(anchor="w", pady=2)
             row = tk.Frame(frame, bg=colors["row"])
             row.pack(anchor="w", pady=(6, 0))
-            ghost_button(row, colors, "С: %s" % (self.date_from.strftime("%d.%m.%Y") if self.date_from else "—"),
-                         command=lambda: (popup.close(), self._open_calendar("from")), width=120, small=True).pack(side="left")
-            ghost_button(row, colors, "По: %s" % (self.date_to.strftime("%d.%m.%Y") if self.date_to else "—"),
-                         command=lambda: (popup.close(), self._open_calendar("to")), width=120, small=True).pack(side="left", padx=(4, 0))
+            ghost_button(row, colors, "Свой период…", command=lambda: (popup.close(), self.open_custom_period()), width=150, small=True).pack(side="left")
             apply_actions.append(lambda: cf.__setitem__("sort", sort_var.get()))
         elif key == "type":
             for label, group in JOURNAL_FILTER_GROUPS:
@@ -608,42 +690,15 @@ class JournalWindow:
             apply_actions.append(lambda: cf.__setitem__("documents", var.get()))
             field_entry.bind("<Return>", lambda event: self._apply_popup(apply_actions))
         elif key in ("who", "product", "size", "reason"):
-            # Вибір з наявних значень (рішення користувача 2026-09-06: жодних
-            # порожніх рядків там, де є з чого вибрати).
+            # Рішення користувача (2026-09-06): закритий випадний список →
+            # «Добавить» → вибране рядками з ✕; нічого зайвого не видно.
             values = self.facets.get({"who": "who", "product": "products", "size": "sizes", "reason": "reasons"}[key]) or []
-            chosen = cf[key]
-            search_var = tk.StringVar()
-            entry(frame, colors, search_var, placeholder="поиск…").pack(anchor="w", pady=(4, 0))
-            box = tk.Frame(frame, bg=colors["row"])
-            box.pack(anchor="w", pady=(6, 0))
-            vars_by_value = {value: tk.BooleanVar(value=(chosen is None or value in chosen)) for value in values}
-
-            def draw(*_args):
-                for child in box.winfo_children():
-                    child.destroy()
-                needle = search_var.get().strip().lower()
-                shown = 0
-                for value in values:
-                    if needle and needle not in value.lower():
-                        continue
-                    checkbox(box, colors, value, vars_by_value[value]).pack(anchor="w", pady=1)
-                    shown += 1
-                    if shown >= 12:
-                        tk.Label(box, text="… уточните поиском", bg=colors["row"], fg=colors["muted"], font=("Segoe UI", 8)).pack(anchor="w")
-                        break
-
-            search_var.trace_add("write", draw)
-            draw()
-            row = tk.Frame(frame, bg=colors["row"])
-            row.pack(anchor="w", pady=(6, 0))
-            ghost_button(row, colors, "Выбрать все", command=lambda: [v.set(True) for v in vars_by_value.values()], small=True, width=96).pack(side="left")
-            ghost_button(row, colors, "Снять все", command=lambda: [v.set(False) for v in vars_by_value.values()], small=True, width=84).pack(side="left", padx=(4, 0))
-
-            def apply_choice():
-                selected = {value for value, var in vars_by_value.items() if var.get()}
-                cf[key] = None if len(selected) == len(values) else selected
-
-            apply_actions.append(apply_choice)
+            placeholder = {"who": "Выберите сотрудника…", "product": "Выберите товар…", "size": "Выберите размер…", "reason": "Выберите причину…"}[key]
+            chooser = MultiChoice(frame, colors, values, cf[key], placeholder=placeholder,
+                                  display=(lambda v: str(v).replace("x", "×")) if key == "size" else None)
+            chooser.frame.pack(anchor="w", pady=(4, 0))
+            self.chooser = chooser
+            apply_actions.append(lambda: cf.__setitem__(key, chooser.result()))
         elif key in ("qty", "measure", "balance"):
             if key == "qty":
                 plus_var = tk.BooleanVar(value=cf["sign_plus"])
@@ -664,7 +719,8 @@ class JournalWindow:
         foot = tk.Frame(frame, bg=colors["row"])
         foot.pack(anchor="w", pady=(10, 0))
         accent_button(foot, colors, "Применить", command=lambda: self._apply_popup(apply_actions), width=110).pack(side="left")
-        ghost_button(foot, colors, "Очистить", command=lambda: self._clear_column(key), width=96).pack(side="left", padx=(6, 0))
+        clear_text = "Все" if key in ("who", "product", "size", "reason", "type") else "Очистить"
+        ghost_button(foot, colors, clear_text, command=lambda: self._clear_column(key), width=96).pack(side="left", padx=(6, 0))
 
     def _apply_popup(self, actions):
         for action in actions:
@@ -676,9 +732,7 @@ class JournalWindow:
         cf = self.column_filters
         if key == "time":
             cf["sort"] = "desc"
-            self.date_from, self.date_to = None, None
-            self.active_preset = None
-            self._render_period()
+            self._preset("all", refresh=False)
         elif key == "type":
             self._set_all_types(True)
         elif key == "document":

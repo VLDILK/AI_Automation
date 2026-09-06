@@ -16,7 +16,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from ui_kit import DEFAULT_COLORS, CanvasTable, Popup, accent_button, checkbox, entry, ghost_button
+from ui_kit import DEFAULT_COLORS, CanvasTable, MultiChoice, Popup, accent_button, checkbox, entry, ghost_button
 from utils import _number_value
 
 COLUMNS = (
@@ -274,22 +274,12 @@ class CorrectionWindow:
         actions = []
         if key in ("product", "breed", "condition", "size"):
             values = self.facet(key)
-            chosen = f[key]
-            vars_by_value = {value: tk.BooleanVar(value=(chosen is None or value in chosen)) for value in values}
-            box = tk.Frame(frame, bg=colors["row"])
-            box.pack(anchor="w", pady=(4, 0))
-            for value in values:
-                checkbox(box, colors, value, vars_by_value[value]).pack(anchor="w", pady=1)
-            row = tk.Frame(frame, bg=colors["row"])
-            row.pack(anchor="w", pady=(6, 0))
-            ghost_button(row, colors, "Выбрать все", command=lambda: [v.set(True) for v in vars_by_value.values()], small=True, width=96).pack(side="left")
-            ghost_button(row, colors, "Снять все", command=lambda: [v.set(False) for v in vars_by_value.values()], small=True, width=84).pack(side="left", padx=(4, 0))
-
-            def apply_choice():
-                selected = {value for value, var in vars_by_value.items() if var.get()}
-                f[key] = None if len(selected) == len(values) else selected
-
-            actions.append(apply_choice)
+            placeholder = {"product": "Выберите продукт…", "breed": "Выберите породу…", "condition": "Выберите состояние…", "size": "Выберите размер…"}[key]
+            chooser = MultiChoice(frame, colors, values, f[key], placeholder=placeholder,
+                                  display=(lambda v: str(v).replace("x", "×")) if key == "size" else None)
+            chooser.frame.pack(anchor="w", pady=(4, 0))
+            self.chooser = chooser
+            actions.append(lambda: f.__setitem__(key, chooser.result()))
         elif key == "now":
             min_var = tk.StringVar(value=str(f["now_min"]))
             max_var = tk.StringVar(value=str(f["now_max"]))
@@ -313,7 +303,8 @@ class CorrectionWindow:
         foot = tk.Frame(frame, bg=colors["row"])
         foot.pack(anchor="w", pady=(10, 0))
         accent_button(foot, colors, "Применить", command=lambda: self._apply_popup(actions), width=110).pack(side="left")
-        ghost_button(foot, colors, "Очистить", command=lambda: self._clear_column(key), width=96).pack(side="left", padx=(6, 0))
+        clear_text = "Все" if key in ("product", "breed", "condition", "size") else "Очистить"
+        ghost_button(foot, colors, clear_text, command=lambda: self._clear_column(key), width=96).pack(side="left", padx=(6, 0))
 
     def _apply_popup(self, actions):
         for action in actions:

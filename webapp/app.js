@@ -4252,56 +4252,138 @@
     // Рішення користувача (2026-09-06, живий тест): замість списку
     // продуктів - період «с» і «до» з вибором дати, завжди видно; швидкі
     // періоди лишаються і заповнюють дати; усе застосовується одразу.
-    var periodSelect = makeSelect([["all", "За всё время"], ["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["custom", "Свой период"]]);
-    var dateRow = document.createElement("div");
-    dateRow.className = "journal-date-row";
+    // Рішення користувача (2026-09-06): період як в антисептируванні -
+    // швидкі кнопки та окрема «Свой период…» з вікном «С даты / По дату /
+    // Показать результат»; усе застосовується одразу.
+    var PERIOD_PRESETS = [["today", "Сегодня"], ["yesterday", "Вчера"], ["week", "Неделя"], ["month", "Месяц"], ["all", "Весь период"]];
+    var period = { key: "all", from: "", to: "" };
+    var periodRow = document.createElement("div");
+    periodRow.className = "journal-chips journal-periods";
+    var periodButtons = {};
+    PERIOD_PRESETS.forEach(function (pair) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "journal-period";
+      button.textContent = pair[1];
+      button.addEventListener("click", function () {
+        period.key = pair[0];
+        applyPreset();
+        renderPeriods();
+        loadJournal(true);
+      });
+      periodButtons[pair[0]] = button;
+      periodRow.appendChild(button);
+    });
+    var customButton = document.createElement("button");
+    customButton.type = "button";
+    customButton.className = "journal-period journal-period-custom";
+    customButton.textContent = "Свой период…";
+    customButton.addEventListener("click", openPeriodModal);
+    periodRow.appendChild(customButton);
+    function shortDate(iso) {
+      if (!iso) {
+        return "…";
+      }
+      var parts = iso.split("-");
+      return parts.length === 3 ? parts[2] + "." + parts[1] + "." + parts[0].slice(2) : iso;
+    }
+    function renderPeriods() {
+      Object.keys(periodButtons).forEach(function (key) {
+        periodButtons[key].classList.toggle("on", period.key === key);
+      });
+      var custom = period.key === "custom";
+      customButton.classList.toggle("on", custom);
+      customButton.textContent = custom ? "Свой период: " + shortDate(period.from) + " — " + shortDate(period.to) : "Свой период…";
+    }
+    function applyPreset() {
+      var today = new Date();
+      if (period.key === "today") {
+        period.from = isoDate(today);
+        period.to = isoDate(today);
+      } else if (period.key === "yesterday") {
+        var yesterday = new Date(today.getTime() - 86400000);
+        period.from = isoDate(yesterday);
+        period.to = isoDate(yesterday);
+      } else if (period.key === "week") {
+        period.from = isoDate(new Date(today.getTime() - 6 * 86400000));
+        period.to = isoDate(today);
+      } else if (period.key === "month") {
+        period.from = isoDate(new Date(today.getTime() - 29 * 86400000));
+        period.to = isoDate(today);
+      } else if (period.key === "all") {
+        period.from = "";
+        period.to = "";
+      }
+    }
+    // Вікно «Свой период» - те саме, що в антисептируванні.
+    var periodModal = document.createElement("div");
+    periodModal.className = "journal-modal-overlay";
+    periodModal.style.display = "none";
+    var periodCard = document.createElement("div");
+    periodCard.className = "journal-modal";
+    var periodHead = document.createElement("div");
+    periodHead.className = "journal-modal-head";
+    var periodTitle = document.createElement("span");
+    periodTitle.textContent = "Свой период";
+    var periodClose = document.createElement("span");
+    periodClose.className = "journal-modal-close";
+    periodClose.textContent = "×";
+    periodClose.addEventListener("click", function () { periodModal.style.display = "none"; });
+    periodHead.appendChild(periodTitle);
+    periodHead.appendChild(periodClose);
+    periodCard.appendChild(periodHead);
+    var fromLabel = document.createElement("p");
+    fromLabel.className = "journal-modal-label";
+    fromLabel.textContent = "С даты";
     var dateFrom = document.createElement("input");
     dateFrom.type = "date";
     dateFrom.className = "journal-date";
+    var toLabel = document.createElement("p");
+    toLabel.className = "journal-modal-label";
+    toLabel.textContent = "По дату";
     var dateTo = document.createElement("input");
     dateTo.type = "date";
     dateTo.className = "journal-date";
-    var fromLabel = document.createElement("label");
-    fromLabel.textContent = "с";
-    var toLabel = document.createElement("label");
-    toLabel.textContent = "до";
-    [fromLabel, dateFrom, toLabel, dateTo].forEach(function (el) {
-      dateRow.appendChild(el);
+    var periodApply = document.createElement("button");
+    periodApply.type = "button";
+    periodApply.className = "add-position-button journal-modal-apply";
+    periodApply.textContent = "Показать результат";
+    periodApply.addEventListener("click", function () {
+      period.key = "custom";
+      period.from = dateFrom.value || "";
+      period.to = dateTo.value || "";
+      if (period.from && period.to && period.from > period.to) {
+        var swap = period.from;
+        period.from = period.to;
+        period.to = swap;
+      }
+      periodModal.style.display = "none";
+      renderPeriods();
+      loadJournal(true);
     });
+    [fromLabel, dateFrom, toLabel, dateTo, periodApply].forEach(function (el) {
+      periodCard.appendChild(el);
+    });
+    periodModal.appendChild(periodCard);
+    periodModal.addEventListener("click", function (event) {
+      if (event.target === periodModal) {
+        periodModal.style.display = "none";
+      }
+    });
+    document.body.appendChild(periodModal);
+    function openPeriodModal() {
+      dateFrom.value = period.from || "";
+      dateTo.value = period.to || "";
+      periodModal.style.display = "flex";
+    }
     var searchInput = document.createElement("input");
     searchInput.type = "text";
     searchInput.className = "journal-search";
     searchInput.placeholder = "Размер, порода, № документа";
-    [chipsRow, periodSelect, dateRow, searchInput].forEach(function (el) {
+    [chipsRow, periodRow, searchInput].forEach(function (el) {
       filtersBar.appendChild(el);
     });
-    function applyPreset() {
-      var today = new Date();
-      var value = periodSelect.value;
-      if (value === "today") {
-        dateFrom.value = isoDate(today);
-        dateTo.value = isoDate(today);
-      } else if (value === "week") {
-        dateFrom.value = isoDate(new Date(today.getTime() - 6 * 86400000));
-        dateTo.value = isoDate(today);
-      } else if (value === "month") {
-        dateFrom.value = isoDate(new Date(today.getTime() - 29 * 86400000));
-        dateTo.value = isoDate(today);
-      } else if (value === "all") {
-        dateFrom.value = "";
-        dateTo.value = "";
-      }
-    }
-    periodSelect.addEventListener("change", function () {
-      applyPreset();
-      loadJournal(true);
-    });
-    [dateFrom, dateTo].forEach(function (input) {
-      input.addEventListener("change", function () {
-        periodSelect.value = "custom";
-        loadJournal(true);
-      });
-    });
+    renderPeriods();
     var searchTimer = null;
     searchInput.addEventListener("input", function () {
       if (searchTimer) {
@@ -4346,8 +4428,8 @@
         types: allOn ? [] : (chosenTypes.length ? chosenTypes : ["__none__"]),
         product: "",
         search: searchInput.value.trim(),
-        date_from: dateFrom.value || "",
-        date_to: dateTo.value || "",
+        date_from: period.from || "",
+        date_to: period.to || "",
       };
       return filters;
     }

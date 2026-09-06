@@ -297,6 +297,19 @@ def normalize_length_mm(value):
 # кожному натисканні клавіші), тож справжнього спільного коду між
 # Python/JS тут не буде. Якщо ЦЯ формула колись зміниться - обов'язково
 # перевір і оновити ту саму формулу в app.js.
+# Рішення користувача (2026-09-06, форма продажу ОСБ): клітинка виміру
+# (м3/м2/мп) вважається заповненою лише ненульовим числом. Порожня або 0 при
+# наявних штуках означає «вимір не проставлено» - тоді правда в штуках, а
+# вимір дораховується з них (normalize_stock_rows), а не обнуляє залишок.
+def measure_cell_filled(value):
+    if value in (None, ""):
+        return False
+    try:
+        return abs(float(str(value).replace(",", "."))) > 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
 def piece_measure(thickness, width, length, measure_kind):
     if measure_kind == "area":
         return _number_value(width) / 1000 * _number_value(length) / 1000

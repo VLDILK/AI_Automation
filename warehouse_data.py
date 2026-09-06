@@ -30,7 +30,7 @@ from openpyxl.worksheet.filters import AutoFilter
 import excel_source
 import xlsx_columns
 import permissions
-from utils import is_lath_row, is_piece_priced_product, lath_product_name, plain_product_name
+from utils import is_lath_row, is_piece_priced_product, lath_product_name, measure_cell_filled, plain_product_name
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
@@ -2220,6 +2220,7 @@ class ExcelSqliteStore:
         self._seed_operation_category_synonyms()
         self._backfill_bot_user_names()
         self._seed_known_personnel()
+        self._normalize_existing_stock_once()
 
     def _ensure_column(self, table_name, column_name, column_sql):
         columns = {
@@ -2471,6 +2472,23 @@ class ExcelSqliteStore:
     def normalize_lath_rows(self):
         return self.normalize_stock_rows()["lath"]
 
+    # Разовий дорахунок на ВЖЕ імпортованій базі (2026-09-06): раніше
+    # normalize_stock_rows викликався лише з import_workbook, тож база,
+    # імпортована до появи «ОСБ у мп», лишалась із порожньою «Остаток, мп» і
+    # одиницею «шт» - а порожній вимір обнуляв залишок ОСБ у формі продажу.
+    # Наступний імпорт Excel синхронізує дораховане назад у таблицю.
+    _STOCK_NORMALIZED_KEY = "stock_measures_normalized_v2"
+
+    def _normalize_existing_stock_once(self):
+        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (self._STOCK_NORMALIZED_KEY,)).fetchone():
+            return
+        counts = self.normalize_stock_rows()
+        self.last_lath_rows_marked = counts["lath"]
+        self.last_measures_filled = counts["measures"]
+        self.last_stock_rows_normalized = counts["rows"]
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, '1')", (self._STOCK_NORMALIZED_KEY,))
+
     _UNIT_LABEL_BY_KIND = {"volume": "м3", "area": "м2", "linear": "мп"}
 
     def normalize_stock_rows(self):
@@ -2518,14 +2536,20 @@ class ExcelSqliteStore:
                         measure_index = by_header.get(_normalize_phrase(measure_header))
                         if qty_index is None or measure_index is None:
                             continue
-                        if row_value(values, measure_index) not in (None, ""):
-                            continue
                         quantity = row_value(values, qty_index)
                         if quantity in (None, ""):
                             continue
                         try:
                             quantity = float(str(quantity).replace(",", "."))
                         except ValueError:
+                            continue
+                        # Заповнена клітинка (ненульове число) не чіпається.
+                        # Порожня або 0 при штуках > 0 - «вимір не проставлено»,
+                        # дораховується (2026-09-06: ОСБ без мп зникав з форми).
+                        raw_measure = row_value(values, measure_index)
+                        if measure_cell_filled(raw_measure):
+                            continue
+                        if quantity <= 0 and raw_measure not in (None, ""):
                             continue
                         set_value(new_values, measure_index, round(quantity * piece, 6))
                         filled += 1

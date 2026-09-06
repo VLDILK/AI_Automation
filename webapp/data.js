@@ -201,13 +201,7 @@
       if (state.activeCategories.size > 0 && !state.activeCategories.has(row.product)) {
         return false;
       }
-      if (state.sizeFilter.thickness !== null && numberValue(row.thickness) !== state.sizeFilter.thickness) {
-        return false;
-      }
-      if (state.sizeFilter.width !== null && numberValue(row.width) !== state.sizeFilter.width) {
-        return false;
-      }
-      if (state.sizeFilter.length !== null && numberValue(row.length) !== state.sizeFilter.length) {
+      if (!matchesSizeFilter(row, state.sizeFilter)) {
         return false;
       }
       if (state.valueFilter.breed !== null && !state.valueFilter.breed.has(row.breed || "")) {
@@ -226,11 +220,44 @@
     });
   }
 
+  // Рядки складу після всіх фільтрів, КРІМ одного (except): з них беруться
+  // значення для випадного списку цього фільтра - «якщо застосований інший
+  // фільтр в іншому стовпці, це враховується» (рішення користувача 2026-09-06).
+  function visibleRowsExcept(except) {
+    return state.rows.filter(function (row) {
+      if (state.activeCategories.size > 0 && !state.activeCategories.has(row.product)) {
+        return false;
+      }
+      if (except !== "size" && !matchesSizeFilter(row, state.sizeFilter)) {
+        return false;
+      }
+      var fields = ["breed", "condition", "product", "unit"];
+      for (var i = 0; i < fields.length; i++) {
+        var field = fields[i];
+        if (field !== except && state.valueFilter[field] !== null && !state.valueFilter[field].has(row[field] || "")) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  function rowSizeText(row) {
+    return [row.thickness, row.width, row.length]
+      .filter(function (v) { return v !== null && v !== undefined && v !== ""; })
+      .map(formatNumber)
+      .join("x");
+  }
+
   // Задача користувача: "фільтри мають бути всі схожими за їх типами
   // інформації" - той самий трипольний збіг товщина/ширина/довжина, що вже
   // inline перевіряє visibleRows() вище (лише для СКЛАД), тут окремим
   // хелпером для "Списание"/"Низкий остаток".
   function matchesSizeFilter(row, sizeFilterState) {
+    // Розмір цілими «TxWxL» (кілька одразу) - рішення користувача 2026-09-06.
+    if (sizeFilterState.sizes && sizeFilterState.sizes.size > 0) {
+      return sizeFilterState.sizes.has(rowSizeText(row));
+    }
     if (sizeFilterState.thickness !== null && numberValue(row.thickness) !== sizeFilterState.thickness) {
       return false;
     }
@@ -264,10 +291,16 @@
   }
 
   function hasActiveSizeFilter(sizeFilterState) {
+    if (sizeFilterState.sizes && sizeFilterState.sizes.size > 0) {
+      return true;
+    }
     return sizeFilterState.thickness !== null || sizeFilterState.width !== null || sizeFilterState.length !== null;
   }
 
   function activeSizeFilterText(sizeFilterState) {
+    if (sizeFilterState.sizes && sizeFilterState.sizes.size > 0) {
+      return Array.from(sizeFilterState.sizes).map(function (s) { return s.replace(/x/g, "×"); }).join(", ");
+    }
     var parts = [];
     if (sizeFilterState.thickness !== null) parts.push("Толщина " + formatNumber(sizeFilterState.thickness));
     if (sizeFilterState.width !== null) parts.push("Ширина " + formatNumber(sizeFilterState.width));
@@ -303,6 +336,7 @@
       sizeFilterState.thickness = null;
       sizeFilterState.width = null;
       sizeFilterState.length = null;
+      sizeFilterState.sizes = null;
       onClear();
     });
     badge.appendChild(clear);
@@ -388,11 +422,11 @@
   // рядком замість масиву, де .forEach одразу кидав TypeError. Перейменована
   // на distinctStockFieldValues, щоб колізії більше не було - ОБИДВІ
   // поведінки (ця з hasBlank, generic без) лишаються потрібні окремо.
-  function distinctStockFieldValues(field) {
+  function distinctStockFieldValues(field, rows) {
     var seen = {};
     var values = [];
     var hasBlank = false;
-    state.rows.forEach(function (row) {
+    (rows || state.rows).forEach(function (row) {
       var value = row[field] || "";
       if (!value) {
         hasBlank = true;
@@ -416,54 +450,97 @@
   // замість дублювання розмітки. openGenericValueModal - той самий модал,
   // ПАРАМЕТРИЗОВАНИЙ (не завʼязаний на state.rows/VALUE_FIELDS), тому
   // реюзається й для "Клиент" на вкладці "Клиенты" (інше джерело даних).
+  // Рішення користувача (2026-09-06): жодних списків із галочками - закритий
+  // випадний список «Выберите…», під ним «Добавить», нижче вибране рядками
+  // з ✕. Поки список не відкрити, нічого зайвого не видно. Порожній вибір =
+  // усі значення (null).
+  function buildChoiceList(container, values, current, displayFor) {
+    displayFor = displayFor || function (value) { return value === "" ? VALUE_BLANK_LABEL : String(value); };
+    container.innerHTML = "";
+    var chosen = current ? values.filter(function (value) { return current.has(value); }) : [];
+    var select = document.createElement("select");
+    select.className = "choice-select";
+    var addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "choice-add";
+    addButton.textContent = "Добавить";
+    var rows = document.createElement("div");
+    rows.className = "choice-rows";
+    var hint = document.createElement("p");
+    hint.className = "choice-hint";
+    hint.textContent = "Ничего не добавлено — показаны все.";
+
+    function rebuild() {
+      select.innerHTML = "";
+      var placeholder = document.createElement("option");
+      placeholder.value = "__none__";
+      placeholder.textContent = "Выберите…";
+      select.appendChild(placeholder);
+      values.forEach(function (value, index) {
+        if (chosen.indexOf(value) !== -1) {
+          return;
+        }
+        var option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = displayFor(value);
+        select.appendChild(option);
+      });
+      rows.innerHTML = "";
+      chosen.forEach(function (value) {
+        var row = document.createElement("div");
+        row.className = "choice-row";
+        var text = document.createElement("span");
+        text.textContent = displayFor(value);
+        row.appendChild(text);
+        var remove = document.createElement("span");
+        remove.className = "choice-remove";
+        remove.textContent = "✕";
+        remove.addEventListener("click", function () {
+          chosen = chosen.filter(function (v) { return v !== value; });
+          rebuild();
+        });
+        row.appendChild(remove);
+        rows.appendChild(row);
+      });
+      hint.style.display = chosen.length ? "none" : "";
+    }
+
+    addButton.addEventListener("click", function () {
+      if (select.value === "__none__") {
+        return;
+      }
+      var value = values[Number(select.value)];
+      if (value === undefined || chosen.indexOf(value) !== -1) {
+        return;
+      }
+      chosen.push(value);
+      rebuild();
+    });
+    container.appendChild(select);
+    container.appendChild(addButton);
+    container.appendChild(rows);
+    container.appendChild(hint);
+    rebuild();
+    return {
+      result: function () {
+        return chosen.length ? new Set(chosen) : null;
+      },
+    };
+  }
+
   function openGenericValueModal(title, values, current, onApply) {
     document.getElementById("value-modal-title").textContent = "Фильтр: " + title;
-    var body = document.getElementById("value-modal-body");
-    body.innerHTML = "";
-    var checkboxes = [];
-
-    var bulkRow = document.createElement("div");
-    bulkRow.className = "value-bulk-row";
-    var selectAllLink = document.createElement("span");
-    selectAllLink.className = "value-bulk-link";
-    selectAllLink.textContent = "Выделить всё";
-    selectAllLink.addEventListener("click", function () {
-      checkboxes.forEach(function (cb) { cb.checked = true; });
-    });
-    var clearAllLink = document.createElement("span");
-    clearAllLink.className = "value-bulk-link";
-    clearAllLink.textContent = "Снять выделение";
-    clearAllLink.addEventListener("click", function () {
-      checkboxes.forEach(function (cb) { cb.checked = false; });
-    });
-    bulkRow.appendChild(selectAllLink);
-    bulkRow.appendChild(clearAllLink);
-    body.appendChild(bulkRow);
-
-    values.forEach(function (value) {
-      var row = document.createElement("label");
-      row.className = "value-option-row";
-      var checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = value;
-      checkbox.checked = current === null || current.has(value);
-      row.appendChild(checkbox);
-      row.appendChild(document.createTextNode(value || VALUE_BLANK_LABEL));
-      body.appendChild(row);
-      checkboxes.push(checkbox);
-    });
+    var chooser = buildChoiceList(document.getElementById("value-modal-body"), values, current);
     document.getElementById("value-modal-apply").onclick = function () {
-      var checked = checkboxes.filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
-      var result = checked.length === checkboxes.length ? null : new Set(checked);
       document.getElementById("value-modal").style.display = "none";
-      onApply(result);
+      onApply(chooser.result());
     };
     document.getElementById("value-modal").style.display = "flex";
   }
 
   function openValueModal(field) {
     var config = VALUE_FIELDS[field];
-    openGenericValueModal(config.label, distinctStockFieldValues(field), state.valueFilter[field], function (result) {
+    openGenericValueModal(config.label, distinctStockFieldValues(field, visibleRowsExcept(field)), state.valueFilter[field], function (result) {
       state.valueFilter[field] = result;
       renderStockPanel();
     });
@@ -624,175 +701,37 @@
     return values.sort(function (a, b) { return a - b; });
   }
 
-  function openSizeModal(rows, sizeFilterState, onApply) {
-    var body = document.getElementById("size-modal-body");
-    body.innerHTML = "";
-    var pending = {};
-    var fieldEls = {};
-    var applyButton = document.getElementById("size-modal-apply");
-
-    function otherPendingValues(excludeKey) {
-      var result = {};
-      SIZE_FIELDS.forEach(function (field) {
-        if (field.key !== excludeKey) {
-          result[field.key] = pending[field.key].value;
-        }
-      });
-      return result;
-    }
-
-    // Задача користувача (2026-08-14): список і поле - ВЗАЄМОВИКЛЮЧНІ.
-    // Обраний зі списку варіант ГОЛОВНИЙ; поле враховується лише коли для
-    // ЦЬОГО поля список не обраний ("Выбрать"). Список НІКОЛИ не пише своє
-    // значення в поле (лишає його порожнім) - раніше writeIntoInput робив
-    // навпаки, тож "останнє обране" завжди виглядало як ручне введення і
-    // однаково душило сусідні дропдауни постійним значенням старого поля.
-    function effectiveRawValue(fieldKey) {
-      var els = fieldEls[fieldKey];
-      return els.select.value || els.input.value;
-    }
-
-    function refreshApplyState() {
-      var anyInvalid = SIZE_FIELDS.some(function (field) {
-        return pending[field.key].invalid;
-      });
-      applyButton.disabled = anyInvalid;
-    }
-
-    function rebuildSelect(fieldKey) {
-      var select = fieldEls[fieldKey].select;
-      var currentValue = select.value;
-      select.innerHTML = "";
-      var blankOption = document.createElement("option");
-      blankOption.value = "";
-      blankOption.textContent = "Выбрать";
-      select.appendChild(blankOption);
-      var options = distinctValuesFor(rows, fieldKey, otherPendingValues(fieldKey));
-      options.forEach(function (value) {
-        var option = document.createElement("option");
-        option.value = String(value);
-        option.textContent = formatNumber(value);
-        select.appendChild(option);
-      });
-      if (options.some(function (value) { return String(value) === currentValue; })) {
-        select.value = currentValue;
-      }
-    }
-
-    function validate(fieldKey, rawValue) {
-      var els = fieldEls[fieldKey];
-      var trimmed = String(rawValue || "").trim();
-      if (!trimmed) {
-        pending[fieldKey] = { value: null, invalid: false };
-        els.input.classList.remove("invalid");
-        els.error.style.display = "none";
-        refreshApplyState();
+  function distinctSizes(rows) {
+    var seen = {};
+    var items = [];
+    rows.forEach(function (row) {
+      var text = rowSizeText(row);
+      if (!text || seen[text]) {
         return;
       }
-      var num = numberValue(trimmed);
-      var exists = num !== null && distinctValuesFor(rows, fieldKey, otherPendingValues(fieldKey)).indexOf(num) !== -1;
-      pending[fieldKey] = { value: num, invalid: !exists };
-      els.input.classList.toggle("invalid", !exists);
-      els.error.style.display = exists ? "none" : "block";
-      refreshApplyState();
-    }
-
-    // Зміна одного поля перебудовує списки/перевірку ДВОХ інших - каскад
-    // діє в обидва боки (не лише товщина -> ширина -> довжина по порядку).
-    // effectiveRawValue (не голий input.value) - інакше сусіднє поле, чиє
-    // значення зараз узяте зі СПИСКУ (тому його власне текстове поле навмисно
-    // порожнє), тут же обнулилось б назад до pending.value=null.
-    function onFieldChanged(changedKey) {
-      SIZE_FIELDS.forEach(function (field) {
-        if (field.key !== changedKey) {
-          rebuildSelect(field.key);
-          validate(field.key, effectiveRawValue(field.key));
-        }
-      });
-    }
-
-    var fieldsRow = document.createElement("div");
-    fieldsRow.className = "size-fields-row";
-    body.appendChild(fieldsRow);
-
-    SIZE_FIELDS.forEach(function (field) {
-      var current = sizeFilterState[field.key];
-      pending[field.key] = { value: current, invalid: false };
-
-      var wrap = document.createElement("div");
-      wrap.className = "size-field-col";
-      var label = document.createElement("p");
-      label.className = "size-field-label";
-      label.textContent = field.label;
-      wrap.appendChild(label);
-
-      var row = document.createElement("div");
-      row.className = "size-field-row";
-
-      var input = document.createElement("input");
-      input.type = "text";
-      input.value = current === null ? "" : String(current);
-      row.appendChild(input);
-
-      var select = document.createElement("select");
-      row.appendChild(select);
-      wrap.appendChild(row);
-
-      var error = document.createElement("p");
-      error.className = "size-field-error";
-      error.style.display = "none";
-      error.textContent = "Такого размера нет на складе";
-      wrap.appendChild(error);
-
-      fieldEls[field.key] = { input: input, select: select, error: error };
-
-      // Реальний ризик (аудит коду, 2026-08-14): validate()/onFieldChanged()
-      // разом - до 3 повних проходів distinctValuesFor() по rows (кожен -
-      // O(n) скан) ПЛЮС перебудова DOM двох <select> - усе це раніше
-      // запускалось на КОЖНЕ натискання клавіші під час введення числа.
-      // Для складу з тисячами рядків це помітно "гальмувало" ввід. select.
-      // value очищається одразу (дешева, миттєва зміна - сигналізує "тепер
-      // введення вручну"), а сам перерахунок відкладений на коротку паузу
-      // після останнього натискання (debounce), а не на кожен символ.
-      var validateDebounceTimer = null;
-      input.addEventListener("input", function () {
-        select.value = "";
-        if (validateDebounceTimer) {
-          clearTimeout(validateDebounceTimer);
-        }
-        validateDebounceTimer = setTimeout(function () {
-          validate(field.key, input.value);
-          onFieldChanged(field.key);
-        }, 200);
-      });
-      select.addEventListener("change", function () {
-        if (select.value) {
-          // Задача користувача: список НЕ пише в поле - обране зі списку
-          // лишає поле порожнім (не навпаки, як було), поле - лише для
-          // ручного вводу. validate() нижче й так знімає "invalid" з
-          // порожнього поля (rawValue тут - select.value, не поле).
-          input.value = "";
-          validate(field.key, select.value);
-          onFieldChanged(field.key);
-        }
-      });
-
-      fieldsRow.appendChild(wrap);
+      seen[text] = true;
+      items.push({ text: text, t: numberValue(row.thickness) || 0, w: numberValue(row.width) || 0, l: numberValue(row.length) || 0 });
     });
+    items.sort(function (a, b) { return (a.t - b.t) || (a.w - b.w) || (a.l - b.l); });
+    return items.map(function (item) { return item.text; });
+  }
 
-    SIZE_FIELDS.forEach(function (field) {
-      rebuildSelect(field.key);
-      validate(field.key, effectiveRawValue(field.key));
-    });
-
+  // Рішення користувача (2026-09-06): замість трьох полів Толщина/Ширина/
+  // Длина - випадний список цілих розмірів «TxWxL» з наявних рядків
+  // (після інших фільтрів), «Добавить», вибрані рядками з ✕ - можна кілька.
+  function openSizeModal(rows, sizeFilterState, onApply) {
+    var chooser = buildChoiceList(document.getElementById("size-modal-body"), distinctSizes(rows), sizeFilterState.sizes || null,
+      function (value) { return String(value).replace(/x/g, "×"); });
+    var applyButton = document.getElementById("size-modal-apply");
+    applyButton.disabled = false;
     applyButton.onclick = function () {
-      SIZE_FIELDS.forEach(function (field) {
-        sizeFilterState[field.key] = pending[field.key].value;
-      });
+      sizeFilterState.sizes = chooser.result();
+      sizeFilterState.thickness = null;
+      sizeFilterState.width = null;
+      sizeFilterState.length = null;
       document.getElementById("size-modal").style.display = "none";
       onApply();
     };
-
     document.getElementById("size-modal").style.display = "flex";
   }
 
@@ -1778,7 +1717,7 @@
       });
     });
     document.getElementById("size-filter-trigger").addEventListener("click", function () {
-      openSizeModal(state.rows, state.sizeFilter, renderStockPanel);
+      openSizeModal(visibleRowsExcept("size"), state.sizeFilter, renderStockPanel);
     });
     document.getElementById("size-modal-close").addEventListener("click", function () {
       closeModal("size-modal");

@@ -18,6 +18,7 @@ _EFACTURA_DEFAULT_TEXT = "просьба принять информацию и 
 from settings import DisplaySettingsStore, SettingsStore
 from utils import normalize_length_mm
 from utils import (
+    measure_cell_filled,
     piece_measure,
     row_measure_kind,
     _display_bot_number,
@@ -429,7 +430,13 @@ class CoreDialogMixin:
         )
         if piece_amount <= 0:
             return balance_qty
-        balance_measure = _number_value(row_value(row, measure_idx))
+        raw_measure = row_value(row, measure_idx)
+        if not measure_cell_filled(raw_measure) and balance_qty > 0:
+            # Вимір не проставлено (порожньо або 0) при наявних штуках -
+            # правда в штуках (2026-09-06: ОСБ без мп зникав з форми продажу,
+            # а сервер потім відповідав «Доступно: 9 шт»).
+            return balance_qty
+        balance_measure = _number_value(raw_measure)
         measure_limited_qty = int((balance_measure + INCOME_VOLUME_TOLERANCE) / piece_amount + 1e-9)
         return min(balance_qty, max(0, measure_limited_qty))
 

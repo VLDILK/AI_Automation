@@ -586,6 +586,58 @@ html, body {
   margin: 4px 0 0;
 }
 
+/* Вибір кількох значень (2026-09-06): список → «Добавить» → рядки з ✕ */
+.choice-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-size: 14px;
+}
+
+.choice-add {
+  margin-top: 8px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: transparent;
+  color: var(--tg-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.choice-rows {
+  margin-top: 8px;
+}
+
+.choice-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid var(--field-border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.choice-remove {
+  color: var(--error);
+  font-weight: 700;
+  cursor: pointer;
+  padding-left: 12px;
+}
+
+.choice-hint {
+  color: var(--tg-hint);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
 .value-bulk-row {
   display: flex;
   gap: 16px;

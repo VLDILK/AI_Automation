@@ -53,6 +53,74 @@ def entry(parent, colors, variable, width=220, placeholder=""):
                         border_color=colors["line"], text_color=colors["fg"], placeholder_text=placeholder)
 
 
+class MultiChoice:
+    """Вибір кількох значень (рішення користувача 2026-09-06): закритий
+    випадний список «Выберите…», під ним «Добавить», нижче - вибране рядками
+    з ✕. Поки список не відкрити, інших значень не видно. values - усі
+    доступні, chosen - множина або None (= усі); display - як показувати."""
+
+    def __init__(self, parent, colors, values, chosen=None, placeholder="Выберите…", display=None, width=250):
+        self.colors = colors
+        self.values = list(values)
+        self.display = display or (lambda value: str(value))
+        self.placeholder = placeholder
+        self.chosen = [value for value in self.values if chosen and value in chosen] if chosen else []
+        self.frame = tk.Frame(parent, bg=colors["row"])
+        self.combo = ctk.CTkComboBox(
+            self.frame, values=self._available(), width=width, height=30, corner_radius=8, state="readonly",
+            fg_color=colors["row"], border_color=colors["line"], text_color=colors["fg"], button_color=colors["accent"],
+            button_hover_color=colors["accent"], dropdown_fg_color=colors["row"], dropdown_text_color=colors["fg"],
+            dropdown_hover_color=colors["hover"],
+        )
+        self.combo.set(placeholder)
+        self.combo.pack(anchor="w")
+        self.add_button = ghost_button(self.frame, colors, "Добавить", command=self.add, small=True, width=100)
+        self.add_button.pack(anchor="w", pady=(6, 0))
+        self.rows = tk.Frame(self.frame, bg=colors["row"])
+        self.rows.pack(anchor="w", fill="x", pady=(4, 0))
+        self._render_rows()
+
+    def _available(self):
+        shown = [self.display(value) for value in self.values if value not in self.chosen]
+        return shown or [""]
+
+    def add(self, value=None):
+        if value is None:
+            text = self.combo.get()
+            value = next((v for v in self.values if self.display(v) == text), None)
+        if value is None or value in self.chosen or value not in self.values:
+            return False
+        self.chosen.append(value)
+        self._refresh()
+        return True
+
+    def remove(self, value):
+        if value in self.chosen:
+            self.chosen.remove(value)
+            self._refresh()
+
+    def _refresh(self):
+        self.combo.configure(values=self._available())
+        self.combo.set(self.placeholder)
+        self._render_rows()
+
+    def _render_rows(self):
+        for child in self.rows.winfo_children():
+            child.destroy()
+        colors = self.colors
+        for value in self.chosen:
+            row = tk.Frame(self.rows, bg=colors["row"], highlightthickness=1, highlightbackground=colors["line"])
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=self.display(value), bg=colors["row"], fg=colors["fg"], font=("Segoe UI", 10), anchor="w").pack(side="left", padx=(8, 6), pady=3)
+            cross = tk.Label(row, text="✕", bg=colors["row"], fg=colors["minus"], font=("Segoe UI", 10, "bold"), cursor="hand2")
+            cross.pack(side="right", padx=(0, 8))
+            cross.bind("<Button-1>", lambda event, v=value: self.remove(v))
+
+    def result(self):
+        """Множина вибраних або None, коли нічого не додано (= усі)."""
+        return set(self.chosen) if self.chosen else None
+
+
 class Popup:
     """Спливаюче вікно біля елемента: без рамки, закривається по Esc, кліку
     поза ним або кнопкою всередині."""
