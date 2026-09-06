@@ -185,9 +185,10 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         self, *args, db_path=None, get_token=None, get_fresh_context=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
         handle_home_heartbeat=None, handle_set_role=None,
-        get_form_content_enabled=None, get_onedrive_email=None, **kwargs
+        get_form_content_enabled=None, get_onedrive_email=None, get_journal_page=None, **kwargs
     ):
         self.db_path = db_path
+        self.get_journal_page = get_journal_page
         # Пошта OneDrive приходить КАЛБЕКОМ, не значенням: її можна змінити
         # в налаштуваннях на ходу, а сервер живе весь час роботи програми.
         # Без неї хмара не використовується взагалі (див. servers_registry.
@@ -987,6 +988,28 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             finally:
                 store.close()
             return
+        if action == "journal":
+            # Адмін-форма (2026-09-06): сторінка журналу з фільтрами; лише
+            # адміністратор, по токену форми (як і поріг низького залишку).
+            ctx = _get_context(payload.get("token"))
+            telegram_id = ctx.get("telegram_id") if ctx else None
+            if telegram_id is None:
+                self._send_json(404, {"ok": False, "error": "Ссылка на форму устарела. Откройте её заново из чата."})
+                return
+            if self.db_path is None or self.get_journal_page is None:
+                self._send_json(503, {"ok": False, "error": "Бот сейчас не запущен - журнал недоступен."})
+                return
+            store = ExcelSqliteStore(self.db_path)
+            try:
+                role = perm.normalize_role(store.get_user_role(telegram_id))
+                if role != perm.ADMIN:
+                    self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
+                    return
+                page = self.get_journal_page(store, payload.get("filters") or {})
+            finally:
+                store.close()
+            self._send_json(200, {"ok": True, "entries": page.get("entries", []), "has_more": bool(page.get("has_more"))})
+            return
         self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
 
     def _send_json(self, status, data):
@@ -1020,7 +1043,7 @@ class WebappServer:
     # просто викликаний повторно на живому TelegramBotWorker (None, якщо
     # бот зараз не запущений).
     def __init__(
-        self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None,
+        self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None, get_journal_page=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
         handle_home_heartbeat=None, handle_set_role=None,
         get_form_content_enabled=None, get_onedrive_email=None,
@@ -1030,6 +1053,7 @@ class WebappServer:
         self.db_path = db_path
         self.get_token = get_token
         self.get_fresh_context = get_fresh_context
+        self.get_journal_page = get_journal_page
         self.get_remote_control_token = get_remote_control_token
         self.get_remote_status = get_remote_status
         self.handle_remote_command = handle_remote_command
@@ -1045,7 +1069,8 @@ class WebappServer:
             return
         handler = partial(
             _QuietRequestHandler, directory=self.directory, db_path=self.db_path, get_token=self.get_token,
-            get_fresh_context=self.get_fresh_context, get_remote_control_token=self.get_remote_control_token,
+            get_fresh_context=self.get_fresh_context, get_journal_page=self.get_journal_page,
+            get_remote_control_token=self.get_remote_control_token,
             get_remote_status=self.get_remote_status, handle_remote_command=self.handle_remote_command,
             handle_home_heartbeat=self.handle_home_heartbeat,
             handle_set_role=self.handle_set_role, get_form_content_enabled=self.get_form_content_enabled,

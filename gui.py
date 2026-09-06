@@ -709,6 +709,10 @@ class ExcelViewerApp:
                 )
                 if self.telegram_worker else None
             ),
+            get_journal_page=lambda store, filters: (
+                self.telegram_worker._admin_journal_page(store, filters)
+                if self.telegram_worker else {"entries": [], "has_more": False}
+            ),
         )
         self.cloudflared_process = None
         self.webapp_public_url = ""

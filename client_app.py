@@ -371,6 +371,10 @@ class ClientApp(ctk.CTk):
                 )
                 if self.telegram_worker else None
             ),
+            get_journal_page=lambda store, filters: (
+                self.telegram_worker._admin_journal_page(store, filters)
+                if self.telegram_worker else {"entries": [], "has_more": False}
+            ),
             get_remote_control_token=lambda: paths.remote_control_token(),
             get_remote_status=self._get_remote_status,
             handle_remote_command=self._handle_remote_command,

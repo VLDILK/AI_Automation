@@ -17,11 +17,15 @@ from paths import DISPLAY_SETTINGS_PATH, REPORT_BROADCAST_CHAT_ID, SETTINGS_PATH
 _EFACTURA_DEFAULT_TEXT = "просьба принять информацию и выпустить ЕФАКТУРУ."
 from settings import DisplaySettingsStore, SettingsStore
 from utils import (
+    piece_measure,
+    row_measure_kind,
     _display_bot_number,
     _normalize_phrase,
     _number_value,
 )
 from warehouse_data import (
+    signed_bot_number,
+    apply_correction_operation,
     GROUP_SEES_SIZE_RECALC_SETTING,
     ITEM_MEASURE_UNIT,
     apply_exchange_operation,
@@ -588,6 +592,10 @@ class CoreDialogMixin:
         # operation_type тут ще НЕ застосовна - окрема гілка ПЕРЕД нею.
         if pending.get("status") == "exchange_all_in_one":
             return self._continue_exchange_all_in_one_submission(store, context, submitted)
+        if pending.get("status") == "admin_form" or (
+            isinstance(submitted, dict) and submitted.get("positions_kind") == "correction"
+        ):
+            return self._continue_correction_submission(store, context, submitted)
         if pending.get("status") == "sale_all_in_one":
             return self._continue_sale_all_in_one_submission(store, context, submitted)
         if pending.get("status") == "writeoff_all_in_one":
@@ -2149,6 +2157,293 @@ class CoreDialogMixin:
         self._merge_webapp_submission(payload, common)
         return self._continue_writeoff_operation_impl(store, context, payload)
 
+    # ---------------- Адмін-форма (2026-09-06) ----------------
+    # Журнал операцій і корекція залишків, лише роль адміністратора.
+    _CORRECTION_CONFIRM_LABEL = "Записать коррекцию"
+    _ADMIN_JOURNAL_LABELS = {
+        "income": "Приход",
+        "sale": "Продажа",
+        "writeoff": "Списание",
+        "exchange_out": "Обмен: отдаём",
+        "exchange_in": "Обмен: получаем",
+        "antiseptic": "Антисептирование",
+        "correction": "Коррекция",
+    }
+    _ADMIN_JOURNAL_NEGATIVE = frozenset({"sale", "writeoff", "exchange_out"})
+
+    def _require_admin(self, store, context):
+        if self._current_user_role(store, context) == perm.ADMIN:
+            return None
+        return self._with_main_menu("Админ-форма доступна только администратору.", store)
+
+    def _admin_journal_entries(self, rows):
+        entries = []
+        for row in rows:
+            created = row.get("created_at") or ""
+            try:
+                time_text = datetime.fromisoformat(created).strftime("%H:%M %Y.%m.%d")
+            except ValueError:
+                time_text = created
+            movement_type = row.get("movement_type") or ""
+            quantity = _number_value(row.get("quantity"))
+            measure_kind = item_measure_kind(row)
+            measure = _number_value(row.get(measure_kind)) if measure_kind else None
+            if movement_type != "correction":
+                sign = -1 if movement_type in self._ADMIN_JOURNAL_NEGATIVE else 1
+                quantity = abs(quantity) * sign
+                if measure is not None:
+                    measure = abs(measure) * sign
+            dims = [row.get("thickness"), row.get("width"), row.get("length")]
+            size = "x".join(_display_bot_number(v) for v in dims if v not in (None, "")) if any(v not in (None, "") for v in dims) else ""
+            entries.append({
+                "id": row.get("id"),
+                "time": time_text,
+                "type": movement_type,
+                "type_label": self._ADMIN_JOURNAL_LABELS.get(movement_type, movement_type),
+                "document": row.get("document") or "",
+                "who": row.get("full_name") or row.get("username") or "",
+                "product": row.get("product") or "",
+                "breed": row.get("breed") or "",
+                "condition": row.get("condition") or "",
+                "size": size,
+                "quantity": round(quantity, 6),
+                "measure_kind": measure_kind,
+                "measure": round(measure, 6) if measure is not None else None,
+                "unit": ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else "",
+                "balance_after": row.get("balance_after"),
+                "reason": row.get("reason") or "",
+            })
+        return entries
+
+    def _admin_journal_page(self, store, filters):
+        filters = filters if isinstance(filters, dict) else {}
+        types = filters.get("types")
+        types = [t for t in types if isinstance(t, str)] if isinstance(types, list) else None
+        try:
+            limit = max(1, min(int(filters.get("limit") or 50), 200))
+            offset = max(0, int(filters.get("offset") or 0))
+        except (TypeError, ValueError):
+            limit, offset = 50, 0
+        rows, has_more = store.list_journal_movements(
+            movement_types=types or None,
+            date_from=filters.get("date_from") or None,
+            date_to=filters.get("date_to") or None,
+            product=filters.get("product") or None,
+            who=filters.get("who") or None,
+            search=filters.get("search") or None,
+            limit=limit,
+            offset=offset,
+        )
+        return {"entries": self._admin_journal_entries(rows), "has_more": has_more}
+
+    def _webapp_admin_context(self, store, context):
+        categories = self._webapp_exchange_categories(
+            store, "start_writeoff", self._WEBAPP_ALL_IN_ONE_WRITEOFF_KEYS, allow_new=False,
+        )
+        for category in categories:
+            for field in category.get("fields") or []:
+                if field.get("key") == "quantity":
+                    field["label"] = "Стало, шт"
+        products = [
+            value for (value,) in store.conn.execute(
+                "SELECT DISTINCT product FROM stock_movements WHERE product IS NOT NULL AND product != '' ORDER BY product"
+            ).fetchall()
+        ]
+        return {
+            "mode": "admin",
+            "kind": "admin",
+            "title": "Админ",
+            "telegram_id": context["user_id"],
+            "categories": categories,
+            "operation_labels": dict(self._ADMIN_JOURNAL_LABELS),
+            "products": products,
+            "journal": self._admin_journal_page(store, {"limit": 50}),
+            **self._webapp_style_ctx(),
+        }
+
+    def _admin_form_webapp_button(self, store, context):
+        base_url = getattr(self, "webapp_public_url", None)
+        if not base_url:
+            return None
+        ctx = self._webapp_admin_context(store, context)
+        token = webapp_server.register_context(ctx)
+        url = f"{base_url.rstrip('/')}/index.html?t={token}"
+        return {"web_app": {"url": url}}
+
+    def _start_admin_form_reply(self, store, context, prefix_text=None):
+        denied = self._require_admin(store, context)
+        if denied:
+            return denied
+        web_app = self._admin_form_webapp_button(store, context)
+        if web_app is None:
+            return self._with_main_menu("Админ-форма сейчас недоступна (форма не подключена).", store)
+        store.save_pending_operation(
+            context["chat_id"], context["user_id"], "stock_correction", "admin_form", {},
+        )
+        text = store.get_message_template("start_admin_form", BOT_MESSAGE_DEFAULTS["start_admin_form"])
+        if prefix_text:
+            text = prefix_text + "\n\n" + text
+        return {
+            "type": "message",
+            "text": text,
+            "reply_markup": {
+                "keyboard": [
+                    [{"text": "Открыть админ-форму", **web_app}],
+                    [{"text": "Главное меню"}],
+                ],
+                "resize_keyboard": True,
+            },
+        }
+
+    def _find_stock_row_for_correction(self, store, position, item):
+        _headers, columns, rows = warehouse_rows(store)
+        for row_id, row in rows:
+            if self._warehouse_row_matches(row, columns, position, item):
+                return row_id
+        return None
+
+    def _continue_correction_submission(self, store, context, submitted):
+        denied = self._require_admin(store, context)
+        if denied:
+            return denied
+        store.delete_pending_operation(context["chat_id"], context["user_id"])
+        submitted = dict(submitted) if isinstance(submitted, dict) else {}
+        comment = submitted.get("comment")
+        if isinstance(comment, str):
+            comment = comment.strip()
+        positions_data = submitted.get("positions") if isinstance(submitted.get("positions"), list) else []
+        if not positions_data:
+            return self._start_admin_form_reply(store, context, prefix_text="⚠️ Нет ни одной позиции для коррекции.")
+        resolved = []
+        for position in positions_data:
+            if not isinstance(position, dict):
+                continue
+            position = dict(position)
+            operation_id = position.pop("category_operation_id", None)
+            operation = store.get_operation(operation_id) if operation_id is not None else None
+            if operation is None:
+                return self._start_admin_form_reply(store, context, prefix_text="⚠️ Не удалось определить категорию одной из позиций.")
+            _op_id, _code, _kind, _requires_identity, _label, _parent, prefill_json, *_rest = operation
+            prefill = json.loads(prefill_json) if prefill_json else {}
+            item_payload = self._new_income_payload("", context)
+            item_payload["operation_kind"] = "writeoff"
+            item_payload["product"] = prefill.get("product")
+            if prefill.get("condition"):
+                item_payload["condition"] = prefill.get("condition")
+            self._merge_webapp_submission(item_payload, position)
+            self._canonicalize_income_values(store, item_payload)
+            rows_out = []
+            for item in item_payload.get("rows") or []:
+                if not isinstance(item, dict):
+                    continue
+                new_quantity = item.get("new_quantity", item.get("quantity"))
+                if new_quantity in (None, ""):
+                    return self._start_admin_form_reply(store, context, prefix_text="⚠️ У одной из позиций не указано «Стало, шт».")
+                row_id = self._find_stock_row_for_correction(store, item_payload, item)
+                if row_id is None:
+                    return self._start_admin_form_reply(
+                        store, context,
+                        prefix_text="⚠️ Не найдено на складе: %s %s." % (
+                            " / ".join(p for p in (display_product_name(item_payload), item_payload.get("breed"), item_payload.get("condition")) if p),
+                            income_item_size(item),
+                        ),
+                    )
+                rows_out.append({
+                    "thickness": item.get("thickness"),
+                    "width": item.get("width"),
+                    "length": item.get("length"),
+                    "row_id": row_id,
+                    "new_quantity": _number_value(new_quantity),
+                })
+            if rows_out:
+                resolved.append({
+                    "product": item_payload.get("product"),
+                    "condition": item_payload.get("condition"),
+                    "breed": item_payload.get("breed"),
+                    "rows": rows_out,
+                })
+        if not resolved:
+            return self._start_admin_form_reply(store, context, prefix_text="⚠️ Не удалось определить ни одной позиции.")
+        payload = self._new_income_payload("", context)
+        payload["operation_kind"] = "correction"
+        payload["positions"] = resolved
+        payload["_from_webapp_form"] = True
+        if comment:
+            payload["comment"] = comment
+        store.save_pending_operation(
+            context["chat_id"], context["user_id"], "stock_correction", "confirm_correction_write", payload,
+        )
+        return {
+            "type": "message",
+            "text": self._correction_preview(store, payload),
+            "reply_markup": self._correction_confirm_keyboard(),
+        }
+
+    def _correction_preview(self, store, payload):
+        _headers, columns, _rows = warehouse_rows(store)
+        lines = ["Коррекция остатков — подтвердите:", ""]
+        index = 0
+        for position in payload.get("positions") or []:
+            head = " / ".join(
+                part for part in (display_product_name(position), position.get("breed"), position.get("condition")) if part
+            )
+            for item in position.get("rows") or []:
+                index += 1
+                row_values = store.get_row(item.get("row_id"))
+                was = _number_value(row_value(row_values, columns["balance_qty"])) if row_values else 0.0
+                new = _number_value(item.get("new_quantity"))
+                delta = round(new - was, 6)
+                text = "%d. %s %s: %s → %s шт (%s шт" % (
+                    index, head, income_item_size(item), _display_bot_number(was), _display_bot_number(new),
+                    signed_bot_number(delta),
+                )
+                kind = row_measure_kind(position.get("product"), item.get("thickness"), item.get("width"))
+                if kind:
+                    text += ", %s %s" % (
+                        signed_bot_number(piece_measure(item.get("thickness"), item.get("width"), item.get("length"), kind) * delta),
+                        ITEM_MEASURE_UNIT[kind],
+                    )
+                lines.append(text + ")")
+        if payload.get("comment"):
+            lines += ["", "Причина: %s" % payload["comment"]]
+        lines += ["", "Записать?"]
+        return "\n".join(lines)
+
+    def _correction_confirm_keyboard(self):
+        return {
+            "keyboard": [[{"text": self._CORRECTION_CONFIRM_LABEL}, {"text": "Отмена"}]],
+            "resize_keyboard": True,
+            "one_time_keyboard": True,
+        }
+
+    def _continue_correction_operation(self, text, store, context, pending):
+        status = pending["status"]
+        payload = pending["payload"] or {}
+        normalized = _normalize_phrase(text or "")
+        if status == "admin_form":
+            if normalized in ("отмена", "главное меню"):
+                store.delete_pending_operation(context["chat_id"], context["user_id"])
+                return self._main_menu_reply(store)
+            return self._start_admin_form_reply(store, context)
+        if status != "confirm_correction_write":
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._with_main_menu("Предыдущая операция сброшена. Отправьте запрос заново.", store)
+        if normalized in (_normalize_phrase(self._CORRECTION_CONFIRM_LABEL), "да", "записать"):
+            result = apply_correction_operation(store, payload, self._excel_sync_mode(), self)
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            if not result.get("ok"):
+                return self._start_admin_form_reply(store, context, prefix_text="⚠️ " + result["message"])
+            self._notify_report_broadcast(context, result["message"])
+            return self._webapp_form_terminal_reply(store, context, result["message"], parse_mode="HTML")
+        if normalized == "отмена" or self._yes_no(text or "") is False:
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._with_main_menu("Коррекция отменена.", store)
+        return {
+            "type": "message",
+            "text": "Ответьте, пожалуйста: %s или Отмена." % self._CORRECTION_CONFIRM_LABEL,
+            "reply_markup": self._correction_confirm_keyboard(),
+        }
+
     def _continue_direct_open_webapp_submission(self, store, context, submitted):
         # Обмін позначає себе сам (positions_kind) - категорія тут не
         # підказка, бо позиції двох блоків належать різним розділам.
@@ -2156,6 +2451,8 @@ class CoreDialogMixin:
             return self._continue_exchange_all_in_one_submission(store, context, submitted)
         if isinstance(submitted, dict) and submitted.get("positions_kind") == "writeoff":
             return self._continue_writeoff_all_in_one_submission(store, context, submitted)
+        if isinstance(submitted, dict) and submitted.get("positions_kind") == "correction":
+            return self._continue_correction_submission(store, context, submitted)
         # "Антисептирование (форма)" перевикористовує РЕАЛЬНІ sale-категорії
         # (Доска AD/KD/ОСБ/Вагонка) для вибору товару/розміру - тому
         # category_operation_id тут веде на operation[2] == "sale", той самий

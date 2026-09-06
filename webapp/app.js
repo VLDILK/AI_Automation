@@ -3990,8 +3990,701 @@
     }
   }
 
+  // ---------------- Адмін-форма (2026-09-06) ----------------
+  // Меню з двох кнопок -> «Журнал операций» (стрічка з фільтрами) і
+  // «Коррекция остатков» (людина вводить лише «Стало, шт», ± і одиниці рахує
+  // програма; «Сохранить и продолжить» збирає список, «Отправить» - у бот).
+  function adminForm(ctx) {
+    var app = document.getElementById("app");
+    var titleEl = document.getElementById("title");
+    var formEl = document.getElementById("form");
+    var rowsContainer = document.getElementById("rows");
+    var singleContainer = document.getElementById("single-fields");
+    var errorEl = document.getElementById("error");
+    var confirmView = document.getElementById("confirm-view");
+    var confirmSummaryEl = document.getElementById("confirm-summary");
+    var confirmEditButton = document.getElementById("confirm-edit-button");
+    var fallback = document.getElementById("fallback-submit");
+    var token = window.__formToken || null;
+    var labels = ctx.operation_labels || {};
+    var confirmPayload = null;
+
+    function haptic(kind) {
+      if (tg && tg.HapticFeedback) {
+        tg.HapticFeedback.notificationOccurred(kind);
+      }
+    }
+    function fail(text) {
+      errorEl.textContent = text;
+      haptic("error");
+    }
+    function signed(value, digits) {
+      var rounded = Math.round(Number(value) * 10000) / 10000;
+      return (rounded < 0 ? "−" : "+") + formatServerNumber(Math.abs(rounded));
+    }
+
+    // ---- шапка з кнопкою «назад» (закріплена), Esc ----
+    var topBar = document.createElement("div");
+    topBar.className = "admin-top";
+    var backButton = document.createElement("button");
+    backButton.type = "button";
+    backButton.className = "admin-back";
+    backButton.textContent = "‹ Назад";
+    var topTitle = document.createElement("span");
+    topTitle.className = "admin-top-title";
+    topBar.appendChild(backButton);
+    topBar.appendChild(topTitle);
+    app.insertBefore(topBar, titleEl);
+    titleEl.style.display = "none";
+
+    var menuScreen = document.createElement("div");
+    menuScreen.className = "admin-screen";
+    var journalScreen = document.createElement("div");
+    journalScreen.className = "admin-screen";
+    app.insertBefore(menuScreen, formEl);
+    app.insertBefore(journalScreen, formEl);
+
+    var current = "menu";
+    var journalLoaded = false;
+    function showScreen(name) {
+      current = name;
+      menuScreen.hidden = name !== "menu";
+      journalScreen.hidden = name !== "journal";
+      formEl.style.display = name === "correction" ? "" : "none";
+      confirmView.style.display = "none";
+      confirmPayload = null;
+      errorEl.textContent = "";
+      backButton.style.visibility = name === "menu" ? "hidden" : "";
+      topTitle.textContent = name === "menu" ? "Админ" : name === "journal" ? "Журнал операций" : "Коррекция остатков";
+      if (tg && tg.MainButton) {
+        if (name === "correction") {
+          tg.MainButton.setText("Отправить");
+          tg.MainButton.show();
+        } else {
+          tg.MainButton.hide();
+        }
+      } else {
+        fallback.style.display = name === "correction" ? "block" : "none";
+      }
+      if (name === "journal" && !journalLoaded) {
+        loadJournal(true);
+      }
+      window.scrollTo(0, 0);
+    }
+    function goBack() {
+      if (confirmView.style.display !== "none") {
+        hideConfirm();
+        return;
+      }
+      if (current !== "menu") {
+        showScreen("menu");
+      }
+    }
+    backButton.addEventListener("click", goBack);
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        goBack();
+      }
+    });
+
+    // ---- меню ----
+    function menuButton(text, target) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "admin-menu-button";
+      button.textContent = text;
+      button.addEventListener("click", function () {
+        showScreen(target);
+      });
+      return button;
+    }
+    menuScreen.appendChild(menuButton("📒 Журнал операций", "journal"));
+    menuScreen.appendChild(menuButton("✏️ Коррекция остатков", "correction"));
+    var firstEntry = ctx.journal && ctx.journal.entries && ctx.journal.entries[0];
+    if (firstEntry) {
+      var menuHint = document.createElement("div");
+      menuHint.className = "admin-menu-hint";
+      menuHint.textContent = "Последняя запись: " + firstEntry.time + " · " + (firstEntry.document || firstEntry.type_label) + (firstEntry.who ? " · " + firstEntry.who : "");
+      menuScreen.appendChild(menuHint);
+    }
+
+    // ---- журнал ----
+    var PAGE = 50;
+    var journalOffset = 0;
+    var filtersBar = document.createElement("div");
+    filtersBar.className = "journal-filters";
+    function makeSelect(options) {
+      var select = document.createElement("select");
+      select.className = "journal-select";
+      options.forEach(function (pair) {
+        var option = document.createElement("option");
+        option.value = pair[0];
+        option.textContent = pair[1];
+        select.appendChild(option);
+      });
+      return select;
+    }
+    var typeOptions = [["", "Все операции"]];
+    Object.keys(labels).forEach(function (key) {
+      typeOptions.push([key, labels[key]]);
+    });
+    var typeSelect = makeSelect(typeOptions);
+    var periodSelect = makeSelect([["all", "За всё время"], ["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["custom", "Свой период"]]);
+    var productOptions = [["", "Все продукты"]];
+    (ctx.products || []).forEach(function (product) {
+      productOptions.push([product, product]);
+    });
+    var productSelect = makeSelect(productOptions);
+    var dateFrom = document.createElement("input");
+    dateFrom.type = "date";
+    dateFrom.className = "journal-date";
+    dateFrom.style.display = "none";
+    var dateTo = document.createElement("input");
+    dateTo.type = "date";
+    dateTo.className = "journal-date";
+    dateTo.style.display = "none";
+    var searchInput = document.createElement("input");
+    searchInput.type = "text";
+    searchInput.className = "journal-search";
+    searchInput.placeholder = "Размер, порода, № документа";
+    var applyButton = document.createElement("button");
+    applyButton.type = "button";
+    applyButton.className = "add-position-button journal-apply";
+    applyButton.textContent = "Показать";
+    [typeSelect, periodSelect, productSelect, dateFrom, dateTo, searchInput, applyButton].forEach(function (el) {
+      filtersBar.appendChild(el);
+    });
+    periodSelect.addEventListener("change", function () {
+      var custom = periodSelect.value === "custom";
+      dateFrom.style.display = custom ? "" : "none";
+      dateTo.style.display = custom ? "" : "none";
+    });
+    var journalList = document.createElement("div");
+    journalList.className = "journal-list";
+    var moreButton = document.createElement("button");
+    moreButton.type = "button";
+    moreButton.className = "add-position-button";
+    moreButton.textContent = "Показать ещё";
+    moreButton.style.display = "none";
+    journalScreen.appendChild(filtersBar);
+    journalScreen.appendChild(journalList);
+    journalScreen.appendChild(moreButton);
+
+    function isoDate(date) {
+      var y = date.getFullYear();
+      var m = String(date.getMonth() + 1);
+      var d = String(date.getDate());
+      return y + "-" + (m.length < 2 ? "0" + m : m) + "-" + (d.length < 2 ? "0" + d : d);
+    }
+    function currentFilters() {
+      var filters = { types: typeSelect.value ? [typeSelect.value] : [], product: productSelect.value || "", search: searchInput.value.trim() };
+      var today = new Date();
+      if (periodSelect.value === "today") {
+        filters.date_from = isoDate(today);
+        filters.date_to = isoDate(today);
+      } else if (periodSelect.value === "week") {
+        var week = new Date(today.getTime() - 6 * 86400000);
+        filters.date_from = isoDate(week);
+        filters.date_to = isoDate(today);
+      } else if (periodSelect.value === "month") {
+        var month = new Date(today.getTime() - 29 * 86400000);
+        filters.date_from = isoDate(month);
+        filters.date_to = isoDate(today);
+      } else if (periodSelect.value === "custom") {
+        filters.date_from = dateFrom.value || "";
+        filters.date_to = dateTo.value || "";
+      }
+      return filters;
+    }
+    function filtersAreDefault(filters) {
+      return !filters.types.length && !filters.product && !filters.search && !filters.date_from && !filters.date_to;
+    }
+    function entryElement(entry) {
+      var card = document.createElement("div");
+      card.className = "journal-entry journal-" + (entry.type || "");
+      var meta = document.createElement("div");
+      meta.className = "journal-meta";
+      meta.textContent = entry.time + " · " + (entry.document || entry.type_label) + (entry.document ? "" : "") + (entry.who ? " · " + entry.who : "");
+      card.appendChild(meta);
+      var line = document.createElement("div");
+      line.className = "journal-line";
+      var what = [entry.product, entry.breed, entry.condition && entry.condition !== entry.product ? entry.condition : "", entry.size].filter(function (v) { return v; }).join(" ");
+      var whatEl = document.createElement("span");
+      whatEl.textContent = what + " ";
+      line.appendChild(whatEl);
+      var qty = Number(entry.quantity) || 0;
+      var delta = document.createElement("span");
+      delta.className = qty < 0 ? "journal-minus" : "journal-plus";
+      var deltaText = signed(qty) + " шт";
+      if (entry.measure !== null && entry.measure !== undefined && entry.unit) {
+        deltaText += " · " + signed(entry.measure) + " " + entry.unit;
+      }
+      delta.textContent = deltaText;
+      line.appendChild(delta);
+      card.appendChild(line);
+      var tail = [];
+      if (entry.document && entry.type_label && entry.type !== "correction") {
+        tail.push(entry.type_label);
+      }
+      if (entry.balance_after !== null && entry.balance_after !== undefined) {
+        tail.push("остаток → " + formatServerNumber(entry.balance_after) + " шт");
+      }
+      if (entry.reason) {
+        tail.push("причина: " + entry.reason);
+      }
+      if (tail.length) {
+        var tailEl = document.createElement("div");
+        tailEl.className = "journal-meta";
+        tailEl.textContent = tail.join(" · ");
+        card.appendChild(tailEl);
+      }
+      return card;
+    }
+    function renderEntries(entries, append) {
+      if (!append) {
+        journalList.innerHTML = "";
+      }
+      if (!entries.length && !append) {
+        var empty = document.createElement("div");
+        empty.className = "journal-meta";
+        empty.textContent = "Записей нет.";
+        journalList.appendChild(empty);
+      }
+      entries.forEach(function (entry) {
+        journalList.appendChild(entryElement(entry));
+      });
+    }
+    function loadJournal(reset) {
+      errorEl.textContent = "";
+      if (reset) {
+        journalOffset = 0;
+      }
+      var filters = currentFilters();
+      if (reset && filtersAreDefault(filters) && ctx.journal && ctx.journal.entries) {
+        renderEntries(ctx.journal.entries, false);
+        journalOffset = ctx.journal.entries.length;
+        moreButton.style.display = ctx.journal.has_more ? "" : "none";
+        journalLoaded = true;
+        return;
+      }
+      if (!token) {
+        fail("Фильтры недоступны: откройте форму из чата бота.");
+        return;
+      }
+      filters.limit = PAGE;
+      filters.offset = journalOffset;
+      moreButton.disabled = true;
+      postTemplateAction({ action: "journal", token: token, filters: filters })
+        .then(function (data) {
+          var entries = data.entries || [];
+          renderEntries(entries, !reset);
+          journalOffset += entries.length;
+          moreButton.style.display = data.has_more ? "" : "none";
+          journalLoaded = true;
+        })
+        .catch(function (error) {
+          fail(error && error.message ? error.message : "Не удалось загрузить журнал.");
+        })
+        .then(function () {
+          moreButton.disabled = false;
+        });
+    }
+    applyButton.addEventListener("click", function () {
+      loadJournal(true);
+    });
+    moreButton.addEventListener("click", function () {
+      loadJournal(false);
+    });
+
+    // ---- корекція ----
+    var categories = ctx.categories || [];
+    var cart = [];
+    var cartSection = document.createElement("div");
+    cartSection.className = "cart-section";
+    cartSection.style.display = "none";
+    var cartHeader = document.createElement("div");
+    cartHeader.className = "cart-header";
+    cartHeader.textContent = "Добавлено:";
+    var cartList = document.createElement("div");
+    cartList.className = "cart-list";
+    cartSection.appendChild(cartHeader);
+    cartSection.appendChild(cartList);
+    formEl.insertBefore(cartSection, formEl.firstChild);
+    var addMoreButton = document.createElement("button");
+    addMoreButton.type = "button";
+    addMoreButton.className = "add-position-button add-more-button";
+    addMoreButton.textContent = "Добавить позицию";
+    formEl.insertBefore(addMoreButton, cartSection.nextSibling);
+
+    var categoryWrap = document.createElement("div");
+    categoryWrap.className = "field";
+    var categoryLabel = document.createElement("label");
+    categoryLabel.textContent = "Категория *";
+    applyFieldLabelStyle(categoryLabel, "category");
+    categoryWrap.appendChild(categoryLabel);
+    var categorySelect = document.createElement("select");
+    categorySelect.className = "field-wide";
+    categories.forEach(function (cat) {
+      var option = document.createElement("option");
+      option.value = String(cat.key);
+      option.textContent = cat.label;
+      categorySelect.appendChild(option);
+    });
+    categoryWrap.appendChild(categorySelect);
+    formEl.insertBefore(categoryWrap, rowsContainer);
+
+    var state = {};
+    categories.forEach(function (cat) {
+      var block = document.createElement("div");
+      block.className = "category-group";
+      var fields = cat.fields || [];
+      var identityFields = fields.filter(function (f) { return !isMeasureField(f); });
+      var perRow = fields.filter(function (f) { return f.per_row && isMeasureField(f); });
+      var flatInputs = {};
+      identityFields.forEach(function (field) {
+        flatInputs[field.key] = buildFieldElement(field, block);
+      });
+      var rowInputs = {};
+      if (perRow.length) {
+        var rowBlock = document.createElement("div");
+        rowBlock.className = "row-block";
+        perRow.forEach(function (field) {
+          rowInputs[field.key] = buildFieldElement(field, rowBlock);
+        });
+        block.appendChild(rowBlock);
+        wireDimensionCascade(rowInputs, cat.dimension_combos, flatInputs.breed);
+      }
+      var calc = document.createElement("div");
+      calc.className = "correction-calc";
+      calc.style.display = "none";
+      block.appendChild(calc);
+      rowsContainer.appendChild(block);
+      state[String(cat.key)] = { cat: cat, block: block, fields: fields, rowInputs: rowInputs, flatInputs: flatInputs, calc: calc };
+
+      function refreshCalc() {
+        var info = calcFor(String(cat.key));
+        if (!info) {
+          calc.style.display = "none";
+          return;
+        }
+        calc.style.display = "";
+        calc.className = "correction-calc" + (info.missing ? " correction-calc-missing" : "");
+        calc.textContent = info.text;
+      }
+      Object.keys(rowInputs).concat(Object.keys(flatInputs)).forEach(function (key) {
+        var input = rowInputs[key] || flatInputs[key];
+        input.addEventListener("input", refreshCalc);
+        input.addEventListener("change", refreshCalc);
+        if (input.manualInput) {
+          input.manualInput.addEventListener("input", refreshCalc);
+        }
+      });
+    });
+    function showCategory(key) {
+      Object.keys(state).forEach(function (k) {
+        state[k].block.style.display = k === key ? "" : "none";
+      });
+    }
+    categorySelect.addEventListener("change", function () {
+      showCategory(categorySelect.value);
+    });
+    if (categories.length) {
+      categorySelect.value = String(categories[0].key);
+      showCategory(categorySelect.value);
+    }
+
+    var commentInput = buildFieldElement({ key: "comment", label: "Причина", type: "text", required: false }, singleContainer);
+
+    var saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "add-position-button";
+    saveButton.textContent = "Сохранить и продолжить";
+    rowsContainer.parentNode.insertBefore(saveButton, rowsContainer.nextSibling);
+
+    function readDims(st) {
+      var dims = {};
+      ["thickness", "width", "length", "quantity"].forEach(function (key) {
+        dims[key] = st.rowInputs[key] ? readFieldValue(st.rowInputs[key]) : "";
+      });
+      dims.breed = st.flatInputs.breed ? readFieldValue(st.flatInputs.breed) : "";
+      return dims;
+    }
+    // Сейчас / Стало / різниця для введеного розміру; null - ще нічого не введено.
+    function calcFor(key) {
+      var st = state[key];
+      if (!st) {
+        return null;
+      }
+      var dims = readDims(st);
+      if (!dims.thickness || !dims.width || !dims.length) {
+        return null;
+      }
+      var combos = st.cat.dimension_combos || [];
+      var current = findComboBalance(combos, dims.breed, formatServerNumber(dims.thickness), formatServerNumber(dims.width), formatServerNumber(dims.length));
+      if (current === null) {
+        return { missing: true, text: "Такого размера нет на складе — коррекция только для существующих позиций." };
+      }
+      var currentNumber = numberOrZero(current);
+      if (dims.quantity === "") {
+        return { current: currentNumber, text: "Сейчас: " + formatServerNumber(currentNumber) + " шт" };
+      }
+      var newQty = numberOrZero(dims.quantity);
+      var delta = newQty - currentNumber;
+      var kind = rowMeasureKind(st.cat.product, dims.thickness, dims.width);
+      var text = "Сейчас: " + formatServerNumber(currentNumber) + " шт → станет " + formatServerNumber(newQty) + " шт: " + signed(delta) + " шт";
+      if (kind) {
+        text += " · " + signed(pieceMeasure(dims.thickness, dims.width, dims.length, kind) * delta) + " " + MEASURE_UNIT_BY_KIND[kind];
+      }
+      return { current: currentNumber, newQty: newQty, delta: delta, kind: kind, text: text };
+    }
+    function collectCurrent() {
+      var key = categorySelect.value;
+      var st = state[key];
+      if (!st) {
+        return { ok: false };
+      }
+      var dims = readDims(st);
+      var filled = dims.thickness || dims.width || dims.length || dims.quantity;
+      if (!filled) {
+        return { ok: true, empty: true };
+      }
+      if (!dims.thickness || !dims.width || !dims.length || dims.quantity === "" || !dims.breed) {
+        fail("Заполните породу, размер и «Стало, шт».");
+        return { ok: false };
+      }
+      var info = calcFor(key);
+      if (!info || info.missing) {
+        fail("Такого размера нет на складе — коррекция только для существующих позиций.");
+        return { ok: false };
+      }
+      var numericKey = Number(key);
+      var position = {
+        category_operation_id: isNaN(numericKey) ? key : numericKey,
+        breed: dims.breed,
+        rows: [{ thickness: dims.thickness, width: dims.width, length: dims.length, new_quantity: info.newQty }],
+      };
+      var summary = st.cat.label + " " + [dims.thickness, dims.width, dims.length].join("×") + " (" + dims.breed + "): " +
+        formatServerNumber(info.current) + " → " + formatServerNumber(info.newQty) + " шт";
+      var deltaText = signed(info.delta) + " шт" + (info.kind ? " · " + signed(pieceMeasure(dims.thickness, dims.width, dims.length, info.kind) * info.delta) + " " + MEASURE_UNIT_BY_KIND[info.kind] : "");
+      return { ok: true, empty: false, item: { key: key, position: position, summary: summary, deltaText: deltaText, delta: info.delta } };
+    }
+    function clearCurrent(key) {
+      var st = state[key];
+      if (!st) {
+        return;
+      }
+      [st.rowInputs, st.flatInputs].forEach(function (group) {
+        Object.keys(group).forEach(function (k) {
+          var input = group[k];
+          input.value = "";
+          if (input.manualInput) {
+            input.manualInput.value = "";
+          }
+          var wrap = input.closest(".field");
+          if (wrap) {
+            wrap.classList.remove("invalid");
+          }
+        });
+      });
+      st.calc.style.display = "none";
+    }
+    function setInto(input, value) {
+      if (value === undefined || value === null || value === "") {
+        return;
+      }
+      var stringValue = String(value);
+      if (input.tagName === "SELECT") {
+        for (var i = 0; i < input.options.length; i++) {
+          if (input.options[i].value === stringValue) {
+            input.value = stringValue;
+            if (input.manualInput) {
+              input.manualInput.value = "";
+            }
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            return;
+          }
+        }
+        if (input.manualInput) {
+          input.value = "";
+          input.manualInput.value = stringValue;
+          input.manualInput.dispatchEvent(new Event("input", { bubbles: true }));
+          return;
+        }
+      }
+      input.value = stringValue;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    function populate(item) {
+      var st = state[item.key];
+      if (!st) {
+        return;
+      }
+      categorySelect.value = item.key;
+      showCategory(item.key);
+      setInto(st.flatInputs.breed, item.position.breed);
+      var row = item.position.rows[0];
+      setInto(st.rowInputs.thickness, row.thickness);
+      setInto(st.rowInputs.width, row.width);
+      setInto(st.rowInputs.length, row.length);
+      setInto(st.rowInputs.quantity, row.new_quantity);
+    }
+    function setFormCollapsed(collapsed) {
+      formEl.classList.toggle("collapsed", !!collapsed && cart.length > 0);
+    }
+    function renderCart() {
+      cartList.innerHTML = "";
+      cartSection.style.display = cart.length ? "" : "none";
+      cart.forEach(function (item, index) {
+        var row = document.createElement("div");
+        row.className = "cart-item";
+        var textWrap = document.createElement("div");
+        textWrap.className = "cart-item-text-wrap";
+        var text = document.createElement("span");
+        text.className = "cart-item-text";
+        text.textContent = (index + 1) + ". " + item.summary;
+        textWrap.appendChild(text);
+        var sum = document.createElement("span");
+        sum.className = "cart-item-sum " + (item.delta < 0 ? "journal-minus" : "journal-plus");
+        sum.textContent = item.deltaText;
+        textWrap.appendChild(sum);
+        row.appendChild(textWrap);
+        var actions = document.createElement("div");
+        actions.className = "cart-item-actions";
+        var editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "cart-item-btn";
+        editBtn.textContent = "✎";
+        editBtn.addEventListener("click", function () {
+          cart.splice(index, 1);
+          renderCart();
+          populate(item);
+          setFormCollapsed(false);
+        });
+        actions.appendChild(editBtn);
+        var removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "cart-item-btn cart-item-btn-remove";
+        removeBtn.textContent = "✕";
+        removeBtn.addEventListener("click", function () {
+          cart.splice(index, 1);
+          renderCart();
+          if (!cart.length) {
+            setFormCollapsed(false);
+          }
+        });
+        actions.appendChild(removeBtn);
+        row.appendChild(actions);
+        cartList.appendChild(row);
+      });
+    }
+    saveButton.addEventListener("click", function () {
+      errorEl.textContent = "";
+      var result = collectCurrent();
+      if (!result.ok) {
+        return;
+      }
+      if (result.empty) {
+        fail("Заполните позицию, прежде чем сохранять.");
+        return;
+      }
+      cart.push(result.item);
+      clearCurrent(result.item.key);
+      renderCart();
+      setFormCollapsed(true);
+      haptic("success");
+    });
+    addMoreButton.addEventListener("click", function () {
+      errorEl.textContent = "";
+      setFormCollapsed(false);
+    });
+
+    function buildSummary(items, comment) {
+      var wrap = document.createElement("div");
+      items.forEach(function (item, index) {
+        var line = document.createElement("div");
+        line.className = "confirm-position-line";
+        line.textContent = (index + 1) + ". " + item.summary + " (" + item.deltaText + ")";
+        wrap.appendChild(line);
+      });
+      if (comment) {
+        var commentLine = document.createElement("div");
+        commentLine.className = "confirm-common";
+        commentLine.textContent = "Причина: " + comment;
+        wrap.appendChild(commentLine);
+      }
+      return wrap;
+    }
+    function showConfirm(payload, summary) {
+      confirmPayload = payload;
+      confirmSummaryEl.innerHTML = "";
+      confirmSummaryEl.appendChild(summary);
+      errorEl.textContent = "";
+      formEl.style.display = "none";
+      confirmView.style.display = "";
+    }
+    function hideConfirm() {
+      confirmPayload = null;
+      confirmView.style.display = "none";
+      formEl.style.display = "";
+    }
+    confirmEditButton.addEventListener("click", hideConfirm);
+
+    var isSending = false;
+    function submit() {
+      if (current !== "correction") {
+        return;
+      }
+      if (confirmPayload) {
+        if (isSending) {
+          return;
+        }
+        var json = JSON.stringify(confirmPayload);
+        if (!tg) {
+          window.alert(json);
+          return;
+        }
+        isSending = true;
+        if (tg.MainButton && tg.MainButton.showProgress) {
+          tg.MainButton.showProgress(false);
+        }
+        tg.sendData(json);
+        return;
+      }
+      errorEl.textContent = "";
+      var items = cart.slice();
+      var result = collectCurrent();
+      if (!result.ok) {
+        return;
+      }
+      if (!result.empty) {
+        items.push(result.item);
+      }
+      if (!items.length) {
+        fail("Добавьте хотя бы одну позицию: размер и «Стало, шт».");
+        return;
+      }
+      var comment = commentInput ? String(readFieldValue(commentInput) || "").trim() : "";
+      var payload = {
+        positions_kind: "correction",
+        positions: items.map(function (item) { return item.position; }),
+      };
+      if (comment) {
+        payload.comment = comment;
+      }
+      showConfirm(payload, buildSummary(items, comment));
+    }
+    if (tg && tg.MainButton) {
+      tg.MainButton.onClick(submit);
+    } else {
+      fallback.onclick = submit;
+    }
+
+    showScreen("menu");
+  }
+
   function main() {
     var token = new URLSearchParams(window.location.search).get("t");
+    window.__formToken = token;
     if (token) {
       // Задача користувача: "чи є якийсь інший шлях?" - замість роздутого
       // ?ctx=<величезний base64> URL кнопка тепер несе лише короткий
@@ -4043,6 +4736,10 @@
       confirmHeadingEl.textContent = ctx.confirm_heading_text || "Проверьте данные";
     }
 
+    if (ctx.mode === "admin") {
+      adminForm(ctx);
+      return;
+    }
     if (ctx.mode === "all_in_one") {
       // Обмін - окрема форма з двома блоками (exchangeAllInOne), решта
       // операцій - одна мега-форма з одним кошиком.

@@ -895,6 +895,8 @@ class IncomeSaleFlowDialogMixin:
             return self._continue_writeoff_operation(text, store, context, pending)
         if pending["operation_type"] == "stock_exchange":
             return self._continue_exchange_operation(text, store, context, pending)
+        if pending["operation_type"] == "stock_correction":
+            return self._continue_correction_operation(text, store, context, pending)
 
         if pending["operation_type"] not in {"add_income", "stock_sale"}:
             store.delete_pending_operation(context["chat_id"], context["user_id"])

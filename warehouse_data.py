@@ -33,6 +33,8 @@ import permissions
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
+    piece_measure,
+    row_measure_kind,
     _deserialize_row,
     _display_bot_number,
     _display_value,
@@ -163,6 +165,7 @@ CUSTOM_BUTTON_ACTIONS = [
     {"code": "start_writeoff_form", "section": "списание", "label": "Начать списание одной формой"},
     {"code": "start_exchange_form", "section": "обмен", "label": "Начать обмен одной формой"},
     {"code": "start_data_browser_form", "section": "данные", "label": "Показать данные одной формой"},
+    {"code": "start_admin_form", "section": "админ", "label": "Админ: журнал операций и коррекция остатков"},
     {"code": "start_calculator", "section": "прочее", "label": "Открыть калькулятор"},
     {"code": "show_help", "section": "прочее", "label": "Показать справку"},
 ]
@@ -222,6 +225,9 @@ BUILTIN_MIGRATED_CUSTOM_BUTTONS = [
     # решти кнопок не чіпається - переставити можна в редакторі.
     {"migration_key": "exchange_form", "label": "ОБМЕН (форма)", "action_code": "start_exchange_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "data_browser_form", "label": "ДАННЫЕ (форма)", "action_code": "start_data_browser_form", "layout": "full", "parent_migration_key": None},
+    # Адмін-форма (2026-09-06): журнал операцій і корекція залишків, лише роль
+    # адміністратора (бот перевіряє при натисканні).
+    {"migration_key": "admin_form", "label": "Админ (форма)", "action_code": "start_admin_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "data_menu", "label": "ДАННЫЕ", "action_code": None, "layout": "full", "parent_migration_key": None},
     {"migration_key": "stock_report_section", "label": "СКЛАД", "action_code": "start_stock_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "sales_report_section", "label": "ПРОДАЖИ", "action_code": "start_sales_report", "layout": "full", "parent_migration_key": "data_menu"},
@@ -290,6 +296,7 @@ BOT_MESSAGE_DEFAULTS = {
         "что отдаём и что получаем взамен."
     ),
     "start_data_browser_form": "Данные склада одной формой.",
+    "start_admin_form": "Админ-форма: журнал операций и коррекция остатков. Нажмите кнопку ниже.",
     "start_calculator": "Что посчитать?",
     "show_help": (
         "Доступные команды:\n"
@@ -2109,6 +2116,9 @@ class ExcelSqliteStore:
         # жодного звʼязку між ними. Номер документа ("Обмен №7") звʼязує
         # всі рядки однієї операції; це ж фундамент для пунктів 7, 9, 12.
         self._ensure_column("stock_movements", "document", "TEXT")
+        # Адмін-форма (2026-09-06): залишок після руху - щоб журнал показував
+        # «остаток 380 → 368» без перерахунку заднім числом.
+        self._ensure_column("stock_movements", "balance_after", "REAL")
         # Шаблони/недавні мега-форми (Задача користувача: "в історії
         # зберігається все... окрім ціни, штук") спершу забули адресу
         # вивантаження - вона теж мала зберігатись разом з клієнтом/оплатою.
@@ -2318,7 +2328,7 @@ class ExcelSqliteStore:
     # першому запуску, як колись старі чатові кнопки. Усі кнопки "(форма)"
     # - це і є стандартне меню, тож нова "(форма)" мусить бути тут.
     _STANDARD_MENU_ROOT_MIGRATION_KEYS = frozenset(
-        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form", "exchange_form"}
+        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form", "exchange_form", "admin_form"}
     )
 
     def _apply_standard_menu_policy(self):
@@ -2368,6 +2378,18 @@ class ExcelSqliteStore:
                 )
                 self.conn.execute(
                     "INSERT INTO app_meta (key, value) VALUES ('exchange_form_restored_once', '1')"
+                )
+            # Адмін-форма (2026-09-06): показати кнопку рівно один раз, далі -
+            # рішення адміністратора в Редакторі кнопок.
+            restored_admin = self.conn.execute(
+                "SELECT 1 FROM app_meta WHERE key = 'admin_form_restored_once'"
+            ).fetchone()
+            if not restored_admin:
+                self.conn.execute(
+                    "UPDATE custom_menu_buttons SET enabled = 1 WHERE migration_key = 'admin_form'"
+                )
+                self.conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES ('admin_form_restored_once', '1')"
                 )
 
     # "Хмарна істина" (standard_menu_cloud.py) — Задача користувача
@@ -4004,9 +4026,9 @@ class ExcelSqliteStore:
                 movement_type, source, telegram_user_id, username, full_name,
                 product, breed, condition, thickness, width, length,
                 quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at,
-                document
+                document, balance_after
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("movement_type", "income"),
@@ -4029,10 +4051,57 @@ class ExcelSqliteStore:
                 movement.get("original_text"),
                 movement.get("created_at", datetime.now().isoformat(timespec="seconds")),
                 movement.get("document"),
+                movement.get("balance_after"),
             ),
         )
         if not was_in_transaction:
             self.conn.commit()
+
+    # Адмін-форма (2026-09-06): журнал з фільтрами - операції (список типів),
+    # дати (включно, за датою створення), продукт (підрядок), хто (підрядок
+    # імені), пошук за розміром/породою/станом (підрядок "47x150"); порціями.
+    def list_journal_movements(self, movement_types=None, date_from=None, date_to=None, product=None,
+                             who=None, search=None, limit=50, offset=0):
+        # SQLite lower() lowercases only ASCII - Cyrillic filters need a Python function.
+        self.conn.create_function("py_lower", 1, lambda value: value.lower() if isinstance(value, str) else value)
+        where = []
+        params = []
+        if movement_types:
+            where.append("movement_type IN (%s)" % ",".join("?" for _ in movement_types))
+            params.extend(movement_types)
+        if date_from:
+            where.append("substr(created_at, 1, 10) >= ?")
+            params.append(str(date_from)[:10])
+        if date_to:
+            where.append("substr(created_at, 1, 10) <= ?")
+            params.append(str(date_to)[:10])
+        if product:
+            where.append("py_lower(coalesce(product, '')) LIKE ?")
+            params.append("%" + str(product).lower() + "%")
+        if who:
+            where.append("(py_lower(coalesce(full_name, '')) LIKE ? OR py_lower(coalesce(username, '')) LIKE ?)")
+            params.extend(["%" + str(who).lower() + "%"] * 2)
+        if search:
+            needle = "%" + str(search).lower().replace("×", "x") + "%"
+            where.append(
+                "(py_lower(coalesce(breed, '') || ' ' || coalesce(condition, '') || ' ' || printf('%g', coalesce(thickness, 0))"
+                " || 'x' || printf('%g', coalesce(width, 0)) || 'x' || printf('%g', coalesce(length, 0)) || ' ' || coalesce(document, '')) LIKE ?)"
+            )
+            params.append(needle)
+        sql = (
+            "SELECT id, movement_type, source, telegram_user_id, username, full_name, product, breed, condition,"
+            " thickness, width, length, quantity, volume, area, linear, reason, sheet_row_id, created_at, document,"
+            " balance_after FROM stock_movements"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend([int(limit) + 1, int(offset)])
+        cursor = self.conn.execute(sql, params)
+        keys = [column[0] for column in cursor.description]
+        rows = [dict(zip(keys, values)) for values in cursor.fetchall()]
+        has_more = len(rows) > int(limit)
+        return rows[: int(limit)], has_more
 
     def get_user_preference(self, telegram_user_id):
         cursor = self.conn.execute(
@@ -4794,6 +4863,7 @@ WRITEOFF_SHEET_NAME = "СПИСАНИЕ"
 # для групи без підміни розміру й без доходу по перерахунку.
 GROUP_SEES_SIZE_RECALC_SETTING = "group_sees_size_recalc"
 
+CORRECTION_SHEET_NAME = "КОРРЕКЦИЯ"
 EXCHANGE_SHEET_NAME = "ОБМЕН"
 # Задача користувача: "нащо в стовбцю дата час з секундами? прибери. лівіше
 # додай окрему колонку точний час" - "Дата" лишається чистою датою (як і
@@ -4986,6 +5056,28 @@ _EXCHANGE_SHEET_HEADERS = [
     "Комментарий",
 ]
 
+# Корекція залишків (2026-09-06): людина вводить лише «Стало, шт», різницю
+# в штуках і в одиниці виміру (м3/м2/мп) рахує програма.
+_CORRECTION_SHEET_HEADERS = [
+    "Дата",
+    "Время",
+    "Коррекция №",
+    "Продукт",
+    "Порода",
+    "Состояние",
+    "Толщина, мм",
+    "Ширина, мм",
+    "Длина, мм",
+    "Было, шт",
+    "Стало, шт",
+    "Разница, шт",
+    "Разница, м3",
+    "Разница, м2",
+    "Разница, мп",
+    "Менеджер",
+    "Причина",
+]
+
 _REQUIRED_SHEETS_FULL = [
     ("СКЛАД", _WAREHOUSE_SHEET_HEADERS),
     (INCOME_SHEET_NAME, _INCOME_SHEET_HEADERS),
@@ -4993,6 +5085,7 @@ _REQUIRED_SHEETS_FULL = [
     (WRITEOFF_SHEET_NAME, _WRITEOFF_SHEET_HEADERS),
     (ANTISEPTIC_SHEET_NAME, _ANTISEPTIC_SHEET_HEADERS),
     (EXCHANGE_SHEET_NAME, _EXCHANGE_SHEET_HEADERS),
+    (CORRECTION_SHEET_NAME, _CORRECTION_SHEET_HEADERS),
 ]
 
 
@@ -6208,6 +6301,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                         "sheet_row_id": item.get("row_id"),
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "balance_after": (_number_value(row_value(row_values, columns["balance_qty"])) if row_values else None),
                     }
                 )
                 updated += 1
@@ -6586,6 +6680,7 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                         "sheet_row_id": sheet_row_id,
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "balance_after": _number_value(row_value(row_values_by_row_id.get(sheet_row_id) or [], columns["balance_qty"])),
                     }
                 )
 
@@ -6885,6 +6980,7 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
                         "sheet_row_id": item.get("row_id"),
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "balance_after": _number_value(row_value(row_values_by_row_id.get(item.get("row_id")) or [], columns["balance_qty"])),
                     }
                 )
                 updated += 1
@@ -7316,6 +7412,7 @@ def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
                         "sheet_row_id": item.get("row_id"),
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "balance_after": _number_value(row_value(_row_values, columns["balance_qty"])),
                         "document": document_number,
                     })
     except _ExchangeAbort as exc:
@@ -7361,6 +7458,173 @@ def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
         lines.append("")
         lines.append(_esc(excel_warning))
     return {"ok": True, "message": "\n".join(lines), "document": document_number}
+
+
+def correction_columns(headers):
+    return _header_index_map(headers, {
+        "date": ["Дата"],
+        "time": ["Время"],
+        "document": ["Коррекция №", "Документ"],
+        "product": ["Продукт"],
+        "breed": ["Порода"],
+        "condition": ["Состояние"],
+        "thickness": ["Толщина, мм", "Толщина"],
+        "width": ["Ширина, мм", "Ширина"],
+        "length": ["Длина, мм", "Длинна, мм", "Длина", "Длинна"],
+        "was": ["Было, шт"],
+        "became": ["Стало, шт"],
+        "delta": ["Разница, шт"],
+        "delta_volume": ["Разница, м3"],
+        "delta_area": ["Разница, м2"],
+        "delta_linear": ["Разница, мп"],
+        "manager": ["Менеджер"],
+        "reason": ["Причина"],
+    })
+
+
+def correction_sheet_values(store, position_payload, item, now, document_number):
+    headers = store.get_headers(CORRECTION_SHEET_NAME)
+    values = [""] * len(headers)
+    columns = correction_columns(headers)
+    moment = datetime.fromisoformat(now)
+    set_value(values, columns.get("date"), moment.date())
+    set_value(values, columns.get("time"), moment.time())
+    set_value(values, columns.get("document"), document_number)
+    set_value(values, columns.get("product"), sheet_product_name(position_payload))
+    set_value(values, columns.get("breed"), position_payload.get("breed"))
+    set_value(values, columns.get("condition"), position_payload.get("condition"))
+    set_value(values, columns.get("thickness"), item.get("thickness"))
+    set_value(values, columns.get("width"), item.get("width"))
+    set_value(values, columns.get("length"), item.get("length"))
+    set_value(values, columns.get("was"), item.get("was_quantity"))
+    set_value(values, columns.get("became"), item.get("new_quantity"))
+    set_value(values, columns.get("delta"), item.get("delta_quantity"))
+    for measure_kind in ("volume", "area", "linear"):
+        if item.get("delta_" + measure_kind) is not None:
+            set_value(values, columns.get("delta_" + measure_kind), item.get("delta_" + measure_kind))
+    user = position_payload.get("user") or {}
+    set_value(values, columns.get("manager"), user.get("full_name") or user.get("username"))
+    set_value(values, columns.get("reason"), position_payload.get("comment"))
+    return values
+
+
+def apply_correction_operation(store, payload, sync_mode, dirty_notifier=None):
+    """Корекція залишків (адмін-форма й вікно клієнта, 2026-09-06).
+
+    payload: user, comment, positions=[{product, breed, condition,
+    rows[{row_id, thickness, width, length, new_quantity}]}]. Людина вводить
+    лише «Стало, шт»; різницю в штуках і в одиниці виміру рядка рахує
+    програма. Усі перевірки до першого запису, одна транзакція, один документ
+    «Коррекция №N», рядок у КОРРЕКЦИЯ і рух "correction" на кожну позицію.
+    """
+    positions = payload.get("positions") or []
+    if not positions:
+        return {"ok": False, "message": "Не удалось записать коррекцию: нет ни одной позиции."}
+    if not store.get_headers(CORRECTION_SHEET_NAME):
+        return {
+            "ok": False,
+            "message": (
+                "Не удалось записать коррекцию: в таблице ещё нет листа КОРРЕКЦИЯ.\n"
+                "Нажмите «Обновить эксели» в программе, подтвердите добавление листа и повторите."
+            ),
+        }
+    headers, columns, _rows = warehouse_rows(store)
+    now = datetime.now().isoformat(timespec="seconds")
+    user = payload.get("user") or {}
+    common = {key: value for key, value in payload.items() if key != "positions"}
+    prepared = []
+    for position in positions:
+        position_payload = {**common, **position}
+        for item in position.get("rows") or []:
+            row_id = item.get("row_id")
+            row_values = store.get_row(row_id) if row_id is not None else None
+            if not row_values:
+                return {
+                    "ok": False,
+                    "message": "Не удалось записать коррекцию: позиция не найдена на складе.\nПозиция: %s" % income_item_size(item),
+                }
+            new_quantity = _number_value(item.get("new_quantity"))
+            if new_quantity < 0:
+                return {"ok": False, "message": "Не удалось записать коррекцию: «Стало» не может быть отрицательным."}
+            was_quantity = _number_value(row_value(row_values, columns["balance_qty"]))
+            delta = round(new_quantity - was_quantity, 6)
+            measure_kind = row_measure_kind(position_payload.get("product"), item.get("thickness"), item.get("width"))
+            piece = piece_measure(item.get("thickness"), item.get("width"), item.get("length"), measure_kind) if measure_kind else 0
+            entry = dict(item)
+            entry["was_quantity"] = was_quantity
+            entry["new_quantity"] = new_quantity
+            entry["delta_quantity"] = delta
+            entry["measure_kind"] = measure_kind
+            if measure_kind:
+                entry["delta_" + measure_kind] = round(piece * delta, 6)
+            prepared.append((position_payload, entry, row_values))
+
+    changed = [(p, e, r) for p, e, r in prepared if e["delta_quantity"] != 0]
+    if not changed:
+        return {"ok": False, "message": "Ничего не изменилось: «Стало» совпадает с текущим остатком по всем позициям."}
+
+    with store.conn:
+        store.conn.execute("BEGIN IMMEDIATE")
+        row_values_by_row_id = {}
+        for position_payload, entry, row_values in changed:
+            row_values = row_values_by_row_id.setdefault(entry["row_id"], row_values)
+            add_to_row_value(row_values, columns["balance_qty"], entry["delta_quantity"])
+            measure_kind = entry.get("measure_kind")
+            if measure_kind:
+                add_to_row_value(row_values, columns.get(_BALANCE_COLUMN_BY_MEASURE_KIND[measure_kind]), entry["delta_" + measure_kind])
+        for row_id, row_values in row_values_by_row_id.items():
+            store.update_row(row_id, row_values)
+        existing = len(store.fetch_rows(CORRECTION_SHEET_NAME, 100000, 0))
+        document_number = "Коррекция №%d" % _next_document_number(store, CORRECTION_SHEET_NAME, existing)
+        for position_payload, entry, _row_values in changed:
+            insert_sheet_row(store, CORRECTION_SHEET_NAME, correction_sheet_values(store, position_payload, entry, now, document_number), now)
+            measure_kind = entry.get("measure_kind")
+            store.add_stock_movement({
+                "movement_type": "correction",
+                "source": payload.get("source") or "telegram",
+                "telegram_user_id": user.get("id"),
+                "username": user.get("username"),
+                "full_name": user.get("full_name"),
+                "product": sheet_product_name(position_payload),
+                "breed": position_payload.get("breed"),
+                "condition": position_payload.get("condition"),
+                "thickness": entry.get("thickness"),
+                "width": entry.get("width"),
+                "length": entry.get("length"),
+                "quantity": entry["delta_quantity"],
+                "volume": entry.get("delta_volume"),
+                "area": entry.get("delta_area"),
+                "linear": entry.get("delta_linear"),
+                "reason": payload.get("comment"),
+                "sheet_row_id": entry.get("row_id"),
+                "original_text": payload.get("original_text"),
+                "created_at": now,
+                "document": document_number,
+                "balance_after": entry["new_quantity"],
+            })
+
+    excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", CORRECTION_SHEET_NAME], dirty_notifier)
+    lines = ["<b>%s</b> записана." % _esc(document_number), ""]
+    for index, (position_payload, entry, _row_values) in enumerate(changed, start=1):
+        head = " / ".join(_esc(part) for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition")) if part)
+        delta = entry["delta_quantity"]
+        text = "%d. %s %s: %s → %s шт (%s шт" % (
+            index, head, _esc(income_item_size(entry)), _display_bot_number(entry["was_quantity"]),
+            _display_bot_number(entry["new_quantity"]), signed_bot_number(delta),
+        )
+        measure_kind = entry.get("measure_kind")
+        if measure_kind:
+            text += ", %s %s" % (signed_bot_number(entry["delta_" + measure_kind]), ITEM_MEASURE_UNIT[measure_kind])
+        lines.append(text + ")")
+    skipped = len(prepared) - len(changed)
+    if skipped:
+        lines.append("Без изменений: %d." % skipped)
+    if payload.get("comment"):
+        lines += ["", "Причина: %s" % _esc(payload["comment"])]
+    lines += ["", "✅ Выполнено."]
+    if excel_warning:
+        lines += ["", _esc(excel_warning)]
+    return {"ok": True, "message": "\n".join(lines), "document": document_number, "changed": len(changed)}
 
 
 def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
