@@ -153,13 +153,34 @@ class CanvasTable(tk.Frame):
                 return column["key"]
         return None
 
+    # Рядок може мати підрядки (row["lines"] - список {values, signs,
+    # prefix}): висота = ROW_H × кількість підрядків; колонки з per_line
+    # малюються на кожному підрядку, решта - один раз, на першому.
+    def row_height(self, row):
+        return self.ROW_H * max(1, len(row.get("lines") or []))
+
+    def row_top(self, index):
+        top = 0
+        for row in self.rows[:index]:
+            top += self.row_height(row)
+        return top
+
+    def row_index_at(self, y):
+        top = 0
+        for index, row in enumerate(self.rows):
+            height = self.row_height(row)
+            if top <= y < top + height:
+                return index
+            top += height
+        return None
+
     def cell_box(self, index, key):
         """(x, y, width, height) клітинки в координатах полотна тіла."""
         if not self.spans:
             self._layout()
         for column, (x0, width) in zip(self.columns, self.spans):
             if column["key"] == key:
-                y0 = index * self.ROW_H - self.body.canvasy(0)
+                y0 = self.row_top(index) - self.body.canvasy(0)
                 return x0, y0, width, self.ROW_H
         return None
 
@@ -171,9 +192,9 @@ class CanvasTable(tk.Frame):
     def _on_body_click(self, event):
         if self.on_cell_click is None:
             return
-        index = int(self.body.canvasy(event.y) // self.ROW_H)
+        index = self.row_index_at(self.body.canvasy(event.y))
         key = self.column_at(event.x)
-        if 0 <= index < len(self.rows) and key:
+        if index is not None and key:
             self.on_cell_click(index, key)
 
     # --- малювання ---
@@ -222,44 +243,61 @@ class CanvasTable(tk.Frame):
         self.rows[index]["values"].update(values)
         self.redraw()
 
+    def _draw_cell(self, column, x0, span, y0, values, signs, badges, prefix=None):
+        body = self.body
+        colors = self.colors
+        key = column["key"]
+        kind = column.get("kind", "text")
+        value = values.get(key, "")
+        cy = y0 + self.ROW_H / 2
+        anchor = column.get("anchor", "w")
+        if kind == "badge":
+            bg, fg = (badges or {}).get(key, (colors["head"], colors["fg"]))
+            label = self.ellipsis(value, span - 24, self.bold)
+            text_width = self.bold.measure(label)
+            body.create_rectangle(x0 + 8, y0 + 6, x0 + 8 + text_width + 14, y0 + self.ROW_H - 6, fill=bg, outline="")
+            body.create_text(x0 + 15, cy, text=label, anchor="w", font=self.bold, fill=fg)
+        elif kind == "signed":
+            sign = (signs or {}).get(key, 0)
+            fill = colors["plus"] if sign > 0 else (colors["minus"] if sign < 0 else colors["fg"])
+            body.create_text(x0 + span - 8, cy, text=value, anchor="e", font=self.bold if sign else self.font, fill=fill)
+        elif kind == "edit":
+            body.create_rectangle(x0 + 4, y0 + 4, x0 + span - 4, y0 + self.ROW_H - 4, fill=colors["hover"] if value else "", outline=colors["line"])
+            body.create_text(x0 + span - 10, cy, text=value if value else "…", anchor="e",
+                             font=self.bold if value else self.font, fill=colors["fg"] if value else colors["muted"])
+        elif kind == "delete":
+            body.create_text(x0 + span / 2, cy, text="✕", anchor="center", font=self.bold, fill=colors["minus"])
+        elif anchor == "e":
+            body.create_text(x0 + span - 8, cy, text=value, anchor="e", font=self.font, fill=colors["fg"])
+        elif anchor == "center":
+            body.create_text(x0 + span / 2, cy, text=value, anchor="center", font=self.font, fill=colors["fg"])
+        else:
+            x = x0 + 8
+            if prefix and column.get("prefixed"):
+                # «отдаём» / «получаем» - тихим кольором перед товаром.
+                body.create_text(x, cy, text=prefix, anchor="w", font=self.font, fill=colors["muted"])
+                x += self.font.measure(prefix) + 6
+            muted = column.get("muted", False)
+            body.create_text(x, cy, text=self.ellipsis(value, span - (x - x0) - 6), anchor="w", font=self.font,
+                             fill=colors["muted"] if muted else colors["fg"])
+
     def redraw(self):
         body = self.body
         body.delete("all")
         colors = self.colors
         width = max(body.winfo_width(), sum(w for _x, w in self.spans) if self.spans else 200)
+        top = 0
         for index, row in enumerate(self.rows):
-            y0 = index * self.ROW_H
+            height = self.row_height(row)
             if index % 2:
-                body.create_rectangle(0, y0, width, y0 + self.ROW_H, fill=colors["zebra"], outline="")
+                body.create_rectangle(0, top, width, top + height, fill=colors["zebra"], outline="")
+            lines = row.get("lines") or []
             for column, (x0, span) in zip(self.columns, self.spans):
-                key = column["key"]
-                kind = column.get("kind", "text")
-                value = row["values"].get(key, "")
-                cy = y0 + self.ROW_H / 2
-                anchor = column.get("anchor", "w")
-                if kind == "badge":
-                    bg, fg = (row.get("badges") or {}).get(key, (colors["head"], colors["fg"]))
-                    label = self.ellipsis(value, span - 24, self.bold)
-                    text_width = self.bold.measure(label)
-                    body.create_rectangle(x0 + 8, y0 + 6, x0 + 8 + text_width + 14, y0 + self.ROW_H - 6, fill=bg, outline="")
-                    body.create_text(x0 + 15, cy, text=label, anchor="w", font=self.bold, fill=fg)
-                elif kind == "signed":
-                    sign = (row.get("signs") or {}).get(key, 0)
-                    fill = colors["plus"] if sign > 0 else (colors["minus"] if sign < 0 else colors["fg"])
-                    body.create_text(x0 + span - 8, cy, text=value, anchor="e", font=self.bold if sign else self.font, fill=fill)
-                elif kind == "edit":
-                    body.create_rectangle(x0 + 4, y0 + 4, x0 + span - 4, y0 + self.ROW_H - 4, fill=colors["hover"] if value else "", outline=colors["line"])
-                    body.create_text(x0 + span - 10, cy, text=value if value else "…", anchor="e",
-                                     font=self.bold if value else self.font, fill=colors["fg"] if value else colors["muted"])
-                elif kind == "delete":
-                    body.create_text(x0 + span / 2, cy, text="✕", anchor="center", font=self.bold, fill=colors["minus"])
-                elif anchor == "e":
-                    body.create_text(x0 + span - 8, cy, text=value, anchor="e", font=self.font, fill=colors["fg"])
-                elif anchor == "center":
-                    body.create_text(x0 + span / 2, cy, text=value, anchor="center", font=self.font, fill=colors["fg"])
+                if lines and column.get("per_line"):
+                    for line_index, line in enumerate(lines):
+                        self._draw_cell(column, x0, span, top + line_index * self.ROW_H, line.get("values") or {},
+                                        line.get("signs") or {}, row.get("badges"), prefix=line.get("prefix"))
                 else:
-                    muted = column.get("muted", False)
-                    body.create_text(x0 + 8, cy, text=self.ellipsis(value, span - 14), anchor="w", font=self.font,
-                                     fill=colors["muted"] if muted else colors["fg"])
-        height = max(len(self.rows) * self.ROW_H, 1)
-        body.configure(scrollregion=(0, 0, width, height))
+                    self._draw_cell(column, x0, span, top, row.get("values") or {}, row.get("signs") or {}, row.get("badges"))
+            top += height
+        body.configure(scrollregion=(0, 0, width, max(top, 1)))

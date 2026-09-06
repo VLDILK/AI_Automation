@@ -52,11 +52,11 @@ COLUMNS = (
     {"key": "type", "label": "Операция", "width": 132, "weight": 0, "anchor": "w", "kind": "badge"},
     {"key": "document", "label": "№", "width": 46, "weight": 0, "anchor": "e"},
     {"key": "who", "label": "Кто", "width": 120, "weight": 2, "anchor": "w"},
-    {"key": "product", "label": "Товар", "width": 140, "weight": 3, "anchor": "w"},
-    {"key": "size", "label": "Размер", "width": 104, "weight": 0, "anchor": "w"},
-    {"key": "qty", "label": "± шт", "width": 72, "weight": 0, "anchor": "e", "kind": "signed"},
-    {"key": "measure", "label": "± ед.", "width": 96, "weight": 0, "anchor": "e", "kind": "signed"},
-    {"key": "balance", "label": "Остаток", "width": 74, "weight": 0, "anchor": "e"},
+    {"key": "product", "label": "Товар", "width": 150, "weight": 3, "anchor": "w", "per_line": True, "prefixed": True},
+    {"key": "size", "label": "Размер", "width": 104, "weight": 0, "anchor": "w", "per_line": True},
+    {"key": "qty", "label": "± шт", "width": 72, "weight": 0, "anchor": "e", "kind": "signed", "per_line": True},
+    {"key": "measure", "label": "± ед.", "width": 96, "weight": 0, "anchor": "e", "kind": "signed", "per_line": True},
+    {"key": "balance", "label": "Остаток", "width": 74, "weight": 0, "anchor": "e", "per_line": True},
     {"key": "reason", "label": "Причина / клиент", "width": 140, "weight": 3, "anchor": "w"},
 )
 DELETE_COLUMN = {"key": "delete", "label": "", "width": 34, "weight": 0, "anchor": "center", "kind": "delete"}
@@ -332,7 +332,7 @@ class JournalWindow:
             if box is not None:
                 _bg, fg = self._type_colors(group[0])
                 box.configure(text_color=fg, fg_color=fg, hover_color=fg)
-        self.table.set_rows([self._row_for(entry_data) for entry_data in self.entries])
+        self.table.set_rows(self._rows_for(self.entries))
 
     # ---------------- фільтри ----------------
     @staticmethod
@@ -487,7 +487,7 @@ class JournalWindow:
         self.entries.extend(new_entries)
         self.total = int(page.get("total") or len(self.entries))
         self.has_more = bool(page.get("has_more"))
-        self.table.append_rows([self._row_for(entry) for entry in new_entries])
+        self.table.set_rows(self._rows_for(self.entries))
         self.status.configure(text="Показано %d из %d" % (len(self.entries), self.total))
         self.more_button.configure(state="normal" if self.has_more else "disabled")
 
@@ -514,6 +514,51 @@ class JournalWindow:
             "signs": {"qty": sign, "measure": 1 if measure > 0 else (-1 if measure < 0 else 0)},
         }
 
+    # Обмін (рішення користувача 2026-09-06): обидва боки одного документа -
+    # один запис «Обмен» із підрядками «отдаём» / «получаем»; час, №, хто й
+    # причина - один раз. Записи документа йдуть підряд (той самий час).
+    _EXCHANGE_PREFIX = {"exchange_out": "отдаём", "exchange_in": "получаем"}
+
+    def _rows_for(self, entries):
+        rows = []
+        index = 0
+        while index < len(entries):
+            entry_data = entries[index]
+            type_key = entry_data.get("type") or ""
+            if type_key in self._EXCHANGE_PREFIX:
+                group = [entry_data]
+                document = entry_data.get("document") or ""
+                while index + len(group) < len(entries):
+                    candidate = entries[index + len(group)]
+                    if candidate.get("type") in self._EXCHANGE_PREFIX and document and candidate.get("document") == document:
+                        group.append(candidate)
+                    else:
+                        break
+                group.sort(key=lambda e: 0 if e.get("type") == "exchange_out" else 1)
+                rows.append(self._exchange_row(group))
+                index += len(group)
+                continue
+            rows.append(self._row_for(entry_data))
+            index += 1
+        return rows
+
+    def _exchange_row(self, group):
+        first = group[0]
+        row = self._row_for(first)
+        row["values"]["type"] = "Обмен"
+        row["ids"] = [e.get("id") for e in group]
+        row["lines"] = []
+        for entry_data in group:
+            line = self._row_for(entry_data)
+            row["lines"].append({"values": line["values"], "signs": line["signs"], "prefix": self._EXCHANGE_PREFIX.get(entry_data.get("type"), "")})
+        reasons = []
+        for entry_data in group:
+            reason = entry_data.get("reason") or ""
+            if reason and reason not in reasons:
+                reasons.append(reason)
+        row["values"]["reason"] = " · ".join(reasons)
+        return row
+
     def rows(self):
         return self.table.rows
 
@@ -526,8 +571,9 @@ class JournalWindow:
 
     # ---------------- заголовки → фільтри ----------------
     def _on_cell_click(self, index, key):
-        if key == "delete" and 0 <= index < len(self.entries):
-            self._delete_entry(self.entries[index].get("id"))
+        if key == "delete" and 0 <= index < len(self.table.rows):
+            row = self.table.rows[index]
+            self._delete_entry(row.get("ids") or [row.get("id")])
 
     def _open_column_filter(self, key, x_root=None, y_root=None):
         self._close_popup()
@@ -668,17 +714,26 @@ class JournalWindow:
             self.popup = None
 
     # ---------------- видалення (лише домашка) ----------------
-    def _delete_entry(self, entry_id):
-        entry_data = next((e for e in self.entries if e.get("id") == entry_id), None)
-        if entry_data is None:
+    def _delete_entry(self, entry_ids):
+        if not isinstance(entry_ids, (list, tuple)):
+            entry_ids = [entry_ids]
+        chosen = [e for e in self.entries if e.get("id") in entry_ids]
+        if not chosen:
             return
-        text = "Удалить запись журнала?\n\n%s · %s · %s %s — %s?" % (
-            entry_data.get("time"), entry_data.get("type_label"), entry_data.get("product"), entry_data.get("size"),
-            _fmt_signed(entry_data.get("quantity"), "шт"),
-        )
+        lines = ["%s · %s · %s %s — %s" % (e.get("time"), e.get("type_label"), e.get("product"), e.get("size"), _fmt_signed(e.get("quantity"), "шт")) for e in chosen]
+        text = ("Удалить запись журнала?" if len(chosen) == 1 else "Удалить обмен целиком (%d записи)?" % len(chosen)) + "\n\n" + "\n".join(lines)
         if not messagebox.askyesno("Журнал операций", text + "\n\nОстаток склада не изменится; след останется в журнале действий.", parent=self.window):
             return
-        self.source.run(lambda: self.source.delete(entry_id), lambda _result: self.refresh(), self._show_error)
+        ids = [e.get("id") for e in chosen]
+
+        def delete_next(_result=None):
+            if not ids:
+                self.refresh()
+                return
+            entry_id = ids.pop(0)
+            self.source.run(lambda: self.source.delete(entry_id), delete_next, self._show_error)
+
+        delete_next()
 
     # ---------------- вивантаження ----------------
     def export(self, fmt):
