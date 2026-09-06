@@ -272,6 +272,29 @@
       PIECE_PRICED_PRODUCTS = data.piece_priced_products;
     }
   }
+  // Кольори операцій журналу з налаштувань клієнта (2026-09-06): сервер
+  // дає обидві теми, форма бере за темою Telegram - читабельність у
+  // світлій і темній однакова (контраст перевірено на сервері).
+  function applyJournalColors(ctx) {
+    var sets = ctx && ctx.journal_colors;
+    if (!sets) {
+      return;
+    }
+    var scheme = (tg && tg.colorScheme) || "light";
+    var set = sets[scheme] || sets.light;
+    if (!set) {
+      return;
+    }
+    var root = document.documentElement;
+    ["income", "sale", "writeoff", "exchange", "antiseptic", "correction"].forEach(function (key) {
+      var pair = set[key];
+      if (!pair || pair.length < 2) {
+        return;
+      }
+      root.style.setProperty("--jc-" + key + "-bg", pair[0]);
+      root.style.setProperty("--jc-" + key + "-fg", pair[1]);
+    });
+  }
   var MEASURE_UNIT_BY_KIND = { volume: "м3", area: "м2", linear: "мп" };
 
   // Реальний ризик (аудит коду, 2026-08-14): раніше лише .trim().
@@ -4877,6 +4900,7 @@
 
   function startForm(ctx) {
     applyMeasureClassification(ctx);
+    applyJournalColors(ctx);
     var app = document.getElementById("app");
 
     if (tg) {

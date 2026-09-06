@@ -281,11 +281,14 @@ class JournalWindow:
         caption(ops, colors, "ОПЕРАЦИЯ").pack(anchor="w")
         ops_row = ctk.CTkFrame(ops, fg_color="transparent")
         ops_row.pack(anchor="w", pady=(4, 0))
+        self.type_checkboxes = {}
         for label, group in JOURNAL_FILTER_GROUPS:
             var = tk.BooleanVar(value=True)
             self.type_vars[label] = var
             _bg, fg = self._type_colors(group[0])
-            checkbox(ops_row, colors, label, var, text_color=fg, accent=fg).pack(side="left", padx=(0, 10))
+            box = checkbox(ops_row, colors, label, var, text_color=fg, accent=fg)
+            box.pack(side="left", padx=(0, 10))
+            self.type_checkboxes[label] = box
         ghost_button(ops_row, colors, "Выбрать все", command=lambda: self._set_all_types(True), small=True, width=96).pack(side="left", padx=(4, 4))
         ghost_button(ops_row, colors, "Снять все", command=lambda: self._set_all_types(False), small=True, width=84).pack(side="left")
 
@@ -316,6 +319,20 @@ class JournalWindow:
 
     def _type_colors(self, type_key):
         return type_colors(type_key, self.colors.get("dark"), self.type_overrides)
+
+    # Нові кольори операцій (з вікна «Цвета операций» або з клієнта через
+    # тунель): перефарбувати прапорці й позначки вже завантажених рядків.
+    def set_type_overrides(self, overrides):
+        overrides = {key: tuple(pair) for key, pair in (overrides or {}).items()}
+        if overrides == self.type_overrides:
+            return
+        self.type_overrides = overrides
+        for label, group in JOURNAL_FILTER_GROUPS:
+            box = self.type_checkboxes.get(label)
+            if box is not None:
+                _bg, fg = self._type_colors(group[0])
+                box.configure(text_color=fg, fg_color=fg, hover_color=fg)
+        self.table.set_rows([self._row_for(entry_data) for entry_data in self.entries])
 
     # ---------------- фільтри ----------------
     @staticmethod
@@ -464,6 +481,8 @@ class JournalWindow:
             self.table.set_rows([])
         if page.get("facets"):
             self.facets = page["facets"]
+        if isinstance(page.get("colors"), dict):
+            self.set_type_overrides(page["colors"].get("dark" if self.colors.get("dark") else "light") or {})
         new_entries = page.get("entries") or []
         self.entries.extend(new_entries)
         self.total = int(page.get("total") or len(self.entries))

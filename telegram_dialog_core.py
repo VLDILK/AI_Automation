@@ -24,6 +24,7 @@ from utils import (
     _normalize_phrase,
     _number_value,
 )
+from operation_colors import SETTING_KEY as OPERATION_COLORS_SETTING, palettes_for_form
 from warehouse_data import JOURNAL_FILTER_GROUPS, JOURNAL_TYPE_LABELS, journal_entries, journal_page
 from warehouse_data import (
     signed_bot_number,
@@ -2207,6 +2208,7 @@ class CoreDialogMixin:
             "operation_labels": dict(self._ADMIN_JOURNAL_LABELS),
             # Прапорці фільтра у формі: «Обмен» = обидва боки (2026-09-06).
             "journal_groups": [[label, list(types)] for label, types in JOURNAL_FILTER_GROUPS],
+            "journal_colors": palettes_for_form(self._operation_colors_setting()),
             "products": products,
             "journal": self._admin_journal_page(store, {"limit": 50}),
             **self._webapp_style_ctx(),
@@ -2483,6 +2485,16 @@ class CoreDialogMixin:
     # обрано/порожній/зіпсований - тихо повертається до старого
     # захардкодженого paths.REPORT_BROADCAST_CHAT_ID, щоб нічого не
     # зламалось для тих, хто ще не встиг обрати файл.
+    # Кольори операцій (2026-09-06): з налаштувань клієнта; форма отримує
+    # обидві теми й обирає за темою Telegram.
+    def _operation_colors_setting(self):
+        try:
+            settings = SettingsStore(self.settings_path)
+        except OSError:
+            return {}
+        value = settings.get(OPERATION_COLORS_SETTING)
+        return value if isinstance(value, dict) else {}
+
     def _group_sees_size_recalc(self):
         """Перемикач клієнта "Показывать группе расчёт при списании другого
         размера" (KD за номіналом). Вимкнено - копія в групу без підміни

@@ -186,10 +186,11 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         self, *args, db_path=None, get_token=None, get_fresh_context=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
         handle_home_heartbeat=None, handle_set_role=None, handle_roles_changed=None,
-        get_form_content_enabled=None, get_onedrive_email=None, get_journal_page=None, **kwargs
+        get_form_content_enabled=None, get_onedrive_email=None, get_journal_page=None, get_journal_colors=None, **kwargs
     ):
         self.db_path = db_path
         self.get_journal_page = get_journal_page
+        self.get_journal_colors = get_journal_colors
         # Пошта OneDrive приходить КАЛБЕКОМ, не значенням: її можна змінити
         # в налаштуваннях на ходу, а сервер живе весь час роботи програми.
         # Без неї хмара не використовується взагалі (див. servers_registry.
@@ -906,6 +907,12 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         store = ExcelSqliteStore(self.db_path)
         try:
             page = journal_page(store, filters if isinstance(filters, dict) else {})
+            # Кольори операцій клієнта - домашка малює журнал тими самими.
+            if self.get_journal_colors is not None:
+                try:
+                    page["colors"] = self.get_journal_colors()
+                except Exception:
+                    pass
         finally:
             store.close()
         self._send_json(200, {"ok": True, **page})
@@ -1162,6 +1169,7 @@ class WebappServer:
     # бот зараз не запущений).
     def __init__(
         self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None, get_journal_page=None,
+        get_journal_colors=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
         handle_home_heartbeat=None, handle_set_role=None, handle_roles_changed=None,
         get_form_content_enabled=None, get_onedrive_email=None,
@@ -1172,6 +1180,7 @@ class WebappServer:
         self.get_token = get_token
         self.get_fresh_context = get_fresh_context
         self.get_journal_page = get_journal_page
+        self.get_journal_colors = get_journal_colors
         self.get_remote_control_token = get_remote_control_token
         self.get_remote_status = get_remote_status
         self.handle_remote_command = handle_remote_command
@@ -1189,6 +1198,7 @@ class WebappServer:
         handler = partial(
             _QuietRequestHandler, directory=self.directory, db_path=self.db_path, get_token=self.get_token,
             get_fresh_context=self.get_fresh_context, get_journal_page=self.get_journal_page,
+            get_journal_colors=self.get_journal_colors,
             get_remote_control_token=self.get_remote_control_token,
             get_remote_status=self.get_remote_status, handle_remote_command=self.handle_remote_command,
             handle_home_heartbeat=self.handle_home_heartbeat,

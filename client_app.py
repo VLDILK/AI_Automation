@@ -62,7 +62,9 @@ import servers_registry
 import standard_menu_cloud
 import update_check
 from settings import SettingsStore
+from colors_window import open_colors_window
 from correction_window import open_correction_window
+from operation_colors import SETTING_KEY as OPERATION_COLORS_SETTING, normalize_colors, palette_for, palettes_for_form
 from journal_window import LocalJournalSource, open_journal_window
 from role_buttons_window import LocalRoleSource, open_role_buttons_window
 from warehouse_data import (
@@ -383,6 +385,7 @@ class ClientApp(ctk.CTk):
                 self.telegram_worker._admin_journal_page(store, filters)
                 if self.telegram_worker else {"entries": [], "has_more": False}
             ),
+            get_journal_colors=lambda: palettes_for_form(self._operation_colors()),
             get_remote_control_token=lambda: paths.remote_control_token(),
             get_remote_status=self._get_remote_status,
             handle_remote_command=self._handle_remote_command,
@@ -3162,6 +3165,10 @@ class ClientApp(ctk.CTk):
         ).pack(side="right", padx=(0, 14))
         # Задача користувача (2026-09-06): рядок «Вкл./Выкл. бот» у
         # налаштуваннях прибрано як зайвий (бот керується з шапки).
+        # Замість нього - «Цвета операций»: окреме вікно з прев'ю
+        # (colors_window.py), кольори журналу в клієнті, формі й домашці.
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+        self._build_row_button(card, "settings", "Цвета операций", self._open_colors_window)
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
     # Задача користувача (2026-08-14, скріншот): "під таблицею щоб писало
@@ -3665,7 +3672,24 @@ class ClientApp(ctk.CTk):
             "bg": self._tk_color(COLOR_BG), "fg": self._tk_color(COLOR_TEXT), "muted": self._tk_color(COLOR_TEXT_MUTED),
             "row": self._tk_color(COLOR_ROW), "zebra": self._tk_color(COLOR_CARD), "head": self._tk_color(COLOR_CARD),
             "line": self._tk_color(COLOR_DIVIDER), "hover": self._tk_color(COLOR_HOVER), "dark": bool(self._dark_mode),
+            "types": palette_for(self._operation_colors(), bool(self._dark_mode)),
         }
+
+    # ---------------- Цвета операций (2026-09-06) ----------------
+    def _operation_colors(self):
+        return normalize_colors(self.settings.get(OPERATION_COLORS_SETTING))
+
+    def _open_colors_window(self):
+        open_colors_window(
+            self, "colors_window", self, self._operation_colors(), on_save=self._save_operation_colors,
+            colors=self._journal_window_colors(),
+        )
+
+    def _save_operation_colors(self, colors):
+        self.settings.set(OPERATION_COLORS_SETTING, dict(colors))
+        journal = getattr(self, "journals_window", None)
+        if journal is not None and journal.window.winfo_exists():
+            journal.set_type_overrides(palette_for(colors, bool(self._dark_mode)))
 
     def _format_log_time(self, created_at):
         try:

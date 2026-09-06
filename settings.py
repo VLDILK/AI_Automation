@@ -23,6 +23,9 @@ DEFAULT_SETTINGS = {
     # KD за номіналом (2026-09-05): чи бачить група дублювання звітів підміну
     # розміру й дохід по перерахунку. Типово так; автор продажу бачить завжди.
     "group_sees_size_recalc": True,
+    # Кольори операцій журналу (2026-09-06): {type: "#RRGGBB"} лише для
+    # змінених людиною; порожньо = типові (operation_colors.py).
+    "operation_colors": {},
     "telegram_token_file": "",
     "last_file_dialog_dir": "C:\\",
     "request_processing_mode": "no_ai",
