@@ -41,6 +41,7 @@ import code_backup
 import config_backup
 import domain_info
 import remote_control_client
+from role_buttons_window import RemoteRoleSource, open_role_buttons_window
 import button_editor
 import servers_registry
 import standard_menu_cloud
@@ -3005,6 +3006,10 @@ class ExcelViewerApp:
         # спосіб перечитати актуальні дані без виходу з екрана.
         refresh_button = tk.Button(top_bar, text=self._t("Обновити"), command=self._refresh_personnel)
         refresh_button.pack(side="left", padx=8)
+        # Задача користувача (2026-09-06): «Кнопки ролей» однаково в клієнті
+        # й у домашці - те саме вікно (role_buttons_window.py), дані живого
+        # клієнта через тунель, кожна дія шлеться одразу.
+        tk.Button(top_bar, text=self._t("Кнопки ролей"), command=self._open_role_buttons_window).pack(side="left")
 
         # Задача користувача (2026-08-20): "чиї дані в персоналі показують"
         # - однозначно видно, ЯКИЙ сервер зараз обраний, без потреби йти
@@ -9130,16 +9135,20 @@ class ExcelViewerApp:
         generation = self._personnel_refresh_generation
 
         def worker():
-            users = remote_control_client.fetch_remote_personnel()
-            self._run_on_main_thread(lambda: self._apply_personnel_rows(users, generation))
+            payload = remote_control_client.fetch_remote_personnel_payload()
+            self._run_on_main_thread(lambda: self._apply_personnel_rows(payload, generation))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_personnel_rows(self, users, generation=None):
+    def _apply_personnel_rows(self, payload, generation=None):
         if getattr(self, "personnel_list_frame", None) is None:
             return
         if generation is not None and generation != self._personnel_refresh_generation:
             return
+        users = payload["users"] if payload else None
+        # Підписи й кольори ролей - з клієнта (там живуть свої ролі), не з
+        # permissions.py; без зв'язку - порожньо, бейджі малюються сірими.
+        self._personnel_roles_cache = list(payload.get("roles") or []) if payload else []
         # Задача користувача (2026-08-17): кешуємо СИРИЙ список - сортування/
         # фільтр/повторний рендер нижче більше НЕ тягнуть дані через тунель
         # заново, лише перемальовують з того, що вже маємо.
@@ -9197,8 +9206,7 @@ class ExcelViewerApp:
             display_name = full_name or username or str(telegram_id)
             username_text = f" @{username}" if username else ""
             normalized_role = perm.normalize_role(role)
-            role_label = perm.ROLE_LABELS.get(normalized_role, role)
-            role_bg, role_fg = self._ROLE_CHIP_COLORS.get(normalized_role, self._ROLE_CHIP_COLORS["guest"])
+            role_label, role_bg, role_fg = self._remote_role_look(normalized_role)
 
             # Вимога користувача (2026-08-21): "додай змогу копіювати
             # номера ІД як виділяючи, так і щоб поруч була певна кнопка".
@@ -9255,7 +9263,7 @@ class ExcelViewerApp:
             chip = tk.Label(
                 self.personnel_list_frame, text=f"{role_label} ▾", font=("Segoe UI", 8, "bold"),
                 bg=role_bg, fg=role_fg, padx=8, pady=2, cursor="hand2",
-                width=self._ROLE_CHIP_WIDTH, anchor="center",
+                width=self._role_chip_width(), anchor="center",
             )
             chip.grid(row=index, column=1, padx=8)
             chip.bind(
@@ -9312,7 +9320,7 @@ class ExcelViewerApp:
         name_header.bind("<Button-1>", lambda event: self._toggle_personnel_sort("name"))
 
         if self._personnel_role_filter:
-            role_header_text = f"{self._t('Роль')}: {perm.ROLE_LABELS.get(self._personnel_role_filter, self._personnel_role_filter)} ▾"
+            role_header_text = f"{self._t('Роль')}: {self._remote_role_look(self._personnel_role_filter)[0]} ▾"
         else:
             role_header_text = f"{self._t('Роль')} ▾"
         role_header = tk.Label(
@@ -9353,9 +9361,9 @@ class ExcelViewerApp:
             label=self._t("Всі"), variable=filter_var, value="",
             command=lambda: self._set_personnel_role_filter(None),
         )
-        for role in perm.ROLES:
+        for role in self._remote_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS[role], variable=filter_var, value=role,
+                label=role["label"], variable=filter_var, value=role["key"],
                 command=lambda r=role: self._set_personnel_role_filter(r),
             )
         x = header_widget.winfo_rootx()
@@ -9389,6 +9397,41 @@ class ExcelViewerApp:
     # ідеальний вигляд) розфарбований під поточну тему, спливає прямо під
     # бейджем. add_radiobutton - той самий "позначено поточне" ефект, що й
     # у мокапі, без ручної побудови галочки.
+    # Ролі з останньої відповіді клієнта (/control/personnel): свої ролі
+    # живуть там; коли кешу ще нема - вбудовані з permissions.py.
+    def _remote_roles(self):
+        cached = getattr(self, "_personnel_roles_cache", None)
+        if cached:
+            return cached
+        return [
+            {"key": role, "label": perm.ROLE_LABELS_RU[role], "color_bg": perm.ROLE_CHIP_COLORS[role][0],
+             "color_fg": perm.ROLE_CHIP_COLORS[role][1]}
+            for role in perm.ROLES
+        ]
+
+    def _remote_role_look(self, role_key):
+        for role in self._remote_roles():
+            if role["key"] == role_key:
+                return role["label"], role["color_bg"], role["color_fg"]
+        bg, fg = self._ROLE_CHIP_COLORS["guest"]
+        return str(role_key or ""), bg, fg
+
+    def _role_chip_width(self):
+        longest = max((len(role["label"]) + 2 for role in self._remote_roles()), default=0)
+        return max(self._ROLE_CHIP_WIDTH, longest)
+
+    def _open_role_buttons_window(self):
+        theme = self._theme()
+        colors = {
+            "bg": theme["bg"], "fg": theme["fg"], "muted": theme["muted_fg"], "row": theme["panel_bg"],
+            "line": theme["border"],
+        }
+        open_role_buttons_window(
+            self, "role_buttons_window", self.root,
+            RemoteRoleSource(remote_control_client, self._run_on_main_thread),
+            colors=colors, on_change=self._refresh_personnel,
+        )
+
     def _open_role_menu(self, chip_widget, user_id, current_role):
         theme = self._theme()
         menu = tk.Menu(
@@ -9398,10 +9441,10 @@ class ExcelViewerApp:
             selectcolor=theme["fg"], bd=0,
         )
         role_var = tk.StringVar(value=current_role)
-        for role in perm.ROLES:
+        for role in self._remote_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS[role], variable=role_var, value=role,
-                command=lambda r=role: self._on_role_menu_selected(user_id, current_role, r),
+                label=role["label"], variable=role_var, value=role["key"],
+                command=lambda r=role["key"]: self._on_role_menu_selected(user_id, current_role, r),
             )
         x = chip_widget.winfo_rootx()
         y = chip_widget.winfo_rooty() + chip_widget.winfo_height()

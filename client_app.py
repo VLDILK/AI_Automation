@@ -62,6 +62,7 @@ import servers_registry
 import standard_menu_cloud
 import update_check
 from settings import SettingsStore
+from role_buttons_window import LocalRoleSource, open_role_buttons_window
 from warehouse_data import (
     row_value,
     warehouse_rows,
@@ -384,6 +385,7 @@ class ClientApp(ctk.CTk):
             handle_remote_command=self._handle_remote_command,
             handle_home_heartbeat=self._handle_home_heartbeat,
             handle_set_role=self._handle_set_role,
+            handle_roles_changed=self._handle_roles_changed,
             get_form_content_enabled=lambda: self._webapp_content_enabled,
         )
         self._webapp_content_enabled = True
@@ -4120,6 +4122,10 @@ class ClientApp(ctk.CTk):
         # через set_role, або сам бот через реєстрацію нового Гостя) може
         # змінити персонал, поки це вікно вже відкрите.
         ctk.CTkButton(top, text="Обновить", width=100, command=self._refresh_personnel).pack(side="right", padx=(0, 8))
+        # Задача користувача (2026-09-06): «додай змогу в персоналі вибирати
+        # кнопки, якими може користуватися та чи інша роль» - окреме вікно
+        # (role_buttons_window.py), спільне з домашкою.
+        ctk.CTkButton(top, text="Кнопки ролей", width=120, command=self._open_role_buttons_window).pack(side="right", padx=(0, 8))
 
         self.personnel_list_frame = ctk.CTkScrollableFrame(window, fg_color="transparent")
         self.personnel_list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
@@ -4171,8 +4177,8 @@ class ClientApp(ctk.CTk):
             display_name = full_name or username or str(telegram_id)
             username_text = f" @{username}" if username else ""
             normalized_role = perm.normalize_role(role)
-            role_label = perm.ROLE_LABELS_RU.get(normalized_role, role)
-            role_bg, role_fg = perm.ROLE_CHIP_COLORS.get(normalized_role, perm.ROLE_CHIP_COLORS[perm.GUEST])
+            role_label = self.store.role_label(role)
+            role_bg, role_fg = self.store.role_colors(role)
 
             headline = f"{index}. {display_name}{username_text} — ID: {telegram_id}"
             tk.Label(
@@ -4186,7 +4192,7 @@ class ClientApp(ctk.CTk):
             chip = tk.Label(
                 self.personnel_list_frame, text=f"{role_label} ▾", font=("Segoe UI", 9, "bold"),
                 bg=role_bg, fg=role_fg, padx=8, pady=3, cursor="hand2",
-                width=ROLE_CHIP_WIDTH, anchor="center",
+                width=self._role_chip_width(), anchor="center",
             )
             chip.grid(row=index, column=1, padx=8)
             chip.bind(
@@ -4223,13 +4229,13 @@ class ClientApp(ctk.CTk):
         name_header.bind("<Button-1>", lambda event: self._toggle_personnel_sort("name"))
 
         if self._personnel_role_filter:
-            role_header_text = f"Роль: {perm.ROLE_LABELS_RU.get(self._personnel_role_filter, self._personnel_role_filter)} ▾"
+            role_header_text = f"Роль: {self.store.role_label(self._personnel_role_filter)} ▾"
         else:
             role_header_text = "Роль ▾"
         role_header = tk.Label(
             self.personnel_list_frame, text=role_header_text,
             font=("Segoe UI", 8, "bold"), fg=muted_color, bg=header_bg,
-            cursor="hand2", anchor="center", width=ROLE_CHIP_WIDTH,
+            cursor="hand2", anchor="center", width=self._role_chip_width(),
         )
         role_header.grid(row=0, column=1, padx=8, pady=(0, 6))
         role_header.bind("<Button-1>", lambda event, w=role_header: self._open_personnel_role_filter_menu(w))
@@ -4262,10 +4268,10 @@ class ClientApp(ctk.CTk):
             label="Все", variable=filter_var, value="",
             command=lambda: self._set_personnel_role_filter(None),
         )
-        for role in perm.ROLES:
+        for role in self.store.list_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS_RU[role], variable=filter_var, value=role,
-                command=lambda r=role: self._set_personnel_role_filter(r),
+                label=role["label"], variable=filter_var, value=role["key"],
+                command=lambda r=role["key"]: self._set_personnel_role_filter(r),
             )
         x = header_widget.winfo_rootx()
         y = header_widget.winfo_rooty() + header_widget.winfo_height()
@@ -4299,10 +4305,10 @@ class ClientApp(ctk.CTk):
             selectcolor=self._tk_color(COLOR_TEXT), bd=0,
         )
         role_var = tk.StringVar(value=current_role)
-        for role in perm.ROLES:
+        for role in self.store.list_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS_RU[role], variable=role_var, value=role,
-                command=lambda r=role: self._on_role_menu_selected(user_id, telegram_id, current_role, r),
+                label=role["label"], variable=role_var, value=role["key"],
+                command=lambda r=role["key"]: self._on_role_menu_selected(user_id, telegram_id, current_role, r),
             )
         x = chip_widget.winfo_rootx()
         y = chip_widget.winfo_rooty() + chip_widget.winfo_height()
@@ -4327,17 +4333,45 @@ class ClientApp(ctk.CTk):
         self._refresh_personnel()
 
     def _user_role_options(self):
-        return [perm.ROLE_LABELS_RU[role] for role in perm.ROLES]
+        return [role["label"] for role in self.store.list_roles()]
 
     def _user_role_to_label(self, role):
-        normalized = perm.normalize_role(role) if role else perm.GUEST
-        return perm.ROLE_LABELS_RU.get(normalized, perm.ROLE_LABELS_RU[perm.GUEST])
+        return self.store.role_label(role or perm.GUEST)
 
     def _user_role_label_to_code(self, label):
-        for role in perm.ROLES:
-            if perm.ROLE_LABELS_RU[role] == label:
-                return role
+        for role in self.store.list_roles():
+            if role["label"] == label:
+                return role["key"]
         return None
+
+    # Ширина бейджа ролі - під найдовшу назву з поточного списку ролей (свої
+    # ролі можуть бути довшими за вбудовані), не менша за стару константу.
+    def _role_chip_width(self):
+        longest = max((len(role["label"]) + 2 for role in self.store.list_roles()), default=0)
+        return max(ROLE_CHIP_WIDTH, longest)
+
+    def _role_window_colors(self):
+        return {
+            "bg": self._tk_color(COLOR_BG), "fg": self._tk_color(COLOR_TEXT), "muted": self._tk_color(COLOR_TEXT_MUTED),
+            "row": self._tk_color(COLOR_ROW), "line": self._tk_color(COLOR_HOVER),
+        }
+
+    def _open_role_buttons_window(self):
+        open_role_buttons_window(
+            self, "role_buttons_window", self, LocalRoleSource(self.store, on_changed=self._refresh_personnel),
+            colors=self._role_window_colors(), on_change=self._refresh_personnel,
+        )
+
+    # Домашка змінила ролі/кнопки через тунель (webapp_server
+    # handle_roles_changed, фоновий потік сервера) - оновити «Персонал» і
+    # відкрите вікно «Кнопки ролей» на головному потоці.
+    def _handle_roles_changed(self):
+        def refresh():
+            self._refresh_personnel()
+            window = getattr(self, "role_buttons_window", None)
+            if window is not None and window.window.winfo_exists():
+                window.reload()
+        self._run_on_main_thread(refresh)
 
     # Одне спливаюче вікно і для додавання, і для редагування (той самий
     # каркас, що й gui.py._ask_user_form) - СПРАВЖНЯ модальність тут
@@ -4439,8 +4473,8 @@ class ClientApp(ctk.CTk):
         self._refresh_personnel()
 
     def _notify_role_change(self, telegram_id, old_role, new_role):
-        old_label = perm.ROLE_LABELS_RU.get(old_role, old_role)
-        new_label = perm.ROLE_LABELS_RU.get(new_role, new_role)
+        old_label = self.store.role_label(old_role)
+        new_label = self.store.role_label(new_role)
         text = f"Ваша роль изменена: {old_label} → {new_label}."
 
         def worker():
