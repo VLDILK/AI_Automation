@@ -687,3 +687,52 @@ html, body {
   color: var(--tg-hint);
   cursor: default;
 }
+
+
+/* Вкладка «Движение» (ТЗ п.8.4/8.5): по картці на категорію - залишок на
+   початок, рухи за період і залишок на кінець. */
+.movement-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.movement-card {
+  border: 1px solid var(--field-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--tg-bg);
+}
+
+.movement-card-head {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.movement-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--field-border);
+  font-size: 13px;
+}
+
+.movement-line:last-child {
+  border-bottom: none;
+}
+
+.movement-line.strong {
+  font-weight: 600;
+}
+
+.movement-plus {
+  color: #2e9e5b;
+}
+
+.movement-minus {
+  color: #d9534f;
+}

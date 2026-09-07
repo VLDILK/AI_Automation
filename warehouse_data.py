@@ -5914,6 +5914,41 @@ JOURNAL_FILTER_GROUPS = (
 )
 
 
+def movement_report_rows(store):
+    """Компактні рухи складу для вкладки «Движение» (ТЗ п.8.4/8.5): дата,
+    тип, товар, стан і ЗНАКОВІ кількість та вимір. Антисептирование сюди не
+    входить - це послуга, а не рух складу. Знак ставиться тут, щоб форма не
+    повторювала правила типів."""
+    rows, _has_more = store.list_journal_movements(limit=1000000, offset=0, sort="asc")
+    result = []
+    for row in rows:
+        movement_type = row.get("movement_type") or ""
+        if movement_type == "antiseptic":
+            continue
+        kind = item_measure_kind(row)
+        quantity = _number_value(row.get("quantity"))
+        measure = _number_value(row.get(kind)) if kind else 0
+        if movement_type != "correction":
+            sign = -1 if movement_type in JOURNAL_NEGATIVE_TYPES else 1
+            quantity = abs(quantity) * sign
+            measure = abs(measure) * sign
+        created = str(row.get("created_at") or "")
+        try:
+            day = datetime.fromisoformat(created).strftime("%d.%m.%Y")
+        except ValueError:
+            day = created[:10]
+        result.append({
+            "date": day,
+            "type": movement_type,
+            "product": row.get("product") or "",
+            "condition": row.get("condition") or "",
+            "quantity": round(quantity, 6),
+            "measure_kind": kind,
+            "measure": round(measure, 6) if kind else None,
+        })
+    return result
+
+
 def journal_entries(rows):
     entries = []
     for row in rows:

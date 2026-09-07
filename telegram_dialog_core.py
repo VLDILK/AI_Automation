@@ -29,6 +29,7 @@ from utils import (
 from operation_colors import SETTING_KEY as OPERATION_COLORS_SETTING, palettes_for_form
 from warehouse_data import JOURNAL_FILTER_GROUPS, JOURNAL_TYPE_LABELS, journal_entries, journal_page
 from warehouse_data import (
+    movement_report_rows,
     signed_bot_number,
     apply_correction_operation,
     GROUP_SEES_SIZE_RECALC_SETTING,
@@ -1753,6 +1754,10 @@ class CoreDialogMixin:
     # запасна лишається лише якщо кнопку взагалі видалили з дерева.
     _DATA_BROWSER_TAB_KEYS = [
         ("stock_report_section", "СКЛАД"),
+        # ТЗ п.8.4/8.5 (2026-09-07): рух за період і залишок на дату однією
+        # вкладкою; власної кнопки в custom_menu_buttons не має - працює
+        # запасна мітка, як і в «Списание»/«Приход».
+        ("movement_report_section", "ДВИЖЕНИЕ"),
         ("sales_report_section", "ПРОДАЖИ"),
         ("antiseptic_report_section", "АНТИСЕПТИРОВАНИЕ"),
         # Задача користувача: "додай вкладку списання... будемо бачити що і
@@ -1920,6 +1925,12 @@ class CoreDialogMixin:
     # report_rows (warehouse_data.py) читає напряму звідти, той самий
     # контракт, що й writeoff_report_rows (thickness/width/length окремо
     # для фільтра розміру, "manager" перейменовується на "author" тут же).
+    def _webapp_movement_tab_rows(self, store):
+        rows = movement_report_rows(store)
+        for row in rows:
+            row["product"], row["condition"] = self._webapp_split_product_display(row.get("product"), row.get("condition"))
+        return rows
+
     def _webapp_income_tab_rows(self, store):
         rows = income_report_rows(store)
         for row in rows:
@@ -1962,6 +1973,7 @@ class CoreDialogMixin:
         antiseptic_rows = self._webapp_antiseptic_tab_rows(store) if can_view_sales else []
         writeoff_rows = self._webapp_writeoff_tab_rows(store)
         income_rows = self._webapp_income_tab_rows(store)
+        movement_rows = self._webapp_movement_tab_rows(store)
         low_stock_threshold, low_stock_rows = self._webapp_low_stock_tab_rows(store)
         return {
             "mode": "data_browser",
@@ -1974,6 +1986,7 @@ class CoreDialogMixin:
             "antiseptic_rows": antiseptic_rows,
             "writeoff_rows": writeoff_rows,
             "income_rows": income_rows,
+            "movement_rows": movement_rows,
             "low_stock_rows": low_stock_rows,
             "low_stock_threshold": low_stock_threshold,
             "can_edit_low_stock_threshold": is_admin,

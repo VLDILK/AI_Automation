@@ -59,6 +59,10 @@
     sortDir: 1,
     sizeFilter: { thickness: null, width: null, length: null },
     valueFilter: { breed: null, condition: null, product: null, unit: null },
+    movementRows: [],
+    movementPeriod: { key: "month", from: null, to: null },
+    movementCategory: null,
+    movementDate: null,
     tabs: [],
     tabLabels: {},
     activeTab: "stock",
@@ -752,6 +756,19 @@
   // _antiseptic_report_rows/low_stock_warehouse_items), лише період тут
   // фільтрується на клієнті (весь набір рядків завантажується одразу,
   // "весь период"), щоб клік по "Неделя"/"Месяц" не робив зайвий round-trip.
+
+  // Дата у вигляді «дд.мм.гггг» - той самий формат, у якому приходять рядки.
+  function formatRuDate(value) {
+    if (!value) {
+      return "";
+    }
+    var d = value instanceof Date ? value : parseRuDate(value);
+    if (!d) {
+      return String(value);
+    }
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear();
+  }
 
   function parseRuDate(text) {
     var match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text || "");
@@ -1567,9 +1584,10 @@
   // Задача користувача (2026-08-14): "Приход" - НОВА вкладка, додана в
   // кінець (той самий порядок позиційно відповідає _DATA_BROWSER_TAB_KEYS,
   // telegram_dialog_core.py - там теж додана в кінець списку).
-  var TAB_KEYS = ["stock", "sales", "antiseptic", "writeoff", "clients", "low_stock", "income"];
+  var TAB_KEYS = ["stock", "movement", "sales", "antiseptic", "writeoff", "clients", "low_stock", "income"];
   var TAB_PANEL_IDS = {
     stock: "panel-stock",
+    movement: "panel-movement",
     sales: "panel-sales",
     antiseptic: "panel-antiseptic",
     writeoff: "panel-writeoff",
@@ -1577,6 +1595,267 @@
     low_stock: "panel-low-stock",
     income: "panel-income",
   };
+  // ---- Вкладка «Движение» (ТЗ п.8.4/8.5) ----
+  // Залишок на дату рахується НАЗАД від поточного: беремо теперішній
+  // залишок і віднімаємо всі рухи після цієї дати. Тому цифри правдиві
+  // рівно настільки, наскільки сягає історія рухів.
+  var MEASURE_UNITS = { volume: "м3", area: "м2", linear: "мп" };
+  var MOVEMENT_LINES = [
+    { key: "income", label: "Приход" },
+    { key: "sale", label: "Продажи" },
+    { key: "writeoff", label: "Списание" },
+    { key: "exchange_in", label: "Получено по обмену" },
+    { key: "exchange_out", label: "Отдано по обмену" },
+    { key: "correction", label: "Коррекция" },
+  ];
+
+  // Категорія = продукт, і лише коли продукт СПРАВДІ ділиться сухістю
+  // (у складі є два різні стани) - «Доска AD» / «Доска KD». «N/A» та інші
+  // заглушки станом не рахуються, тож ОСБ лишається «ОСБ», а Рейка
+  // розділиться сама, щойно з'явиться KD.
+  var CONDITION_PLACEHOLDERS = { "": 1, "n/a": 1, "-": 1, "—": 1, "–": 1, "нет": 1 };
+
+  function meaningfulCondition(row) {
+    var value = String(row.condition || "").trim();
+    return CONDITION_PLACEHOLDERS[value.toLowerCase()] ? "" : value;
+  }
+
+  function splitByConditionMap() {
+    var byProduct = {};
+    state.rows.concat(state.movementRows).forEach(function (row) {
+      var product = row.product || "";
+      var condition = meaningfulCondition(row);
+      if (!product || !condition) {
+        return;
+      }
+      if (!byProduct[product]) {
+        byProduct[product] = {};
+      }
+      byProduct[product][condition] = true;
+    });
+    var split = {};
+    Object.keys(byProduct).forEach(function (product) {
+      if (Object.keys(byProduct[product]).length > 1) {
+        split[product] = true;
+      }
+    });
+    return split;
+  }
+
+  function movementCategory(row, split) {
+    var product = row.product || "";
+    var condition = meaningfulCondition(row);
+    var map = split || state._movementSplit || {};
+    return map[product] && condition ? product + " " + condition : product;
+  }
+
+  function movementCategories() {
+    var seen = {};
+    var list = [];
+    state.rows.concat(state.movementRows).forEach(function (row) {
+      var key = movementCategory(row);
+      if (key && !seen[key]) {
+        seen[key] = true;
+        list.push(key);
+      }
+    });
+    list.sort();
+    return list;
+  }
+
+  function currentTotals() {
+    var totals = {};
+    state.rows.forEach(function (row) {
+      var key = movementCategory(row);
+      if (!key) {
+        return;
+      }
+      if (!totals[key]) {
+        totals[key] = { quantity: 0, measure: 0, unit: row.unit || "" };
+      }
+      totals[key].quantity += numberValue(row.quantity) || 0;
+      totals[key].measure += numberValue(row.measure) || 0;
+      if (!totals[key].unit && row.unit) {
+        totals[key].unit = row.unit;
+      }
+    });
+    return totals;
+  }
+
+  // Дві різні межі, і плутати їх не можна:
+  // • «після дня» - для залишку на КІНЕЦЬ періоду; без верхньої межі
+  //   віднімати нема чого, тож день null означає нуль;
+  // • «від дня» - для залишку на ПОЧАТОК періоду; без нижньої межі це
+  //   початок історії, тож віднімаються ВСІ рухи.
+  function movementSum(category, predicate) {
+    var sum = { quantity: 0, measure: 0 };
+    state.movementRows.forEach(function (row) {
+      if (movementCategory(row) !== category) {
+        return;
+      }
+      var rowDate = parseRuDate(row.date);
+      if (!rowDate || !predicate(rowDate)) {
+        return;
+      }
+      sum.quantity += numberValue(row.quantity) || 0;
+      sum.measure += numberValue(row.measure) || 0;
+    });
+    return sum;
+  }
+
+  function movementsAfterDay(category, day) {
+    if (!day) {
+      return { quantity: 0, measure: 0 };
+    }
+    return movementSum(category, function (rowDate) { return rowDate > day; });
+  }
+
+  function movementsFromDay(category, day) {
+    return movementSum(category, function (rowDate) { return !day || rowDate >= day; });
+  }
+
+  function movementsWithin(category, from, to) {
+    var byType = {};
+    state.movementRows.forEach(function (row) {
+      if (movementCategory(row) !== category) {
+        return;
+      }
+      var rowDate = parseRuDate(row.date);
+      if (!rowDate || (from && rowDate < from) || (to && rowDate > to)) {
+        return;
+      }
+      if (!byType[row.type]) {
+        byType[row.type] = { quantity: 0, measure: 0 };
+      }
+      byType[row.type].quantity += numberValue(row.quantity) || 0;
+      byType[row.type].measure += numberValue(row.measure) || 0;
+    });
+    return byType;
+  }
+
+  function movementAmountText(totals, unit) {
+    var parts = [];
+    if (unit && Math.abs(totals.measure) > 1e-9) {
+      parts.push(formatNumber(Math.round(totals.measure * 1000) / 1000) + " " + unit);
+    }
+    parts.push(formatNumber(Math.round(totals.quantity * 1000) / 1000) + " шт");
+    return parts.join(" · ");
+  }
+
+  function signedAmountText(totals, unit) {
+    var text = movementAmountText({ quantity: Math.abs(totals.quantity), measure: Math.abs(totals.measure) }, unit);
+    return (totals.quantity < 0 || totals.measure < 0 ? "−" : "+") + text;
+  }
+
+  function movementCardElement(category, totals) {
+    var card = document.createElement("div");
+    card.className = "movement-card";
+    var head = document.createElement("div");
+    head.className = "movement-card-head";
+    head.textContent = category;
+    card.appendChild(head);
+    totals.forEach(function (line) {
+      var row = document.createElement("div");
+      row.className = "movement-line" + (line.strong ? " strong" : "");
+      var label = document.createElement("span");
+      label.textContent = line.label;
+      var value = document.createElement("b");
+      value.textContent = line.value;
+      if (line.sign > 0) {
+        value.className = "movement-plus";
+      } else if (line.sign < 0) {
+        value.className = "movement-minus";
+      }
+      row.appendChild(label);
+      row.appendChild(value);
+      card.appendChild(row);
+    });
+    return card;
+  }
+
+  function renderMovementPanel() {
+    state._movementSplit = splitByConditionMap();
+    renderPeriodChips("movement-period-chips", state.movementPeriod, renderMovementPanel);
+
+    var modes = document.getElementById("movement-mode-chips");
+    modes.innerHTML = "";
+    [{ key: "period", label: "Движение за период" }, { key: "date", label: "Остаток на дату…" }].forEach(function (mode) {
+      var chip = document.createElement("span");
+      var active = (mode.key === "date") === !!state.movementDate;
+      chip.className = "data-chip" + (active ? " active" : "");
+      chip.textContent = mode.key === "date" && state.movementDate ? "На дату: " + formatRuDate(state.movementDate) : mode.label;
+      chip.addEventListener("click", function () {
+        if (mode.key === "period") {
+          state.movementDate = null;
+          renderMovementPanel();
+          return;
+        }
+        openRangeModal(function (from) {
+          state.movementDate = from || null;
+          renderMovementPanel();
+        });
+      });
+      modes.appendChild(chip);
+    });
+
+    var categories = movementCategories();
+    var chips = document.getElementById("movement-category-chips");
+    chips.innerHTML = "";
+    [null].concat(categories).forEach(function (category) {
+      var chip = document.createElement("span");
+      chip.className = "data-chip" + (state.movementCategory === category ? " active" : "");
+      chip.textContent = category === null ? "Все" : category;
+      chip.addEventListener("click", function () {
+        state.movementCategory = category;
+        renderMovementPanel();
+      });
+      chips.appendChild(chip);
+    });
+
+    var body = document.getElementById("movement-body");
+    body.innerHTML = "";
+    var totals = currentTotals();
+    var shown = categories.filter(function (category) {
+      return state.movementCategory === null || state.movementCategory === category;
+    });
+    var range = periodRange(state.movementPeriod);
+    shown.forEach(function (category) {
+      var current = totals[category] || { quantity: 0, measure: 0, unit: "" };
+      var unit = current.unit;
+      if (state.movementDate) {
+        var after = movementsAfterDay(category, state.movementDate);
+        body.appendChild(movementCardElement(category, [{
+          label: "Остаток на " + formatRuDate(state.movementDate),
+          value: movementAmountText({ quantity: current.quantity - after.quantity, measure: current.measure - after.measure }, unit),
+          strong: true,
+        }]));
+        return;
+      }
+      var afterEnd = movementsAfterDay(category, range.to);
+      var afterStart = movementsFromDay(category, range.from);
+      var within = movementsWithin(category, range.from, range.to);
+      var lines = [{
+        label: "Остаток на начало" + (range.from ? " " + formatRuDate(range.from) : " истории"),
+        value: movementAmountText({ quantity: current.quantity - afterStart.quantity, measure: current.measure - afterStart.measure }, unit),
+        strong: true,
+      }];
+      MOVEMENT_LINES.forEach(function (line) {
+        var sums = within[line.key];
+        if (!sums || (Math.abs(sums.quantity) < 1e-9 && Math.abs(sums.measure) < 1e-9)) {
+          return;
+        }
+        lines.push({ label: line.label, value: signedAmountText(sums, unit), sign: sums.quantity >= 0 ? 1 : -1 });
+      });
+      lines.push({
+        label: "Остаток на конец" + (range.to ? " " + formatRuDate(range.to) : " (сегодня)"),
+        value: movementAmountText({ quantity: current.quantity - afterEnd.quantity, measure: current.measure - afterEnd.measure }, unit),
+        strong: true,
+      });
+      body.appendChild(movementCardElement(category, lines));
+    });
+    document.getElementById("movement-empty").style.display = shown.length ? "none" : "";
+  }
+
   function switchTab(key) {
     state.activeTab = key;
     TAB_KEYS.forEach(function (tabKey) {
@@ -1931,6 +2210,7 @@
     state.antisepticRows = ctx.antiseptic_rows || [];
     state.writeoffRows = ctx.writeoff_rows || [];
     state.incomeRows = ctx.income_rows || [];
+    state.movementRows = ctx.movement_rows || [];
     state.lowStockRows = ctx.low_stock_rows || [];
     state.lowStockThreshold = ctx.low_stock_threshold;
     state.canEditLowStockThreshold = !!ctx.can_edit_low_stock_threshold;
@@ -1956,6 +2236,7 @@
     renderAntisepticPanel();
     renderWriteoffPanel();
     renderIncomePanel();
+    renderMovementPanel();
     renderClientsPanel();
     renderLowStockPanel();
     initLowStockThresholdEdit();
@@ -1986,6 +2267,7 @@
     state.antisepticRows = ctx.antiseptic_rows || [];
     state.writeoffRows = ctx.writeoff_rows || [];
     state.incomeRows = ctx.income_rows || [];
+    state.movementRows = ctx.movement_rows || [];
     state.lowStockRows = ctx.low_stock_rows || [];
     state.lowStockThreshold = ctx.low_stock_threshold;
     state.canEditLowStockThreshold = !!ctx.can_edit_low_stock_threshold;
@@ -1997,6 +2279,7 @@
     renderAntisepticPanel();
     renderWriteoffPanel();
     renderIncomePanel();
+    renderMovementPanel();
     renderClientsPanel();
     renderLowStockPanel();
     initLowStockThresholdEdit();
