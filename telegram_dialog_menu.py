@@ -192,6 +192,8 @@ class MenuDialogMixin:
             return self._start_admin_form_reply(store, context)
         if action_code == "start_calculator":
             return self._start_calculator_operation("калькулятор", store, context)
+        if action_code == "start_calculator_form":
+            return self._start_calculator_form_reply(store, context)
         if action_code == "show_help":
             return self._show_help_reply(store)
         return None

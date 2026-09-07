@@ -168,6 +168,7 @@ CUSTOM_BUTTON_ACTIONS = [
     {"code": "start_data_browser_form", "section": "данные", "label": "Показать данные одной формой"},
     {"code": "start_admin_form", "section": "админ", "label": "Админ: журнал операций и коррекция остатков"},
     {"code": "start_calculator", "section": "прочее", "label": "Открыть калькулятор"},
+    {"code": "start_calculator_form", "section": "прочее", "label": "Открыть калькулятор (форма)"},
     {"code": "show_help", "section": "прочее", "label": "Показать справку"},
 ]
 
@@ -236,6 +237,11 @@ BUILTIN_MIGRATED_CUSTOM_BUTTONS = [
     {"migration_key": "sales_by_client_report_section", "label": "Клиенты", "action_code": "start_sales_by_client_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "low_stock_report_section", "label": "Низкий остаток", "action_code": "start_low_stock_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "calculator", "label": "Калькулятор", "action_code": "start_calculator", "layout": "half", "parent_migration_key": None},
+    # Рішення користувача (2026-09-07): «додай кнопку до бота теж».
+    # Окремий ключ, а не воскресіння схованої «Калькулятор» вище: ту
+    # сховали на пряме прохання (2026-08-18), і вона веде в текстовий
+    # діалог, а ця - у форму зі списком розмірів складу.
+    {"migration_key": "calculator_form", "label": "КАЛЬКУЛЯТОР (форма)", "action_code": "start_calculator_form", "layout": "half", "parent_migration_key": None},
     {"migration_key": "help", "label": "Помощь", "action_code": "show_help", "layout": "half", "parent_migration_key": None},
 ]
 
@@ -299,6 +305,7 @@ BOT_MESSAGE_DEFAULTS = {
     "start_data_browser_form": "Данные склада одной формой.",
     "start_admin_form": "Админ-форма: журнал операций и коррекция остатков. Нажмите кнопку ниже.",
     "start_calculator": "Что посчитать?",
+    "start_calculator_form": "Калькулятор. Откройте форму:",
     "show_help": (
         "Доступные команды:\n"
         "Приход - принять товар на склад\n"
@@ -2532,7 +2539,8 @@ class ExcelSqliteStore:
     # першому запуску, як колись старі чатові кнопки. Усі кнопки "(форма)"
     # - це і є стандартне меню, тож нова "(форма)" мусить бути тут.
     _STANDARD_MENU_ROOT_MIGRATION_KEYS = frozenset(
-        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form", "exchange_form", "admin_form"}
+        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form",
+         "exchange_form", "admin_form", "calculator_form"}
     )
 
     def _apply_standard_menu_policy(self):

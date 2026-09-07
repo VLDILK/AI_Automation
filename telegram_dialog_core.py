@@ -1550,6 +1550,49 @@ class CoreDialogMixin:
             },
         }
 
+    # Калькулятор окремою кнопкою бота (ТЗ п.6; рішення користувача
+    # 2026-09-07: «додай кнопку до бота теж»). Кнопка відкриває ТУ САМУ
+    # панель, що й 🧮 у формі операції - зі списком розмірів складу, - а не
+    # текстовий діалог: «лише форми» лишається правилом. Виклик словами
+    # («посчитай 25x50x6000 140 шт») працює як працював.
+    def _webapp_calculator_context(self, store):
+        return {
+            "mode": "calculator",
+            "kind": "calculator",
+            "title": "Калькулятор",
+            "categories": [],
+            "calculator_sizes": stock_size_options(store),
+            **self._webapp_style_ctx(),
+        }
+
+    def _calculator_webapp_button(self, store):
+        base_url = getattr(self, "webapp_public_url", None)
+        if not base_url:
+            return None
+        token = webapp_server.register_context(self._webapp_calculator_context(store))
+        url = f"{base_url.rstrip('/')}/index.html?t={token}"
+        return {"web_app": {"url": url}}
+
+    def _start_calculator_form_reply(self, store, context):
+        web_app = self._calculator_webapp_button(store)
+        if web_app is None:
+            # Форма не підключена - лишається той самий калькулятор у чаті,
+            # щоб кнопка не була мертвою.
+            return self._start_calculator_operation("калькулятор", store, context)
+        return {
+            "type": "message",
+            "text": store.get_message_template(
+                "start_calculator_form", BOT_MESSAGE_DEFAULTS["start_calculator_form"]
+            ),
+            "reply_markup": {
+                "keyboard": [
+                    [{"text": "Открыть калькулятор", **web_app}],
+                    [{"text": "Главное меню"}],
+                ],
+                "resize_keyboard": True,
+            },
+        }
+
     def _exchange_positions_from_form(self, store, context, positions_data, parent_action_code, kind):
         """Позиції одного блоку з форми -> розібрані позиції, або (None, текст помилки)."""
         resolved = []

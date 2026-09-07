@@ -1449,3 +1449,15 @@ html, body {
   margin-top: 6px;
   min-height: 20px;
 }
+
+/* Калькулятор кнопкою бота: панель - сам екран, а не накладка над формою. */
+.calc-overlay.calc-standalone {
+  background: var(--tg-bg);
+  align-items: stretch;
+  padding: 0;
+}
+
+.calc-overlay.calc-standalone .calc-panel {
+  max-width: none;
+  border-radius: 0;
+}

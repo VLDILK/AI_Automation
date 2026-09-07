@@ -5045,9 +5045,9 @@
     return isFinite(number) ? number : 0;
   }
 
-  function buildCalculator(sizes) {
+  function buildCalculator(sizes, standalone) {
     var overlay = document.createElement("div");
-    overlay.className = "calc-overlay";
+    overlay.className = standalone ? "calc-overlay calc-standalone" : "calc-overlay";
     overlay.hidden = true;
 
     var panel = document.createElement("div");
@@ -5329,11 +5329,17 @@
     });
 
     function close() {
+      // Окремим екраном калькулятор закривається разом із самою формою:
+      // під ним нічого немає.
+      if (standalone) {
+        if (tg && tg.close) { tg.close(); }
+        return;
+      }
       overlay.hidden = true;
     }
     closeButton.addEventListener("click", close);
     overlay.addEventListener("click", function (event) {
-      if (event.target === overlay) { close(); }
+      if (event.target === overlay && !standalone) { close(); }
     });
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && !overlay.hidden) { close(); }
@@ -5351,18 +5357,24 @@
 
   function attachCalculator(ctx) {
     var sizes = ctx.calculator_sizes;
-    if (!Array.isArray(sizes)) { return; }
+    if (!Array.isArray(sizes)) { return null; }
     var titleEl = document.getElementById("title");
-    if (!titleEl || titleEl.querySelector(".calc-button")) { return; }
-    titleEl.classList.add("title-with-calc");
-    var button = document.createElement("button");
-    button.type = "button";
-    button.className = "calc-button";
-    button.textContent = "🧮";
-    button.title = "Калькулятор";
-    titleEl.appendChild(button);
-    var calculator = buildCalculator(sizes);
-    button.addEventListener("click", function () { calculator.open(); });
+    if (!titleEl || titleEl.querySelector(".calc-button")) { return null; }
+    // Кнопкою бота калькулятор відкривається САМ - тоді панель і є екраном,
+    // і кнопка 🧮 в шапці не потрібна (натискати нема на що повертатись).
+    var standalone = ctx.mode === "calculator";
+    var calculator = buildCalculator(sizes, standalone);
+    if (!standalone) {
+      titleEl.classList.add("title-with-calc");
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "calc-button";
+      button.textContent = "🧮";
+      button.title = "Калькулятор";
+      titleEl.appendChild(button);
+      button.addEventListener("click", function () { calculator.open(); });
+    }
+    return calculator;
   }
 
   function main() {
@@ -5413,7 +5425,18 @@
     document.getElementById("title").textContent = ctx.title || "Данные";
     // Кнопка калькулятора - у шапці форми (вимога користувача 2026-09-05:
     // «для форми - має бути кнопка обов'язково, а для чату - ні»).
-    attachCalculator(ctx);
+    var calculator = attachCalculator(ctx);
+    if (ctx.mode === "calculator") {
+      // Кнопка бота «КАЛЬКУЛЯТОР (форма)»: полів операції немає взагалі,
+      // панель відкривається одразу й на весь екран.
+      var operationForm = document.getElementById("form");
+      if (operationForm) { operationForm.style.display = "none"; }
+      var knownEl = document.getElementById("known");
+      if (knownEl) { knownEl.style.display = "none"; }
+      if (tg && tg.MainButton) { tg.MainButton.hide(); }
+      if (calculator) { calculator.open(); }
+      return;
+    }
     // Задача користувача: текст заголовка "Проверьте данные" — редагований
     // з Налаштувань (webapp_confirm_heading_text) — той самий елемент
     // існує в DOM незалежно від mode (all_in_one чи однокатегорійна форма),
