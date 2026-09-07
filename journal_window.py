@@ -311,6 +311,9 @@ class JournalWindow:
         colors = self.colors
         self.type_overrides = colors.get("types") or {}
         self.entries = []
+        # Номери документів, які зараз розгорнуті. Операція типово
+        # згорнута (рішення користувача 2026-09-07, вигляд 03).
+        self.expanded = set()
         self.total = 0
         self.has_more = False
         self.facets = {"who": [], "products": []}
@@ -576,6 +579,20 @@ class JournalWindow:
         self.status.configure(text="Показано %d из %d" % (len(self.entries), self.total))
         self.more_button.configure(state="normal" if self.has_more else "disabled")
 
+    # Скільки позицій - російською, як і решта підписів журналу.
+    @staticmethod
+    def _positions_text(count):
+        tail = count % 100
+        if 11 <= tail <= 14:
+            word = "позиций"
+        elif count % 10 == 1:
+            word = "позиция"
+        elif 2 <= count % 10 <= 4:
+            word = "позиции"
+        else:
+            word = "позиций"
+        return "%d %s" % (count, word)
+
     def _row_for(self, entry):
         quantity = _number_value(entry.get("quantity"))
         measure = _number_value(entry.get("measure")) if entry.get("measure") is not None else 0
@@ -607,43 +624,102 @@ class JournalWindow:
     _EXCHANGE_PREFIX = {"exchange_out": "отдаём", "exchange_in": "получаем"}
 
     def _rows_for(self, entries):
+        """Рухи з тим самим номером документа - один запис журналу.
+
+        ТЗ, пункти 7 і 9: «один приход с пятью строками внутри, а не пять
+        отдельных приходов». Раніше так збирався лише обмін.
+        """
         rows = []
         index = 0
         while index < len(entries):
-            entry_data = entries[index]
-            type_key = entry_data.get("type") or ""
-            if type_key in self._EXCHANGE_PREFIX:
-                group = [entry_data]
-                document = entry_data.get("document") or ""
+            document = str(entries[index].get("document") or "")
+            group = [entries[index]]
+            if document:
                 while index + len(group) < len(entries):
                     candidate = entries[index + len(group)]
-                    if candidate.get("type") in self._EXCHANGE_PREFIX and document and candidate.get("document") == document:
+                    if str(candidate.get("document") or "") == document:
                         group.append(candidate)
                     else:
                         break
-                group.sort(key=lambda e: 0 if e.get("type") == "exchange_out" else 1)
-                rows.append(self._exchange_row(group))
-                index += len(group)
-                continue
-            rows.append(self._row_for(entry_data))
-            index += 1
+            if len(group) > 1:
+                rows.append(self._operation_row(group))
+            else:
+                rows.append(self._row_for(group[0]))
+            index += len(group)
         return rows
 
-    def _exchange_row(self, group):
+    def _operation_row(self, group):
+        """Шапка операції: скільки позицій, разом штук, разом одиниць, сума.
+        Позиції під нею з'являються лише коли операцію розгорнули."""
+        is_exchange = all((entry.get("type") or "") in self._EXCHANGE_PREFIX for entry in group)
+        if is_exchange:
+            group = sorted(group, key=lambda e: 0 if e.get("type") == "exchange_out" else 1)
         first = group[0]
         row = self._row_for(first)
-        row["values"]["type"] = "Обмен"
-        row["ids"] = [e.get("id") for e in group]
-        row["lines"] = []
-        for entry_data in group:
-            line = self._row_for(entry_data)
-            row["lines"].append({"values": line["values"], "signs": line["signs"], "prefix": self._EXCHANGE_PREFIX.get(entry_data.get("type"), "")})
+        row["ids"] = [entry.get("id") for entry in group]
+        document = str(first.get("document") or "")
+        row["group_key"] = document
+        expanded = document in self.expanded
+        if is_exchange:
+            row["values"]["type"] = "Обмен"
+
+        values = row["values"]
+        values["product"] = ("▾ " if expanded else "▸ ") + self._positions_text(len(group))
+        values["size"] = ""
+        # Залишок після операції в шапці не показуємо: він у кожної позиції
+        # свій, спільного числа не існує.
+        values["balance"] = ""
+
+        quantities = [_number_value(entry.get("quantity")) for entry in group]
+        measured = [entry for entry in group if entry.get("measure") is not None]
+        units = {str(entry.get("unit") or "") for entry in measured}
+        if is_exchange:
+            # У обміну плюс і мінус не складаються - показуємо обидва боки.
+            out_qty = sum(q for q in quantities if q < 0)
+            in_qty = sum(q for q in quantities if q > 0)
+            values["qty"] = "%s / %s" % (_fmt_signed(out_qty), _fmt_signed(in_qty))
+            if len(units) == 1:
+                unit = next(iter(units))
+                out_measure = sum(_number_value(e.get("measure")) for e in measured if _number_value(e.get("measure")) < 0)
+                in_measure = sum(_number_value(e.get("measure")) for e in measured if _number_value(e.get("measure")) > 0)
+                values["measure"] = "%s / %s" % (_fmt_signed(out_measure), _fmt_signed(in_measure, unit))
+            else:
+                values["measure"] = ""
+            row["signs"] = {"qty": 0, "measure": 0}
+        else:
+            qty_total = sum(quantities)
+            values["qty"] = _fmt_signed(qty_total)
+            if len(units) == 1:
+                measure_total = sum(_number_value(entry.get("measure")) for entry in measured)
+                values["measure"] = _fmt_signed(measure_total, next(iter(units)))
+            else:
+                # Різні одиниці (м³ і мп) не складаються в одне число.
+                measure_total = 0
+                values["measure"] = ""
+            measure_sign = 1 if measure_total > 0 else (-1 if measure_total < 0 else 0)
+            row["signs"] = {"qty": 1 if qty_total > 0 else (-1 if qty_total < 0 else 0), "measure": measure_sign}
+
+        amounts = [_number_value(entry.get("amount")) for entry in group if entry.get("amount") not in (None, "")]
+        values["amount"] = _fmt_money(sum(amounts)) if amounts else ""
+
         reasons = []
-        for entry_data in group:
-            reason = entry_data.get("reason") or ""
+        for entry in group:
+            reason = entry.get("reason") or ""
             if reason and reason not in reasons:
                 reasons.append(reason)
-        row["values"]["reason"] = " · ".join(reasons)
+        values["reason"] = " · ".join(reasons)
+
+        row["lines"] = []
+        if expanded:
+            # Перший підрядок - та сама шапка: колонки з per_line малюються
+            # на кожному підрядку, тож підсумок мусить бути одним із них.
+            row["lines"].append({"values": dict(values), "signs": dict(row["signs"]), "prefix": ""})
+            for entry in group:
+                line = self._row_for(entry)
+                row["lines"].append({
+                    "values": line["values"], "signs": line["signs"],
+                    "prefix": self._EXCHANGE_PREFIX.get(entry.get("type"), "") if is_exchange else "",
+                })
         return row
 
     def rows(self):
@@ -658,9 +734,21 @@ class JournalWindow:
 
     # ---------------- заголовки → фільтри ----------------
     def _on_cell_click(self, index, key):
-        if key == "delete" and 0 <= index < len(self.table.rows):
-            row = self.table.rows[index]
+        if not (0 <= index < len(self.table.rows)):
+            return
+        row = self.table.rows[index]
+        if key == "delete":
             self._delete_entry(row.get("ids") or [row.get("id")])
+            return
+        # Обраний вигляд (2026-09-07): операція типово згорнута, натиск по
+        # будь-якій її клітинці розгортає позиції й згортає назад.
+        group_key = row.get("group_key")
+        if group_key:
+            if group_key in self.expanded:
+                self.expanded.discard(group_key)
+            else:
+                self.expanded.add(group_key)
+            self.table.set_rows(self._rows_for(self.entries))
 
     def _open_column_filter(self, key, x_root=None, y_root=None):
         self._close_popup()
@@ -773,7 +861,10 @@ class JournalWindow:
         if not chosen:
             return
         lines = ["%s · %s · %s %s — %s" % (e.get("time"), e.get("type_label"), e.get("product"), e.get("size"), _fmt_signed(e.get("quantity"), "шт")) for e in chosen]
-        text = ("Удалить запись журнала?" if len(chosen) == 1 else "Удалить обмен целиком (%d записи)?" % len(chosen)) + "\n\n" + "\n".join(lines)
+        text = (
+            "Удалить запись журнала?" if len(chosen) == 1
+            else "Удалить операцию целиком (%s)?" % self._positions_text(len(chosen))
+        ) + "\n\n" + "\n".join(lines)
         if not messagebox.askyesno("Журнал операций", text + "\n\nОстаток склада не изменится; след останется в журнале действий.", parent=self.window):
             return
         ids = [e.get("id") for e in chosen]
