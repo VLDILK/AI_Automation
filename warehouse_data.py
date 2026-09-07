@@ -6396,7 +6396,10 @@ def find_stock_row_id(store, position, item):
     Excel (кожен імпорт створює рядки заново)."""
     _headers, columns, rows = warehouse_rows(store)
     wanted_products = set()
-    for candidate in (position.get("product"), sheet_product_name(position)):
+    candidates = [position.get("product"), sheet_product_name(position)]
+    # Рейка за перерізом (2026-09-07): «Доска AD» + 30×50 шукає рядок «Рейка».
+    candidates.append(lath_product_name(position.get("product"), item.get("thickness"), item.get("width")))
+    for candidate in candidates:
         plain = _normalize_phrase(plain_product_name(candidate or "") or "")
         if plain:
             wanted_products.add(plain)

@@ -6,6 +6,7 @@ import sqlite3
 
 import permissions as perm
 from utils import (
+    lath_product_name,
     piece_measure,
     _display_bot_number,
     _normalize_phrase,
@@ -3829,7 +3830,16 @@ class IncomeSaleFlowDialogMixin:
             row_value(row, columns["product"]),
             self._existing_product_type_values([(None, row)], columns["product"]),
         )
-        if not self._text_equal(row_product, payload.get("product")):
+        # Рейка за перерізом (рішення користувача 2026-09-07, рівень А):
+        # «Доска AD» + 30×50 - це та сама рейка, тож назву з форми зводимо до
+        # рейкової перед порівнянням. Інакше рядок «Рейка» не знаходився б, а
+        # прихід створював би другий такий самий.
+        wanted_product = lath_product_name(
+            payload.get("product"),
+            item.get("stock_thickness", item.get("thickness")),
+            item.get("stock_width", item.get("width")),
+        )
+        if not self._text_equal(row_product, wanted_product):
             return False
         # Реальний баг (живий продакшн, 2026-08-17): "Не найдено на складе"
         # для Вагонки/ОСБ навіть на щойно відкритій формі - _existing_
