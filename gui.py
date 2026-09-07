@@ -6018,6 +6018,16 @@ class ExcelViewerApp:
                                 font=("Segoe UI", 8), anchor="w", justify="left")
         status_label.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
+        # Довга підказка (які саме права додати токену) раніше обрізалась
+        # краєм вікна - людина бачила half-речення. Переносимо по фактичній
+        # ширині рядка, а не по вгаданому числу.
+        def _wrap_status(event):
+            width = max(event.width - 24, 120)
+            if status_label.cget("wraplength") != width:
+                status_label.configure(wraplength=width)
+
+        status_row.bind("<Configure>", _wrap_status)
+
         # Tk не має "placeholder" у Entry, тому робимо його руками: сірий
         # текст, поки поле порожнє й не у фокусі. Головна пастка - textvariable:
         # вставлений підказковий текст ІНАКШЕ полетів би у trace і зберігся
