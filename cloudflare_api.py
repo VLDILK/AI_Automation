@@ -96,6 +96,8 @@ def _request(path, token, method="GET", payload=None, timeout=_TIMEOUT, with_sta
 _TOKEN_CHARS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _TOKEN_MIN = 30
 _TOKEN_MAX = 200
+# Довжина справжнього API-токена Cloudflare.
+_API_TOKEN_LENGTH = 40
 
 
 def describe_token_shape(token):
@@ -119,6 +121,18 @@ def describe_token_shape(token):
     if len(token) > _TOKEN_MAX:
         return (
             f"Рядок задовгий для токена ({len(token)} символів) - схоже, прихопили щось стороннє."
+        )
+    # Живий випадок 2026-09-07: сюди вставили ТОКЕН ТУНЕЛЮ (довгий рядок із
+    # команди cloudflared). Він теж із дозволених символів і теж довгий, але
+    # це не ключ API - Cloudflare на нього відповідає 400. API-токен рівно
+    # 40 символів, тож усе, що помітно довше, називаємо своїм ім'ям одразу.
+    if len(token) > _API_TOKEN_LENGTH + 8:
+        return (
+            f"Це не схоже на API-токен Cloudflare: у нього рівно {_API_TOKEN_LENGTH} символів, "
+            f"а тут {len(token)}. Найчастіше сюди помилково вставляють ТОКЕН ТУНЕЛЮ з команди "
+            "cloudflared - він довший і для цього вікна не підходить. Потрібен ключ із "
+            "«My Profile → API Tokens → Create Token» з правами Zone → Zone → Read і "
+            "Account → Cloudflare Tunnel → Read."
         )
     return None
 
@@ -154,6 +168,16 @@ def verify_token(token):
         return False, (
             "Cloudflare не впізнав цей токен. Перевірте, що натиснули «Create Token» "
             "(а не лише «Review token»), і що в токені не ввімкнено обмеження за IP."
+        )
+    # 400 на ВСІ запити означає, що Cloudflare відкинув сам заголовок - до
+    # перевірки прав справа не дійшла. Казати «немає прав» тут неправда
+    # (живий випадок 2026-09-07: вставили токен тунелю).
+    if code == 400 and zones_code == 400 and accounts_code == 400:
+        return False, (
+            "Cloudflare не приймає цей рядок як ключ API. Найчастіше сюди вставляють ТОКЕН "
+            "ТУНЕЛЮ з команди cloudflared - він для цього вікна не підходить. Потрібен ключ із "
+            "«My Profile → API Tokens → Create Token» з правами Zone → Zone → Read і "
+            "Account → Cloudflare Tunnel → Read."
         )
     return False, (
         "Токен живий, але не має жодного потрібного читання. У Cloudflare відкрийте цей токен "
