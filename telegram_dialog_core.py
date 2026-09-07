@@ -1052,6 +1052,9 @@ class CoreDialogMixin:
     # завести НОВИЙ розмір/породу, яких на складі ще нема, тож дропдауни
     # мають показувати ПОВНИЙ список (не звужений до існуючих комбінацій).
     _WEBAPP_ALL_IN_ONE_INCOME_KEYS = ("breed", "thickness", "width", "length", "quantity")
+    # ТЗ п.4: коментар вводиться при оформленні приходу, зберігається з
+    # операцією й видно в історії. Спільне поле на всю форму, як у списанні.
+    _WEBAPP_ALL_IN_ONE_INCOME_COMMON_KEYS = ("comment",)
 
     # Задача користувача ("роби і для приходу/списання"): та сама
     # "Вернуться в форму" з відновленими даними, що вже має продаж/
@@ -1097,12 +1100,20 @@ class CoreDialogMixin:
                 # той самий підхід, що вже застосований для formatServerNumber).
                 "product": prefill.get("product"),
             })
+        common_ctx = self._webapp_form_context(
+            store, None, self._WEBAPP_ALL_IN_ONE_INCOME_COMMON_KEYS, {}, "Приход"
+        )
+        # Типовий підпис поля «comment» - «Причина списания» (він же для
+        # списання). У приході це просто коментар (ТЗ п.4).
+        for field in common_ctx["fields"]:
+            if field.get("key") == "comment":
+                field["label"] = "Комментарий"
         ctx = {
             "mode": "all_in_one",
             "kind": "income",
             "title": "Приход одной формой",
             "categories": categories,
-            "common_fields": [],
+            "common_fields": common_ctx["fields"],
             **self._webapp_style_ctx(),
             # Знову вбудовано (задача користувача: "чи є якийсь інший
             # шлях?" - sendData() для збереження шаблону не потребує

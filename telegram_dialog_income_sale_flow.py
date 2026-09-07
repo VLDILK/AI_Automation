@@ -14,6 +14,7 @@ from utils import (
     price_line_text,
 )
 from warehouse_data import (
+    shortage_line,
     signed_bot_number,
     sale_recalc_income,
     BOT_MESSAGE_DEFAULTS,
@@ -4138,6 +4139,15 @@ class IncomeSaleFlowDialogMixin:
         if issue["kind"] != "quantity" or issue.get("balance_measure") not in (None, 0):
             available_parts.append(f"{_display_bot_number(issue['balance_measure'])} {issue['measure_unit']}")
         lines.append(f"Доступно: {' / '.join(available_parts)}")
+        # ТЗ п.10: показати не лише скільки треба й скільки є, а й скільки
+        # саме не вистачає.
+        shortage = shortage_line(
+            issue["requested"],
+            issue["balance_qty"] if issue["kind"] == "quantity" else issue["balance_measure"],
+            issue["requested_unit"],
+        )
+        if shortage:
+            lines.append(shortage)
         return "\n".join(lines)
 
     def _sale_stock_issue_reply(self, store, context, payload, issue):

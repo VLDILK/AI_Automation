@@ -18,6 +18,7 @@ telegram_dialog_antiseptic.py: власний, повністю ізольова
 import permissions as perm
 from utils import _display_bot_number, _normalize_phrase
 from warehouse_data import (
+    shortage_line,
     BOT_MESSAGE_DEFAULTS,
     apply_writeoff_operation,
     display_product_name,
@@ -135,6 +136,15 @@ class WriteoffDialogMixin:
         if issue["kind"] != "quantity" or issue.get("balance_measure") not in (None, 0):
             available_parts.append(f"{_display_bot_number(issue['balance_measure'])} {issue['measure_unit']}")
         lines.append(f"Доступно: {' / '.join(available_parts)}")
+        # ТЗ п.10: показати не лише скільки треба й скільки є, а й скільки
+        # саме не вистачає.
+        shortage = shortage_line(
+            issue["requested"],
+            issue["balance_qty"] if issue["kind"] == "quantity" else issue["balance_measure"],
+            issue["requested_unit"],
+        )
+        if shortage:
+            lines.append(shortage)
         return "\n".join(lines)
 
     def _writeoff_stock_issue_reply(self, store, context, payload, issue):

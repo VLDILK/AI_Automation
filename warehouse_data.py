@@ -6424,6 +6424,14 @@ def find_stock_row_id(store, position, item):
     return None
 
 
+def shortage_line(requested, available, unit):
+    """ТЗ п.10: скільки саме не вистачає. Порожньо, коли нестачі немає."""
+    missing = _number_value(requested) - _number_value(available)
+    if missing <= 0:
+        return ""
+    return "Не хватает: %s %s" % (_display_bot_number(round(missing, 6)), unit)
+
+
 def _sheet_amount(values, columns):
     """Сума («Сумма» / «Стоимость, MDL») з рядка листа або None."""
     index = columns.get("total_amount")
@@ -6768,7 +6776,9 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
     set_value(values, columns.get("manager_final"), manager)
     set_value(values, columns.get("manual_manager"), user.get("full_name") or user.get("username"))
 
-    comment_parts = [f"Telegram: {payload.get('original_text', '')}"]
+    # Без тексту з чату (усі операції тепер із форм) префікс лишався порожнім
+    # хвостом «Telegram:  | коментар» - не пишемо його взагалі.
+    comment_parts = [f"Telegram: {payload['original_text']}"] if payload.get("original_text") else []
     if payload.get("comment"):
         comment_parts.append(payload["comment"])
     set_value(values, columns.get("comment"), " | ".join(part for part in comment_parts if part))
@@ -6910,7 +6920,9 @@ def income_sheet_values(store, payload, item, warehouse_row, warehouse_columns_m
         total_amount = _priced_amount(price_per_unit, measure_for_price)
     set_value(values, columns.get("total_amount"), total_amount)
 
-    comment_parts = [f"Telegram: {payload.get('original_text', '')}"]
+    # Без тексту з чату (усі операції тепер із форм) префікс лишався порожнім
+    # хвостом «Telegram:  | коментар» - не пишемо його взагалі.
+    comment_parts = [f"Telegram: {payload['original_text']}"] if payload.get("original_text") else []
     if payload.get("comment"):
         comment_parts.append(payload["comment"])
     set_value(values, columns.get("comment"), " | ".join(part for part in comment_parts if part))
@@ -7557,6 +7569,12 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                     }
                 row_values_by_row_id[row_id] = row_values
 
+        # Номер документа рахується ДО рухів: раніше він з'являвся вже після
+        # них, і рухи приходу лишались без номера (у журналі порожня «№»,
+        # і форма не могла зібрати позиції одного приходу в один запис).
+        existing_income_count = len(store.fetch_rows(INCOME_SHEET_NAME, 100000, 0))
+        income_document_number = "Приход №%d" % _next_document_number(store, INCOME_SHEET_NAME, existing_income_count)
+
         for position in positions:
             # Крок 3+ "Дії": усі рядки ОДНІЄЇ позиції мають той самий
             # товар/тип (position, не по-рядково) — резолвимо ОДИН раз НА
@@ -7662,6 +7680,11 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                 store.add_stock_movement(
                     {
                         "movement_type": "income",
+                        # ТЗ п.4: коментар видно в історії (колонка «Причина /
+                        # клиент»). ТЗ п.7/9: у приходу тепер є свій номер, тож
+                        # усі його позиції збираються в один запис журналу.
+                        "reason": position_payload.get("comment") or payload.get("comment"),
+                        "document": income_document_number,
                         "source": "telegram",
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
@@ -7686,8 +7709,6 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
         # Той самий персистентний _next_document_number, що вже мають
         # продаж/списання/антисептирование — один номер на ВЕСЬ виклик (усі
         # позиції цього приходу), не по одному на кожен рядок.
-        existing_income_count = len(store.fetch_rows(INCOME_SHEET_NAME, 100000, 0))
-        income_document_number = f"Приход №{_next_document_number(store, INCOME_SHEET_NAME, existing_income_count)}"
         for position in positions:
             position_payload = {**payload, **position}
             for item in position["rows"]:
