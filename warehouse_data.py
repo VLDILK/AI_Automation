@@ -115,22 +115,6 @@ BUILTIN_BOT_COMMANDS = [
         ],
     },
     {
-        "code": "calculator",
-        "title": "Калькулятор",
-        "description": "Посчитать числа, кубатуру по размерам или количество штук по м3.",
-        "aliases": [
-            "калькулятор",
-            "посчитай",
-            "порахуй",
-            "рахуй",
-            "считай",
-            "рассчитай",
-            "сколько кубов",
-            "сколько штук",
-            "порахувати",
-        ],
-    },
-    {
         "code": "help",
         "title": "Помощь",
         "description": "Показать список доступных команд.",
@@ -167,7 +151,6 @@ CUSTOM_BUTTON_ACTIONS = [
     {"code": "start_exchange_form", "section": "обмен", "label": "Начать обмен одной формой"},
     {"code": "start_data_browser_form", "section": "данные", "label": "Показать данные одной формой"},
     {"code": "start_admin_form", "section": "админ", "label": "Админ: журнал операций и коррекция остатков"},
-    {"code": "start_calculator", "section": "прочее", "label": "Открыть калькулятор"},
     {"code": "start_calculator_form", "section": "прочее", "label": "Открыть калькулятор (форма)"},
     {"code": "show_help", "section": "прочее", "label": "Показать справку"},
 ]
@@ -236,7 +219,6 @@ BUILTIN_MIGRATED_CUSTOM_BUTTONS = [
     {"migration_key": "antiseptic_report_section", "label": "АНТИСЕПТИРОВАНИЕ", "action_code": "start_antiseptic_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "sales_by_client_report_section", "label": "Клиенты", "action_code": "start_sales_by_client_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "low_stock_report_section", "label": "Низкий остаток", "action_code": "start_low_stock_report", "layout": "full", "parent_migration_key": "data_menu"},
-    {"migration_key": "calculator", "label": "Калькулятор", "action_code": "start_calculator", "layout": "half", "parent_migration_key": None},
     # Рішення користувача (2026-09-07): «додай кнопку до бота теж».
     # Окремий ключ, а не воскресіння схованої «Калькулятор» вище: ту
     # сховали на пряме прохання (2026-08-18), і вона веде в текстовий
@@ -304,7 +286,6 @@ BOT_MESSAGE_DEFAULTS = {
     ),
     "start_data_browser_form": "Данные склада одной формой.",
     "start_admin_form": "Админ-форма: журнал операций и коррекция остатков. Нажмите кнопку ниже.",
-    "start_calculator": "Что посчитать?",
     "start_calculator_form": "Калькулятор. Откройте форму:",
     "show_help": (
         "Доступные команды:\n"
@@ -2235,6 +2216,7 @@ class ExcelSqliteStore:
         self.last_measures_filled = 0
         self.last_stock_rows_normalized = 0
         self._apply_standard_menu_policy()
+        self._drop_chat_calculator_once()
         self._backfill_writeoff_root_action_code()
         self._backfill_writeoff_form_root_label()
         self._seed_builtin_operations()
@@ -2542,6 +2524,23 @@ class ExcelSqliteStore:
         {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form",
          "exchange_form", "admin_form", "calculator_form"}
     )
+
+    # Рішення користувача (2026-09-07): «звичайний калькулятор в чаті -
+    # видали зовсім». На вже наявних базах лишаються сліди: рядок команди
+    # з її словами-синонімами, стара (схована) кнопка «Калькулятор» з
+    # мертвою дією і - найважливіше - незакриті стани очікування виразу,
+    # через які бот відповідав «Не смог посчитать» на кожне натискання
+    # меню. Прибираємо все це рівно один раз.
+    def _drop_chat_calculator_once(self):
+        marker = "chat_calculator_removed_v1"
+        with self.conn:
+            done = self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (marker,)).fetchone()
+            if done:
+                return
+            self.conn.execute("DELETE FROM bot_pending_operations WHERE operation_type = 'calculator'")
+            self.conn.execute("DELETE FROM custom_menu_buttons WHERE migration_key = 'calculator'")
+            self.conn.execute("DELETE FROM bot_commands WHERE code = 'calculator'")
+            self.conn.execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, '1')", (marker,))
 
     def _apply_standard_menu_policy(self):
         with self.conn:
@@ -4297,7 +4296,7 @@ class ExcelSqliteStore:
         permissions.WAREHOUSE: (
             "income", "income_form", "sale", "sale_form", "antiseptic_form", "writeoff", "writeoff_form",
             "exchange_form", "data_browser_form", "stock_report_section", "sales_report_section",
-            "antiseptic_report_section", "low_stock_report_section", "calculator", "help",
+            "antiseptic_report_section", "low_stock_report_section", "calculator_form", "help",
         ),
         permissions.ACCOUNTING: (
             "sales_report_section", "antiseptic_report_section", "sales_by_client_report_section",

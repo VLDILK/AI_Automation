@@ -856,19 +856,6 @@ class IncomeSaleFlowDialogMixin:
     # відповідь користувача (тут була знайдена й виправлена пастка з "Нет"
     # у меню підозрілої кількості — див. код нижче по файлу).
     def _handle_pending_operation(self, text, store, context, pending):
-        if pending["operation_type"] == "calculator":
-            if pending["status"] == "wait_calculation":
-                escape_reply = self._calculator_menu_escape_reply(text, store, context)
-                if escape_reply is not None:
-                    return escape_reply
-                reply = self._calculator_reply(text)
-                if self._is_calculator_retry_reply(reply):
-                    return reply
-                store.delete_pending_operation(context["chat_id"], context["user_id"])
-                return reply
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._with_main_menu("Предыдущая операция сброшена. Отправьте запрос заново.", store)
-
         if pending["operation_type"] == "stock_report":
             return self._continue_stock_report(text, store, context, pending)
 

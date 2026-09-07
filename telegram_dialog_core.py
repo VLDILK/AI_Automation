@@ -1582,8 +1582,7 @@ class CoreDialogMixin:
             # ОБМЕН, ДАННЫЕ, Обновить). Тепер - чесна відмова, без pending,
             # тим самим рядком, що й у обміну.
             return self._with_main_menu(
-                "Калькулятор в форме сейчас недоступен (форма не подключена). "
-                "Посчитать можно сообщением: «посчитай 25x50x6000 140 шт».",
+                "Калькулятор сейчас недоступен: форма не подключена.",
                 store,
             )
         return {
@@ -2937,8 +2936,6 @@ class CoreDialogMixin:
             return self._start_stock_browse_filters(store, context)
         if placeholder:
             return self._in_development_reply(placeholder, store)
-        if not pending and self._is_calculator_request(text, _normalize_phrase(text), store):
-            return self._start_calculator_operation(text, store, context)
         if mode == "online_ai":
             return self._build_online_ai_reply(text, store, message)
         if mode == "local_ai":
@@ -3014,8 +3011,6 @@ class CoreDialogMixin:
         command = command_text[0].split("@", 1)[0].lower() if command_text else ""
         if command in {"/status", "/sheets", "/first", "/chatid"}:
             return command.lstrip("/")
-        if self._is_calculator_request(text, _normalize_phrase(text), store):
-            return "calculator"
         return store.find_command_code_in_text(text) or "unknown"
 
     def _pending_log_payload(self, pending):
@@ -3186,8 +3181,6 @@ class CoreDialogMixin:
             return self._start_income_operation(text, store, context)
         if command_code == "stock_sale":
             return self._start_sale_operation(text, store, context)
-        if command_code == "calculator":
-            return self._start_calculator_operation(text, store, context)
         if command_code == "cancel_operation":
             return self._no_active_operation_reply(store)
         if command_code == "help":
