@@ -1373,6 +1373,56 @@ html, body {
   flex: 1;
 }
 
+/* Рядок-селект: вибір зі списку, а не поле для набору (зауваження
+   користувача 2026-09-07). */
+.calc-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid var(--tg-hint);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 15px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.calc-select-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calc-select-empty {
+  color: var(--tg-hint);
+}
+
+.calc-select-caret {
+  margin-left: auto;
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.calc-search {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--tg-hint);
+  border-radius: 10px 10px 0 0;
+  padding: 9px 11px;
+  font-size: 14px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  outline: none;
+}
+
+.calc-list-items {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .calc-list {
   position: absolute;
   left: 0;
@@ -1382,8 +1432,7 @@ html, body {
   background: var(--tg-bg);
   border: 1px solid var(--tg-button);
   border-radius: 10px;
-  max-height: 260px;
-  overflow-y: auto;
+  overflow: hidden;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
 }
 

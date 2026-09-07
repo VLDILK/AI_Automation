@@ -5101,15 +5101,43 @@
     var pickLabel = document.createElement("label");
     pickLabel.textContent = "Размер из таблицы";
     pickWrap.appendChild(pickLabel);
-    var pickInput = document.createElement("input");
-    pickInput.type = "text";
-    pickInput.className = "calc-input calc-pick";
-    pickInput.placeholder = sizes.length ? "Выберите размер" : "В таблице пока нет размеров";
-    pickInput.autocomplete = "off";
-    pickWrap.appendChild(pickInput);
+    // Рядок-селект: видно, що це вибір зі списку, а не поле для набору.
+    var pickEmptyText = sizes.length ? "Выберите размер" : "В таблице пока нет размеров";
+    var pickButton = document.createElement("div");
+    pickButton.className = "calc-select";
+    pickButton.tabIndex = 0;
+    var pickText = document.createElement("span");
+    pickText.className = "calc-select-text calc-select-empty";
+    pickText.textContent = pickEmptyText;
+    var pickCaret = document.createElement("span");
+    pickCaret.className = "calc-select-caret";
+    pickCaret.textContent = "▾";
+    pickButton.appendChild(pickText);
+    pickButton.appendChild(pickCaret);
+    pickWrap.appendChild(pickButton);
+
+    function setPick(value) {
+        pickText.textContent = value || pickEmptyText;
+        pickText.classList.toggle("calc-select-empty", !value);
+    }
+
+    function pickValue() {
+        return pickText.classList.contains("calc-select-empty") ? "" : pickText.textContent;
+    }
     var list = document.createElement("div");
     list.className = "calc-list";
     list.hidden = true;
+    // Пошук лишається (розмірів десятки), але живе ВСЕРЕДИНІ списку - сам
+    // селект від цього полем вводу не стає.
+    var search = document.createElement("input");
+    search.type = "text";
+    search.className = "calc-search";
+    search.placeholder = "Поиск";
+    search.autocomplete = "off";
+    list.appendChild(search);
+    var listItems = document.createElement("div");
+    listItems.className = "calc-list-items";
+    list.appendChild(listItems);
     pickWrap.appendChild(list);
     body.appendChild(pickWrap);
 
@@ -5178,7 +5206,7 @@
     body.appendChild(plainWrap);
 
     function renderList(filter) {
-      list.innerHTML = "";
+      listItems.innerHTML = "";
       var needle = String(filter || "").toLowerCase().replace(",", ".");
       var shown = 0;
       var lastProduct = null;
@@ -5190,7 +5218,7 @@
           var group = document.createElement("div");
           group.className = "calc-group";
           group.textContent = size.product;
-          list.appendChild(group);
+          listItems.appendChild(group);
           lastProduct = size.product;
         }
         var item = document.createElement("div");
@@ -5207,44 +5235,63 @@
         }
         item.addEventListener("mousedown", function (event) { event.preventDefault(); });
         item.addEventListener("click", function () {
-          pickInput.value = size.label;
+          setPick(size.label);
           thicknessInput.value = String(size.thickness).replace(".", ",");
           widthInput.value = String(size.width).replace(".", ",");
           lengthInput.value = String(size.length).replace(".", ",");
-          list.hidden = true;
+          closeList();
           if (size.kind === "linear") { tabEls.linear.click(); }
           else if (size.kind === "area") { tabEls.area.click(); }
           else { recalc(); }
           amountInput.focus();
         });
-        list.appendChild(item);
+        listItems.appendChild(item);
         shown += 1;
       });
       if (!shown) {
         var empty = document.createElement("div");
         empty.className = "calc-group";
         empty.textContent = "Ничего не найдено";
-        list.appendChild(empty);
+        listItems.appendChild(empty);
       }
     }
 
-    pickInput.addEventListener("focus", function () {
+    function openList() {
       if (!sizes.length) { return; }
+      search.value = "";
       renderList("");
       list.hidden = false;
+      pickCaret.textContent = "▴";
+    }
+
+    function closeList() {
+      list.hidden = true;
+      pickCaret.textContent = "▾";
+    }
+
+    function toggleList() {
+      if (list.hidden) { openList(); } else { closeList(); }
+    }
+
+    pickButton.addEventListener("click", toggleList);
+    pickButton.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleList();
+      }
     });
-    pickInput.addEventListener("input", function () {
-      renderList(pickInput.value);
-      list.hidden = false;
-    });
-    pickInput.addEventListener("blur", function () {
-      window.setTimeout(function () { list.hidden = true; }, 120);
+    search.addEventListener("input", function () { renderList(search.value); });
+    // Натиск поза списком згортає його - як і належить випадному списку.
+    document.addEventListener("click", function (event) {
+      if (list.hidden) { return; }
+      if (pickWrap.contains(event.target)) { return; }
+      closeList();
     });
 
     function markManual() {
       // Правка руками не стирає нічого - лише знімає позначку «зі списку».
-      if (pickInput.value && pickInput.value !== "свой размер") {
-        pickInput.value = "свой размер";
+      if (pickValue() && pickValue() !== "свой размер") {
+        setPick("свой размер");
       }
     }
 
@@ -5353,7 +5400,7 @@
         // 2026-09-07). Раніше панель ставила курсор у поле пошуку, а фокус
         // розкриває список - через це він вискакував сам.
         overlay.hidden = false;
-        list.hidden = true;
+        closeList();
       }
     };
   }
