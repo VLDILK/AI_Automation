@@ -182,10 +182,22 @@ class CorrectionWindow:
         return True
 
     def _on_any_click(self, event):
+        """Клік будь-де ПОЗА таблицею фіксує набране й закриває поле.
+
+        Кліки по самій таблиці сюди не доходять свідомо: полотно обробляє
+        свій <Button-1> ПЕРШИМ (_on_body_click -> _on_cell_click), і якби цей
+        обробник відпрацьовував після нього, він закривав би щойно відкрите
+        поле - у рядок неможливо було б нічого ввести (живий випадок
+        2026-09-07 після 0.3.35). Збереження при кліку по таблиці робить сам
+        _on_cell_click.
+        """
         if self.editor is None:
             return
-        if str(event.widget).startswith(str(self.editor)):
-            return
+        widget = str(event.widget)
+        for owner in (self.editor, self.table.body, self.table.header):
+            path = str(owner)
+            if widget == path or widget.startswith(path + "."):
+                return
         self._close_editor()
         self.render()
 
@@ -273,6 +285,11 @@ class CorrectionWindow:
     # ---------------- правка клітинки ----------------
     def _on_cell_click(self, index, key):
         if key != "new" or index >= len(self.visible):
+            # Клік по іншій колонці - те саме, що клік поза таблицею:
+            # набране зберігається, поле закривається.
+            if self.editor is not None:
+                self._close_editor()
+                self.render()
             return
         self.start_edit(index)
 
