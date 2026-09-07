@@ -20,6 +20,7 @@ _EFACTURA_DEFAULT_TEXT = "просьба принять информацию и 
 from settings import DisplaySettingsStore, SettingsStore
 from utils import normalize_length_mm
 from utils import (
+    lath_product_name,
     LATH_PRODUCT_NAME,
     is_lath_row,
     piece_measure,
@@ -1820,10 +1821,15 @@ class CoreDialogMixin:
     # самий факт, через який _webapp_stock_tab_rows нижче вже викликає
     # _split_product_condition. Спільний хелпер тут, щоб Продажи/Списание/
     # Приход не дублювали ту саму 3-рядкову логіку кожен по-своєму.
-    def _webapp_split_product_display(self, product, condition=None):
+    def _webapp_split_product_display(self, product, condition=None, thickness=None, width=None):
         base, suffix = self._split_product_condition(product or "", [])
         clean_product = base or product or ""
         resolved_condition = condition if condition else suffix
+        # Рейка зветься рейкою і на екрані (рішення користувача 2026-09-07):
+        # рядок під старою назвою «Доска AD» з рейковим перерізом
+        # показується як «Рейка», не чекаючи перечитування таблиці.
+        if thickness is not None and width is not None:
+            clean_product = lath_product_name(clean_product, thickness, width) or clean_product
         return clean_product, resolved_condition
 
     def _webapp_stock_tab_rows(self, store):
@@ -1842,6 +1848,9 @@ class CoreDialogMixin:
             # чипи лишились чистими назвами товару.
             base_product, _suffix = self._split_product_condition(product, [])
             display_product = base_product or product
+            display_product = lath_product_name(
+                display_product, row.get("thickness"), row.get("width")
+            ) or display_product
             if display_product and display_product not in categories:
                 categories.append(display_product)
             if row["volume"] is not None:
@@ -1883,7 +1892,9 @@ class CoreDialogMixin:
         report_rows, _error = self._sales_report_rows(store, all_period, None)
         result = []
         for row in report_rows or []:
-            product, condition = self._webapp_split_product_display(row.get("product"))
+            product, condition = self._webapp_split_product_display(
+                row.get("product"), None, row.get("thickness"), row.get("width")
+            )
             result.append({
                 "date": row.get("date"),
                 "client": row.get("client"),
@@ -1930,7 +1941,7 @@ class CoreDialogMixin:
         # цей самий хелпер уже викликає) показувався б коректно.
         for row in rows:
             row["product"], row["condition"] = self._webapp_split_product_display(
-                row.get("product"), row.get("condition")
+                row.get("product"), row.get("condition"), row.get("thickness"), row.get("width")
             )
         return threshold, rows
 
@@ -1950,7 +1961,9 @@ class CoreDialogMixin:
             # і тип..." - "Продукт" тут теж часто містить AD/KD суфіксом у
             # самому тексті (_webapp_split_product_display, той самий
             # хелпер, що й Продажи/Приход вище).
-            row["product"], row["condition"] = self._webapp_split_product_display(row.get("product"))
+            row["product"], row["condition"] = self._webapp_split_product_display(
+                row.get("product"), None, row.get("thickness"), row.get("width")
+            )
         return rows
 
     # Задача користувача (2026-08-14): "Приход" - нова вкладка. ПРИХОД
@@ -1962,7 +1975,9 @@ class CoreDialogMixin:
     def _webapp_movement_tab_rows(self, store):
         rows = movement_report_rows(store)
         for row in rows:
-            row["product"], row["condition"] = self._webapp_split_product_display(row.get("product"), row.get("condition"))
+            row["product"], row["condition"] = self._webapp_split_product_display(
+                row.get("product"), row.get("condition"), row.get("thickness"), row.get("width")
+            )
         return rows
 
     def _webapp_income_tab_rows(self, store):
@@ -1974,7 +1989,9 @@ class CoreDialogMixin:
             # "Состояние"), тому split лише ДОПОВНЮЄ його, якщо порожній
             # (не перезаписує реальне значення) - той самий хелпер, що й
             # Продажи/Списание вище.
-            row["product"], row["condition"] = self._webapp_split_product_display(row.get("product"), row.get("condition"))
+            row["product"], row["condition"] = self._webapp_split_product_display(
+                row.get("product"), row.get("condition"), row.get("thickness"), row.get("width")
+            )
         return rows
 
     # is_admin - Задача користувача: поріг "Низкий остаток" міняти можна
