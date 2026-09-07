@@ -1255,6 +1255,14 @@ html, body {
   cursor: pointer;
 }
 
+/* Реальний баг (2026-09-07): панель була ВИДИМА в кожній формі одразу.
+   Атрибут hidden ховає елемент лише правилом display:none з таблиці
+   браузера - а власне display:flex нижче його перебиває. Без цього рядка
+   калькулятор перекривав приход, продаж і списання. */
+.calc-overlay[hidden] {
+  display: none;
+}
+
 .calc-overlay {
   position: fixed;
   inset: 0;
