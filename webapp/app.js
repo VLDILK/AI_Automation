@@ -5406,25 +5406,13 @@
   }
 
   function attachCalculator(ctx) {
+    // Єдиний вхід у калькулятор - кнопка «КАЛЬКУЛЯТОР (форма)» в меню бота
+    // (вимога користувача 2026-09-07: «калькулятор ОДИН лише має вхід,
+    // через кнопку і все»). У формах операцій калькулятора немає взагалі.
+    if (ctx.mode !== "calculator") { return null; }
     var sizes = ctx.calculator_sizes;
     if (!Array.isArray(sizes)) { return null; }
-    var titleEl = document.getElementById("title");
-    if (!titleEl || titleEl.querySelector(".calc-button")) { return null; }
-    // Кнопкою бота калькулятор відкривається САМ - тоді панель і є екраном,
-    // і кнопка 🧮 в шапці не потрібна (натискати нема на що повертатись).
-    var standalone = ctx.mode === "calculator";
-    var calculator = buildCalculator(sizes, standalone);
-    if (!standalone) {
-      titleEl.classList.add("title-with-calc");
-      var button = document.createElement("button");
-      button.type = "button";
-      button.className = "calc-button";
-      button.textContent = "🧮";
-      button.title = "Калькулятор";
-      titleEl.appendChild(button);
-      button.addEventListener("click", function () { calculator.open(); });
-    }
-    return calculator;
+    return buildCalculator(sizes, true);
   }
 
   function main() {

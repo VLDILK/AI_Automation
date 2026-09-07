@@ -1135,9 +1135,6 @@ class CoreDialogMixin:
                 field["label"] = "Комментарий"
         ctx = {
             "mode": "all_in_one",
-            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
-            # в таблиці складу.
-            "calculator_sizes": stock_size_options(store),
             "kind": "income",
             "title": "Приход одной формой",
             "categories": categories,
@@ -1298,9 +1295,6 @@ class CoreDialogMixin:
         )
         ctx = {
             "mode": "all_in_one",
-            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
-            # в таблиці складу.
-            "calculator_sizes": stock_size_options(store),
             "kind": "sale",
             "title": "Продажа одной формой",
             "categories": categories,
@@ -1376,9 +1370,6 @@ class CoreDialogMixin:
         )
         ctx = {
             "mode": "all_in_one",
-            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
-            # в таблиці складу.
-            "calculator_sizes": stock_size_options(store),
             "kind": "writeoff",
             "title": "Списание одной формой",
             "categories": categories,
@@ -1444,9 +1435,6 @@ class CoreDialogMixin:
                 field["required"] = False
         ctx = {
             "mode": "all_in_one",
-            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
-            # в таблиці складу.
-            "calculator_sizes": stock_size_options(store),
             "kind": "exchange",
             "title": "Обмен одной формой",
             "categories": [],

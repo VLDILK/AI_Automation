@@ -1237,24 +1237,6 @@ html, body {
 }
 
 /* --- Калькулятор у формі (ТЗ п.6) --- */
-.title-with-calc {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.calc-button {
-  margin-left: auto;
-  border: none;
-  background: var(--tg-secondary-bg);
-  color: var(--tg-text);
-  border-radius: 9px;
-  padding: 4px 10px;
-  font-size: 18px;
-  line-height: 1.2;
-  cursor: pointer;
-}
-
 /* Реальний баг (2026-09-07): панель була ВИДИМА в кожній формі одразу.
    Атрибут hidden ховає елемент лише правилом display:none з таблиці
    браузера - а власне display:flex нижче його перебиває. Без цього рядка
