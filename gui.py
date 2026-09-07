@@ -989,8 +989,6 @@ class ExcelViewerApp:
         # й command_alias_editor вище (task #244), поширений і на вікна
         # деталей журналів - "Детально" двічі на той самий запис відкривало
         # ДРУГЕ незалежне вікно. Той самий dict-keyed патерн, за log_id.
-        self._work_log_detail_windows = {}
-        self._action_log_detail_windows = {}
         # Задача користувача (2026-08-15): "синхронізація" - Персонал/
         # Журнали дій тепер тягнуть РЕАЛЬНІ дані client_app.py через тунель
         # (read-only, remote_control_client.fetch_remote_action_log/
@@ -1021,45 +1019,6 @@ class ExcelViewerApp:
         if self._on_ready:
             self._on_ready()
 
-    def _load_excel_into_store(self, store=None):
-        # Задача користувача: "автоматична перевірка при приєднанні нової
-        # таблиці чи є ця вкладка, якщо нема - програма має створити сама" -
-        # ОКРЕМИЙ прохід (не data_only=True, як читання для імпорту нижче -
-        # інакше збереження стерло б формули на інших листах, коментар у
-        # ensure_workbook_has_required_sheets) ПЕРЕД імпортом, щоб
-        # СПИСАНИЕ вже існувало на момент import_workbook нижче.
-        ensure_workbook_has_required_sheets()
-        # Другий крок самозцілення, ПЕРЕД імпортом: доводимо СКЛАД до
-        # еталонного формату. Реальний випадок (2026-08-21) - бот відмовив
-        # у продажу 36 мп ("Доступно: 1033 шт / 0 мп") при повному складі,
-        # бо в таблиці не було жодної колонки мп: погонні метри не було де
-        # зберігати. Дописані колонки одразу ж і заповнюються ("хай
-        # автоматом перераховує відразу"), тому робити це треба саме до
-        # import_workbook - інакше база прочитала б ще порожні колонки.
-        #
-        # Помилку тут навмисно не даємо вбити старт: без цієї правки
-        # програма просто працюватиме як раніше, а падіння лишило б
-        # користувача перед порожнім splash-вікном.
-        try:
-            self._warehouse_repair_plan = repair_warehouse_columns()
-        except Exception as exc:
-            self._warehouse_repair_error = exc
-        workbook = excel_source.open_workbook(data_only=True)
-        try:
-            target_store = store or self.store
-            target_store.import_workbook(workbook, READ_ONLY_SHEETS)
-            # Рейка (2026-09-06): позначені рядки одразу пишуться назад у
-            # таблицю; про правку файлу користувача повідомляє
-            # _show_startup_notices нижче.
-            if target_store.last_stock_rows_normalized:
-                try:
-                    sync_sheet_to_excel(target_store, "СКЛАД")
-                    self._lath_rows_marked = target_store.last_lath_rows_marked
-                    self._measures_filled = target_store.last_measures_filled
-                except Exception as exc:
-                    self._warehouse_repair_error = exc
-        finally:
-            workbook.close()
 
     def _build_main_menu(self):
         self.main_menu_frame = tk.Frame(self.root)
@@ -1561,17 +1520,12 @@ class ExcelViewerApp:
         if view_name == "action_log":
             self._refresh_action_log()
             self.action_log_frame.pack(fill="both", expand=True)
-        elif view_name == "work_log":
-            self._refresh_work_log()
-            self.work_log_frame.pack(fill="both", expand=True)
         else:
             self.journals_hub_frame.pack(fill="both", expand=True)
 
     def show_action_log(self):
         self._show_journals_view("action_log")
 
-    def show_work_log(self):
-        self._show_journals_view("work_log")
 
     def show_commands(self):
         self._refresh_commands()
@@ -1632,81 +1586,6 @@ class ExcelViewerApp:
         elif getattr(self, "current_view", "main") != "main":
             self.show_main_menu()
 
-    def _build_layout(self):
-        self.table_frame = tk.Frame(self.root)
-
-        top_bar = tk.Frame(self.table_frame)
-        top_bar.pack(side="top", fill="x", padx=8, pady=6)
-
-        back_button = tk.Button(top_bar, text=self._t("← Назад"), command=self.show_main_menu)
-        back_button.pack(side="left")
-
-        title = tk.Label(top_bar, text=self._t("Дані / Таблиця"), font=("Segoe UI", 12, "bold"))
-        title.pack(side="left", padx=12)
-
-        self.refresh_table_button = tk.Button(
-            top_bar,
-            text=self._t("Оновити"),
-            command=self.refresh_current_sheet,
-        )
-        self.refresh_table_button.pack(side="left", padx=(0, 8))
-
-        table_body = tk.Frame(self.table_frame)
-        table_body.pack(side="top", fill="both", expand=True)
-
-        # ліва панель (кнопки вкладок), без скролу
-        left_container = tk.Frame(table_body, width=180)
-        left_container.pack(side="left", fill="y")
-        left_container.pack_propagate(False)
-
-        self.buttons_frame = tk.Frame(left_container)
-        self.buttons_frame.pack(side="top", fill="both", expand=True)
-
-        # права панель — таблиця + панель редагування знизу
-        right_container = tk.Frame(table_body)
-        right_container.pack(side="left", fill="both", expand=True)
-
-        self.tree = ttk.Treeview(right_container, show="headings")
-        # Задача користувача (2026-08-14, скріншот обрізаних заголовків
-        # "Толщина, мм"/"Ширина, мм"/"Длина, мм"): "зроби окремо
-        # налаштовувану [ширину кожного стовпця]" - show_sheet() раніше
-        # примусово ставив width=120 УСІМ стовпцям на кожен switch_sheet/
-        # рефреш, тож навіть перетягнута вручну межа стовпця миттю
-        # скидалась назад. ButtonRelease-1 - той самий подієвий гачок, що
-        # й Treeview вже використовує для клітинок нижче; порівняння зі
-        # збереженим станом ПЕРЕД записом - щоб не писати settings.json на
-        # кожен звичайний клік по рядку, лише коли ширина справді змінилась.
-        self.tree.bind("<ButtonRelease-1>", self._save_current_column_widths, add="+")
-        self.tree.bind("<Button-1>", self._on_tree_header_click, add="+")
-        vsb = ttk.Scrollbar(right_container, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(right_container, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
-        bottom_frame = tk.Frame(right_container)
-        bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6)
-
-        right_container.rowconfigure(0, weight=1)
-        right_container.columnconfigure(0, weight=1)
-
-        self.edit_button = tk.Button(bottom_frame, text=self._t("Редагувати"), command=self.toggle_edit_mode)
-        self.edit_button.pack(side="left", padx=4)
-
-        self.add_row_button = tk.Button(bottom_frame, text=self._t("Додати рядок"), command=self.add_row)
-        self.delete_row_button = tk.Button(bottom_frame, text=self._t("Видалити рядок"), command=self.delete_row)
-        self.save_button = tk.Button(bottom_frame, text=self._t("Зберегти зміни"), command=self.save_changes)
-
-        self.next_page_button = tk.Button(bottom_frame, text=self._t("Далі"), command=self.next_page)
-        self.next_page_button.pack(side="right", padx=4)
-
-        self.page_label = tk.Label(bottom_frame, text="")
-        self.page_label.pack(side="right", padx=8)
-
-        self.prev_page_button = tk.Button(bottom_frame, text=self._t("Назад"), command=self.previous_page)
-        self.prev_page_button.pack(side="right", padx=4)
 
     # --- Екран налаштувань: режим ШИ, формат дати, довідка ---
     def _build_theme_toggle(self, parent):
@@ -2070,39 +1949,6 @@ class ExcelViewerApp:
         ).pack(anchor="w", fill="x")
         self._apply_theme(frame)
 
-    def _build_work_log_view(self, parent):
-        self.work_log_frame = tk.Frame(parent)
-
-        top_bar = tk.Frame(self.work_log_frame)
-        top_bar.pack(side="top", fill="x", padx=8, pady=6)
-
-        back_button = tk.Button(top_bar, text=self._t("← Назад"), command=lambda: self._show_journals_view("hub"))
-        back_button.pack(side="left")
-
-        title = tk.Label(top_bar, text=self._t("Журнал виконаних робіт"), font=("Segoe UI", 12, "bold"))
-        title.pack(side="left", padx=12)
-
-        refresh_button = tk.Button(top_bar, text=self._t("Обновити"), command=self._refresh_work_log)
-        refresh_button.pack(side="left", padx=8)
-
-        clear_button = tk.Button(top_bar, text=self._t("Очистити журнал"), command=self.clear_work_log)
-        clear_button.pack(side="left", padx=4)
-
-        content = tk.Frame(self.work_log_frame)
-        content.pack(side="top", fill="both", expand=True, padx=20, pady=20)
-
-        header = tk.Frame(content)
-        header.pack(fill="x", pady=(0, 8))
-
-        for text, width in (
-            ("Дата", 20),
-            ("Назва", 30),
-            ("Коротко", 50),
-            ("Дії", 18),
-        ):
-            tk.Label(header, text=self._t(text), width=width, anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left")
-
-        self.work_log_list_frame = self._create_scrollable_list(content)
 
     # Редактор кнопок — показує ВЕСЬ список/дерево вже створених кнопок
     # (зліва, скролиться) + прев'ю обраної кнопки (справа). Кожен рядок:
@@ -4054,7 +3900,6 @@ class ExcelViewerApp:
             # оплати вище, які вже коректно оновлюються).
             if getattr(self, "journals_window", None) is not None and self.journals_window.winfo_exists():
                 self._refresh_action_log()
-                self._refresh_work_log()
             for command_id, entry in list(self._command_alias_editor_windows.items()):
                 editor, alias_title, list_frame = entry
                 if editor.winfo_exists():
@@ -4893,301 +4738,6 @@ class ExcelViewerApp:
         window.bind("<Escape>", lambda event: window.destroy())
         self._center_window(window, width=460, height=340)
 
-    # Задача користувача: "додай змогу додавати таблицю ексель до роботи.
-    # можна як локальний так і онлайн. потрібно вибрати або або" + "мені
-    # потрібно щоб це було просто для користувача у программі" — два радіо
-    # (взаємовиключно), локально: звичайний filedialog; онлайн: один раз
-    # "Увійти через Microsoft" (device-code, MSAL кешує токен — наступні
-    # запуски входу не питають) + вставка посилання на файл ("Копіювати
-    # посилання" в OneDrive/SharePoint). Реальна робота з Excel іде через
-    # excel_source.py (open_workbook/save_workbook) — цей діалог лише пише
-    # обраний режим/дані в settings.json.
-    def open_excel_source_dialog(self):
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Таблиця Excel"))
-        window.transient(self.root)
-        window.grab_set()
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
-        tk.Label(top, text=self._t("Таблиця Excel"), font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
-        tk.Label(
-            top,
-            text=self._t(
-                "Оберіть, звідки програма читає й куди зберігає таблицю — локальний файл на "
-                "цьому ПК, або файл на OneDrive/SharePoint."
-            ),
-            anchor="w", fg="#555555", justify="left", wraplength=520,
-        ).pack(anchor="w", pady=(4, 0))
-
-        body = tk.Frame(window)
-        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
-
-        mode_var = tk.StringVar(value=self.settings.get("excel_source_mode"))
-        local_path_state = {"value": self.settings.get("excel_local_path")}
-
-        # Задача користувача (2026-08-14): "давай тепер зробимо коли новий
-        # підключаємо файл щоб питало підтвердження" — питання ЛИШЕ коли
-        # це справді ЗМІНА вже підключеного файлу (excel_source.
-        # is_real_source_switch), а не найперше підключення.
-        _SOURCE_SWITCH_WARNING = self._t(
-            "Ви підключаєте інший файл. Нумерація документів, підказки "
-            "«останні використані», вивчені імена клієнтів і історія рухів "
-            "(приход/продажа/списання/антисептирування) стосуються лише "
-            "файлу, який був підключений раніше, і почнуться заново для "
-            "нового файлу. Сам вміст таблиць це не зачіпає. Продовжити?"
-        )
-
-        mode_row = tk.Frame(body)
-        mode_row.pack(fill="x", pady=(0, 12))
-
-        local_frame = tk.Frame(body)
-        online_frame = tk.Frame(body)
-
-        def refresh_mode():
-            if mode_var.get() == "local":
-                online_frame.pack_forget()
-                local_frame.pack(fill="x")
-            else:
-                local_frame.pack_forget()
-                online_frame.pack(fill="x")
-
-        tk.Radiobutton(
-            mode_row, text=self._t("Локально"), variable=mode_var, value="local", command=refresh_mode,
-        ).pack(side="left")
-        tk.Radiobutton(
-            mode_row, text=self._t("Онлайн (OneDrive/SharePoint)"), variable=mode_var, value="online",
-            command=refresh_mode,
-        ).pack(side="left", padx=(16, 0))
-
-        local_path_label = tk.Label(local_frame, anchor="w", justify="left", wraplength=480, fg="#333333")
-        local_path_label.pack(anchor="w", pady=(0, 8))
-
-        def refresh_local_label():
-            path = local_path_state["value"]
-            local_path_label.configure(
-                text=self._t("Обрано: {value}").format(value=path)
-                if path else self._t("Типовий файл програми (test_sklad.xlsx).")
-            )
-
-        def choose_local_file():
-            initial_dir = self.settings.get("last_file_dialog_dir") or "C:\\"
-            if not Path(initial_dir).exists():
-                initial_dir = "C:\\"
-            selected_file = filedialog.askopenfilename(
-                title=self._t("Оберіть Excel-файл"),
-                initialdir=initial_dir,
-                filetypes=(("Excel files", "*.xlsx"), ("All files", "*.*")),
-            )
-            if not selected_file:
-                return
-            selected_path = Path(selected_file)
-            local_path_state["value"] = str(selected_path)
-            self.settings.set("last_file_dialog_dir", str(selected_path.parent))
-            refresh_local_label()
-
-        tk.Button(local_frame, text=self._t("Оберіть файл"), command=choose_local_file).pack(anchor="w")
-        refresh_local_label()
-
-        online_status_var = tk.StringVar()
-
-        def refresh_online_status():
-            if self.settings.get("excel_online_file_name"):
-                online_status_var.set(excel_source.current_source_label())
-            else:
-                online_status_var.set(self._t("Не підключено."))
-
-        tk.Label(
-            online_frame, textvariable=online_status_var, anchor="w", justify="left", wraplength=480,
-            fg="#333333",
-        ).pack(anchor="w", pady=(0, 10))
-
-        def reset_onedrive_sign_in_state():
-            self._onedrive_sign_in_in_progress = False
-            if sign_in_button.winfo_exists():
-                sign_in_button.config(state="normal")
-
-        def show_device_code_popup(flow, cache):
-            code_window = tk.Toplevel(window)
-            code_window.title(self._t("Вхід через Microsoft"))
-            code_window.transient(window)
-            # Свіжий пере-аудит (2026-08-02): виявлено при написанні тесту на
-            # Notable #8 - виджет-опція pady (не .pack()'ова) не приймає
-            # кортеж (це вже ЗОВНІШНІЙ відступ, а не текстовий padding) -
-            # TclError "bad screen distance" на кожному РЕАЛЬНОМУ показі
-            # цього попапу (ніколи не траплялось раніше, бо CLIENT_ID ще
-            # плейсхолдер - фіча ніколи не доходила до реального виклику).
-            # Кортеж переїжджає в .pack(pady=...), де асиметричний відступ
-            # дійсно підтримується.
-            tk.Label(
-                code_window, text=self._t("Код: {value}").format(value=flow["user_code"]),
-                font=("Segoe UI", 14, "bold"), padx=20,
-            ).pack(pady=(20, 8))
-            tk.Label(code_window, text=flow["verification_uri"], padx=20).pack()
-            tk.Button(
-                code_window, text=self._t("Відкрити сторінку входу"),
-                command=lambda: webbrowser.open(flow["verification_uri"]),
-            ).pack(pady=12)
-            tk.Label(code_window, text=self._t("Очікування входу..."), padx=20).pack(pady=(0, 16))
-            self._center_window(code_window, width=360, height=220)
-
-            def wait_for_login():
-                try:
-                    _token, username = onedrive_sync.complete_device_flow(flow, cache)
-                except Exception as exc:
-                    error_text = str(exc)
-                    self._run_on_main_thread(lambda: (
-                        reset_onedrive_sign_in_state(), code_window.destroy(), messagebox.showerror(
-                            self._t("Таблиця Excel"), error_text,
-                        ),
-                    ))
-                    return
-
-                # Свіжий пере-аудит (2026-08-02, Notable #8): settings.set(...)
-                # раніше викликався напряму з фонового потоку, на відміну від
-                # сусіднього connect_link()'s worker(), що вже коректно
-                # переносить збереження в root.after(0, ...) - вирівняно.
-                def apply():
-                    self.settings.set("excel_online_account", username)
-                    reset_onedrive_sign_in_state()
-                    code_window.destroy()
-                    refresh_online_status()
-
-                self._run_on_main_thread(apply)
-
-            threading.Thread(target=wait_for_login, daemon=True).start()
-
-        def sign_in():
-            # Свіжий пере-аудит (New-Minor #5): без цього гварда повторний
-            # клік поки перший вхід ще триває запускав би ДРУГИЙ одночасний
-            # device-flow - реальний потік роботи ширший за сам цей потік
-            # (show_device_code_popup/wait_for_login запускає ДРУГИЙ, довший
-            # фоновий потік), тож прапорець/кнопка скидаються на КОЖНІЙ
-            # термінальній гілці всього флоу, не лише тут.
-            if self._onedrive_sign_in_in_progress:
-                return
-            self._onedrive_sign_in_in_progress = True
-            sign_in_button.config(state="disabled")
-
-            def worker():
-                try:
-                    flow, cache = onedrive_sync.start_device_flow()
-                except Exception as exc:
-                    error_text = str(exc)
-                    self._run_on_main_thread(lambda: (
-                        reset_onedrive_sign_in_state(),
-                        messagebox.showerror(self._t("Таблиця Excel"), error_text),
-                    ))
-                    return
-                self._run_on_main_thread(lambda: show_device_code_popup(flow, cache))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        sign_in_button = tk.Button(online_frame, text=self._t("Увійти через Microsoft"), command=sign_in)
-        sign_in_button.pack(anchor="w", pady=(0, 12))
-
-        link_row = tk.Frame(online_frame)
-        link_row.pack(fill="x", pady=(0, 8))
-        tk.Label(link_row, text=self._t("Посилання на файл:"), anchor="w").pack(side="left")
-        link_entry = tk.Entry(link_row, width=40)
-        link_entry.pack(side="left", padx=(8, 0), fill="x", expand=True)
-
-        def connect_link():
-            share_url = link_entry.get().strip()
-            if not share_url:
-                return
-
-            # Аудит коду: resolve_share_link — реальний HTTP-запит до Microsoft
-            # Graph, раніше виконувався напряму в головному потоці й міг на мить
-            # "підвісити" вікно — той самий фоновий-потік патерн, що вже є в
-            # sign_in() вище.
-            # Свіжий пере-аудит (2026-08-02, Notable #8): get_access_token_
-            # silent() (теж мережевий виклик — MSAL оновлює прострочений
-            # токен через token-endpoint) раніше лишався СИНХРОННИМ прямо тут,
-            # ПЕРЕД стартом фонового потоку — той самий клас "підвисання",
-            # який цей фікс мав закрити. Обидва мережеві виклики (токен +
-            # resolve_share_link) тепер разом усередині ОДНОГО фонового
-            # потоку — половинчастий фікс (лише одне з двох у фоні) створив
-            # би або те саме зависання, або гонку "потік стартував, але
-            # результат читається одразу й синхронно після старту".
-            def worker():
-                try:
-                    token, _username = onedrive_sync.get_access_token_silent()
-                    if not token:
-                        self._run_on_main_thread(
-                            lambda: messagebox.showerror(
-                                self._t("Таблиця Excel"), self._t("Спочатку увійдіть через Microsoft.")
-                            ),
-                        )
-                        return
-                    drive_id, item_id, file_name = onedrive_sync.resolve_share_link(token, share_url)
-                except Exception as exc:
-                    error_text = str(exc)
-                    self._run_on_main_thread(lambda: messagebox.showerror(self._t("Таблиця Excel"), error_text))
-                    return
-
-                def apply():
-                    new_identity = f"online:{drive_id}:{item_id}"
-                    if excel_source.is_real_source_switch(new_identity):
-                        if not messagebox.askyesno(self._t("Таблиця Excel"), _SOURCE_SWITCH_WARNING):
-                            return
-                    self.settings.set("excel_online_drive_id", drive_id)
-                    self.settings.set("excel_online_item_id", item_id)
-                    self.settings.set("excel_online_file_name", file_name)
-                    refresh_online_status()
-
-                self._run_on_main_thread(apply)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        tk.Button(online_frame, text=self._t("Підключити файл"), command=connect_link).pack(anchor="w")
-
-        def sign_out():
-            onedrive_sync.sign_out()
-            self.settings.set("excel_online_account", "")
-            self.settings.set("excel_online_drive_id", "")
-            self.settings.set("excel_online_item_id", "")
-            self.settings.set("excel_online_file_name", "")
-            refresh_online_status()
-
-        tk.Button(online_frame, text=self._t("Відключити"), command=sign_out).pack(anchor="w", pady=(12, 0))
-
-        refresh_online_status()
-        refresh_mode()
-
-        bottom = tk.Frame(window)
-        bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
-
-        def save_source():
-            new_mode = mode_var.get()
-            if new_mode == "online":
-                new_identity = (
-                    f"online:{self.settings.get('excel_online_drive_id') or ''}:"
-                    f"{self.settings.get('excel_online_item_id') or ''}"
-                )
-            else:
-                new_identity = f"local:{local_path_state['value'] or ''}"
-            if excel_source.is_real_source_switch(new_identity):
-                if not messagebox.askyesno(self._t("Таблиця Excel"), _SOURCE_SWITCH_WARNING):
-                    return
-            self.settings.set("excel_local_path", local_path_state["value"] or "")
-            self.settings.set("excel_source_mode", new_mode)
-            # Реальний привід (2026-08-14): показуємо ОДРАЗУ, який шлях
-            # реально збережено - незалежно від того, чи вже стався реімпорт
-            # (той вимагає перезапуску окремо, повідомлення нижче про це й
-            # попереджає). Так користувач одразу бачить: сам вибір файлу
-            # зберігся правильно, а не губиться десь по дорозі.
-            self.excel_source_status_text.set(excel_source.current_source_label())
-            window.destroy()
-            messagebox.showinfo(
-                self._t("Таблиця Excel"),
-                self._t("Перезапустіть програму, щоб застосувати нове джерело таблиці."),
-            )
-
-        tk.Button(bottom, text=self._t("Зберегти"), width=14, command=save_source).pack(side="right", padx=(8, 0))
-        tk.Button(bottom, text=self._t("Відмінити"), width=14, command=window.destroy).pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy())
-        self._center_window(window, width=560, height=480)
 
     # Задача користувача (2026-08-15): "давай налаштуємо публікацію
     # 'client' оновлень через gui.py" - раніше update_manifest_path не мав
@@ -8129,7 +7679,7 @@ class ExcelViewerApp:
     # Задача користувача (2026-08-14): "вирівняти таблицю... де має бути
     # попередження, що нічого видалено не буде, будуть просто зняті всі
     # фільтри, та вирівняні всі стовпці та рядки під стандарт" - синхронно
-    # (як і save_source/sync_excel_manually поруч - локальний файл, це
+    # (локальний файл, це
     # швидко), із чітким текстом попередження ПЕРЕД дією, як і скрізь
     # інде в цьому застосунку для дій, що торкаються реального Excel-файлу.
     def align_excel_table(self):
@@ -8786,117 +8336,10 @@ class ExcelViewerApp:
         self._action_log_selected_id = None
         self._select_action_log_row(first_id)
 
-    def _refresh_work_log(self):
-        self._clear_frame(self.work_log_list_frame)
-        rows = self.store.list_work_log(200)
-        if not rows:
-            tk.Label(
-                self.work_log_list_frame,
-                text=self._t("Журнал виконаних робіт поки порожній."),
-                anchor="w",
-            ).pack(anchor="w", fill="x", pady=4)
-            return
 
-        for log_id, title, summary, benefit, future_impact, created_at in rows:
-            row = tk.Frame(self.work_log_list_frame)
-            row.pack(fill="x", pady=2)
 
-            values = (
-                self._short_text(self._format_action_log_time(created_at), 20),
-                self._short_text(title, 30),
-                self._short_text(summary.replace("\n", " "), 50),
-            )
-            widths = (20, 30, 50)
-            for value, width in zip(values, widths):
-                tk.Label(row, text=value, width=width, anchor="w").pack(side="left")
 
-            detail_button = tk.Button(
-                row,
-                text=self._t("Детально"),
-                command=lambda item_id=log_id: self.open_work_log_details(item_id),
-            )
-            detail_button.pack(side="left", padx=(8, 0))
 
-            delete_button = tk.Button(
-                row,
-                text=self._t("Видалити"),
-                command=lambda item_id=log_id: self.delete_work_log_record(item_id),
-            )
-            delete_button.pack(side="left", padx=(4, 0))
-
-    def delete_work_log_record(self, log_id):
-        if not messagebox.askyesno(
-            self._t("Журнал виконаних робіт"),
-            self._t("Видалити запис #{value}?").format(value=log_id),
-            parent=self.root,
-        ):
-            return
-        self.store.delete_work_log_entry(log_id)
-        self._refresh_work_log()
-
-    def clear_work_log(self):
-        if not messagebox.askyesno(
-            self._t("Журнал виконаних робіт"),
-            self._t("Видалити всі записи журналу? Цю дію не можна скасувати."),
-            parent=self.root,
-        ):
-            return
-        self.store.clear_work_log()
-        self._refresh_work_log()
-
-    def open_work_log_details(self, log_id):
-        existing = self._work_log_detail_windows.get(log_id)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
-
-        row = self.store.get_work_log_entry(log_id)
-        if not row:
-            messagebox.showinfo(self._t("Журнал виконаних робіт"), self._t("Запис не знайдено."))
-            return
-
-        log_id, title, summary, benefit, future_impact, created_at = row
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Деталі запису #{value}").format(value=log_id))
-        window.geometry("760x560")
-        self._work_log_detail_windows[log_id] = window
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=12, pady=8)
-        tk.Label(
-            top,
-            text=f"{self._format_action_log_time(created_at)} | {title}",
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-        tk.Button(
-            top, text=self._t("Закрити"),
-            command=lambda: self._close_work_log_detail_window(log_id, window),
-        ).pack(side="right")
-        window.protocol("WM_DELETE_WINDOW", lambda: self._close_work_log_detail_window(log_id, window))
-        window.bind("<Escape>", lambda event: self._close_work_log_detail_window(log_id, window))
-
-        text_widget = tk.Text(window, wrap="word")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        text_widget.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=(0, 12))
-        scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=(0, 12))
-
-        lines = [self._t("Що зроблено:"), summary, ""]
-        if benefit:
-            lines.extend([self._t("Що це дає:"), benefit, ""])
-        if future_impact:
-            lines.extend([self._t("На що вплине в майбутньому:"), future_impact])
-        text_widget.insert("1.0", "\n".join(lines))
-        text_widget.configure(state="normal")
-        self._center_window(window, width=760, height=560)
-
-    def _close_work_log_detail_window(self, log_id, window):
-        if self._work_log_detail_windows.get(log_id) is window:
-            del self._work_log_detail_windows[log_id]
-        window.destroy()
 
     def _parse_action_log_details(self, details_json):
         try:
@@ -8983,63 +8426,6 @@ class ExcelViewerApp:
             )
         return str(reply.get("text", ""))
 
-    def _format_action_log_details(self, log_id, action_type, created_at, details):
-        telegram = details.get("telegram") or {}
-        reply = details.get("reply") or {}
-        pending_before = details.get("pending_before")
-        pending_after = details.get("pending_after")
-        lines = [
-            f"Запись журнала: #{log_id}",
-            f"Время: {self._format_action_log_time(created_at)}",
-            f"Пользователь: {self._action_log_user_label(telegram)}",
-            f"Telegram user_id: {telegram.get('user_id', '')}",
-            f"Telegram chat_id: {telegram.get('chat_id', '')}",
-            "",
-            "Запрос пользователя:",
-            details.get("incoming_text") or "",
-            "",
-            f"Действие: {self._action_log_action_label(details.get('recognized_command') or action_type)}",
-            f"Статус: {self._action_log_status_label(details.get('status'))}",
-            f"Режим обработки: {self._request_processing_mode_title(details.get('mode'))}",
-            f"Версия pipeline: {details.get('pipeline_version', '')}",
-            f"Время обработки: {details.get('duration_ms', '')} мс",
-        ]
-        if pending_before:
-            lines.extend(
-                [
-                    "",
-                    "Операция до сообщения:",
-                    f"Тип: {pending_before.get('operation_type', '')}",
-                    f"Этап: {pending_before.get('status', '')}",
-                ]
-            )
-        if pending_after:
-            lines.extend(
-                [
-                    "",
-                    "Операция после сообщения:",
-                    f"Тип: {pending_after.get('operation_type', '')}",
-                    f"Этап: {pending_after.get('status', '')}",
-                ]
-            )
-        lines.extend(
-            [
-                "",
-                "Ответ пользователю:",
-                self._action_log_reply_label(reply),
-            ]
-        )
-        if details.get("error"):
-            lines.extend(["", "Ошибка:", str(details.get("error"))])
-
-        lines.extend(
-            [
-                "",
-                "Технические данные:",
-                json.dumps(details, ensure_ascii=False, indent=2),
-            ]
-        )
-        return "\n".join(lines)
 
     def _short_text(self, text, max_length):
         text = str(text or "")
@@ -9064,63 +8450,7 @@ class ExcelViewerApp:
         y = root_y + max((root_height - height) // 2, 0)
         window.geometry(f"{width}x{height}+{x}+{y}")
 
-    def open_action_log_details(self, log_id):
-        existing = self._action_log_detail_windows.get(log_id)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
 
-        # Задача користувача (2026-08-15): "синхронізація" - рядок уже
-        # прийшов через тунель у _refresh_action_log вище (закешований у
-        # _remote_action_log_rows) - повторний round-trip тут не потрібен.
-        row = self._remote_action_log_rows.get(log_id)
-        if not row:
-            messagebox.showinfo(self._t("Журнал действий"), self._t("Запись не найдена."))
-            return
-
-        log_id, action_type, details_json, created_at = row
-        details = self._parse_action_log_details(details_json)
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Деталі журналу дій #{value}").format(value=log_id))
-        window.geometry("760x560")
-        self._action_log_detail_windows[log_id] = window
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=12, pady=8)
-        tk.Label(
-            top,
-            text=(
-                f"{self._format_action_log_time(created_at)} | "
-                f"{self._action_log_action_label(details.get('recognized_command') or action_type)}"
-            ),
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-        tk.Button(
-            top, text=self._t("Закрыть"),
-            command=lambda: self._close_action_log_detail_window(log_id, window),
-        ).pack(side="right")
-        window.protocol("WM_DELETE_WINDOW", lambda: self._close_action_log_detail_window(log_id, window))
-        window.bind("<Escape>", lambda event: self._close_action_log_detail_window(log_id, window))
-
-        text_widget = tk.Text(window, wrap="word")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        text_widget.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=(0, 12))
-        scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=(0, 12))
-        text_widget.insert(
-            "1.0",
-            self._format_action_log_details(log_id, action_type, created_at, details),
-        )
-        text_widget.configure(state="normal")
-        self._center_window(window, width=760, height=560)
-
-    def _close_action_log_detail_window(self, log_id, window):
-        if self._action_log_detail_windows.get(log_id) is window:
-            del self._action_log_detail_windows[log_id]
-        window.destroy()
 
     # --- Команди бота і персонал (список Telegram-користувачів) ---
     def _refresh_commands(self):
@@ -10769,158 +10099,14 @@ class ExcelViewerApp:
     def _set_telegram_status_threadsafe(self, text):
         self._run_on_main_thread(lambda: self.telegram_status_text.set(text))
 
-    # --- Таблиця даних: перегляд, редагування, збереження в Excel ---
-    def _build_sheet_buttons(self):
-        for sheet_name in self.store.sheet_names():
-            btn = tk.Button(
-                self.buttons_frame,
-                text=sheet_name,
-                width=18,
-                command=lambda name=sheet_name: self.switch_sheet(name),
-            )
-            btn.pack(pady=4, padx=4)
 
-    def switch_sheet(self, sheet_name):
-        if self.edit_mode and self.has_unsaved_changes:
-            if not messagebox.askyesno(
-                self._t("Незбережені зміни"),
-                self._t("У вас є незбережені зміни в поточній вкладці. Перейти без збереження?"),
-            ):
-                return
-            if not self._discard_current_sheet_changes():
-                return
-        if self.edit_mode:
-            self._exit_edit_mode()
-        self.show_sheet(sheet_name)
 
-    def show_sheet(self, sheet_name):
-        self.current_sheet = sheet_name
-        self.current_page = 0
-        self.current_headers = self.store.get_headers(sheet_name)
-        self.total_rows = self.store.count_rows(sheet_name)
 
-        saved_widths = (self.settings.get("table_column_widths") or {}).get(sheet_name, {})
-        self.column_filters[sheet_name] = dict((self.settings.get("table_column_filters") or {}).get(sheet_name, {}))
-        columns = [f"col{i}" for i in range(len(self.current_headers))]
-        self.tree["columns"] = columns
-        for col_id, header in zip(columns, self.current_headers):
-            title = str(header) if header is not None else ""
-            self.tree.heading(col_id, text=self._column_heading_text(sheet_name, title))
-            width = saved_widths.get(title) or self._default_column_width(title)
-            self.tree.column(col_id, width=width, anchor="w")
 
-        if self.store.is_read_only(sheet_name):
-            self.edit_button.config(state="disabled")
-        else:
-            self.edit_button.config(state="normal")
 
-        self._update_refresh_button_state()
-        self._refresh_page()
 
-    def _default_column_width(self, title):
-        return max(80, min(280, len(title) * 8 + 30))
 
-    def _save_current_column_widths(self, _event=None):
-        if not self.current_sheet or not self.current_headers:
-            return
-        columns = self.tree["columns"]
-        widths = {
-            (str(header) if header is not None else ""): self.tree.column(col_id, "width")
-            for col_id, header in zip(columns, self.current_headers)
-        }
-        all_widths = self.settings.get("table_column_widths") or {}
-        if all_widths.get(self.current_sheet) == widths:
-            return
-        all_widths[self.current_sheet] = widths
-        self.settings.set("table_column_widths", all_widths)
 
-    def _column_heading_text(self, sheet_name, title):
-        value = self.column_filters.get(sheet_name, {}).get(title)
-        return f"{title}  [{value}]" if value else title
-
-    # Клік у ЗАГОЛОВОК стовпця (не в саму клітинку - identify_region
-    # відрізняє, "heading" саме той рядок з назвами стовпців, який
-    # користувач мав на увазі скріншотом обрізаних заголовків) відкриває
-    # маленьке поле вводу для текстового фільтра по цьому стовпцю.
-    def _on_tree_header_click(self, event):
-        if not self.current_sheet or self.tree.identify_region(event.x, event.y) != "heading":
-            return
-        col_ref = self.tree.identify_column(event.x)
-        if not col_ref.startswith("#"):
-            return
-        col_index = int(col_ref[1:]) - 1
-        if col_index < 0 or col_index >= len(self.current_headers):
-            return
-        header = self.current_headers[col_index]
-        title = str(header) if header is not None else ""
-        self._open_column_filter_popup(event, title)
-
-    # Простий tk.Toplevel БЕЗ .transient() - той самий, уже закритий
-    # висновок про немодальні вікна в цьому застосунку (журнали/персонал/
-    # таймери): .transient() на немодальному вікні спричиняв реальний
-    # z-order баг.
-    def _open_column_filter_popup(self, event, title):
-        if self.filter_popup_window is not None and self.filter_popup_window.winfo_exists():
-            self.filter_popup_window.destroy()
-        popup = tk.Toplevel(self.root)
-        popup.title(self._t("Фільтр"))
-        popup.geometry(f"220x104+{event.x_root}+{event.y_root}")
-        popup.resizable(False, False)
-        self.filter_popup_window = popup
-
-        tk.Label(popup, text=title, anchor="w", wraplength=200, font=("Segoe UI", 9, "bold")).pack(
-            fill="x", padx=8, pady=(8, 4)
-        )
-        entry = tk.Entry(popup)
-        entry.insert(0, self.column_filters.get(self.current_sheet, {}).get(title, ""))
-        entry.pack(fill="x", padx=8)
-        entry.focus_set()
-        entry.select_range(0, "end")
-
-        def apply_filter(_event=None):
-            self._set_column_filter(title, entry.get().strip())
-            popup.destroy()
-
-        def clear_filter():
-            self._set_column_filter(title, "")
-            popup.destroy()
-
-        entry.bind("<Return>", apply_filter)
-        popup.bind("<Escape>", lambda _event: popup.destroy())
-
-        buttons = tk.Frame(popup)
-        buttons.pack(fill="x", padx=8, pady=8)
-        tk.Button(buttons, text=self._t("Очистити"), command=clear_filter).pack(side="left")
-        tk.Button(buttons, text=self._t("Застосувати"), command=apply_filter).pack(side="right")
-
-        # Реальний баг (аудит коду, 2026-08-15): цей попап - один з небагатьох
-        # у програмі, що НЕ йде через _center_window (позиція прив'язана до
-        # кліку на заголовку колонки, не до центру вікна) - без прямого
-        # виклику лишався б незатемізованим у темному режимі.
-        self._apply_theme(popup)
-
-    def _set_column_filter(self, title, value):
-        if not self.current_sheet:
-            return
-        sheet_filters = self.column_filters.setdefault(self.current_sheet, {})
-        if value:
-            sheet_filters[title] = value
-        else:
-            sheet_filters.pop(title, None)
-
-        all_filters = self.settings.get("table_column_filters") or {}
-        if sheet_filters:
-            all_filters[self.current_sheet] = sheet_filters
-        else:
-            all_filters.pop(self.current_sheet, None)
-        self.settings.set("table_column_filters", all_filters)
-
-        for col_id, header in zip(self.tree["columns"], self.current_headers):
-            header_title = str(header) if header is not None else ""
-            self.tree.heading(col_id, text=self._column_heading_text(self.current_sheet, header_title))
-
-        self.current_page = 0
-        self._refresh_page()
 
     # Фільтр - підрядок, регістронезалежно, ПО ВСІХ активних стовпцях
     # одночасно (AND, не OR) - той самий принцип, що вже усталений у
@@ -10940,96 +10126,9 @@ class ExcelViewerApp:
                 result.append((row_id, row_values))
         return result
 
-    def _update_refresh_button_state(self):
-        if not hasattr(self, "refresh_table_button"):
-            return
-        if not self.current_sheet or self._is_statistics_sheet(self.current_sheet):
-            self.refresh_table_button.pack_forget()
-            return
-        if not self.refresh_table_button.winfo_manager():
-            self.refresh_table_button.pack(side="left", padx=(0, 8))
-        self.refresh_table_button.config(state="normal")
 
-    def refresh_current_sheet(self):
-        if not self.current_sheet or self._is_statistics_sheet(self.current_sheet):
-            return
 
-        if self.edit_mode and self.has_unsaved_changes:
-            action = self._ask_refresh_unsaved_action()
-            if action == "cancel":
-                return
-            if action == "save":
-                if not self._save_current_sheet_to_excel(show_success=False):
-                    return
-                self._exit_edit_mode()
-            elif action == "discard":
-                if not self._discard_current_sheet_changes():
-                    return
-                self._exit_edit_mode()
 
-        self.total_rows = self.store.count_rows(self.current_sheet)
-        self._refresh_page()
-
-    def _is_statistics_sheet(self, sheet_name):
-        name = str(sheet_name or "").upper()
-        return sheet_name in READ_ONLY_SHEETS or "АНАЛИТИКА" in name or "СТАТИСТ" in name
-
-    def _ask_refresh_unsaved_action(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title(self._t("Незбережені зміни"))
-        dialog.geometry("520x210")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        result = {"action": "cancel"}
-
-        content = tk.Frame(dialog, padx=18, pady=16)
-        content.pack(fill="both", expand=True)
-
-        tk.Label(
-            content,
-            text=self._t("У поточній вкладці є незбережені зміни."),
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
-        ).pack(anchor="w", fill="x")
-        tk.Label(
-            content,
-            text=self._t("Що зробити перед оновленням таблиці?"),
-            anchor="w",
-            justify="left",
-        ).pack(anchor="w", fill="x", pady=(6, 16))
-
-        buttons = tk.Frame(content)
-        buttons.pack(side="bottom", fill="x")
-
-        def choose(action):
-            result["action"] = action
-            dialog.destroy()
-
-        tk.Button(
-            buttons,
-            text=self._t("Зберегти та оновити"),
-            width=20,
-            command=lambda: choose("save"),
-        ).pack(side="left", padx=(0, 8))
-        tk.Button(
-            buttons,
-            text=self._t("Оновити без збереження"),
-            width=22,
-            command=lambda: choose("discard"),
-        ).pack(side="left", padx=(0, 8))
-        tk.Button(
-            buttons,
-            text=self._t("Скасувати"),
-            width=12,
-            command=lambda: choose("cancel"),
-        ).pack(side="right")
-
-        dialog.bind("<Escape>", lambda event: choose("cancel"))
-        self._center_window(dialog, width=520, height=210)
-        dialog.wait_window()
-        return result["action"]
 
     def _page_count(self):
         if not self.total_rows:
@@ -11089,165 +10188,16 @@ class ExcelViewerApp:
             state="normal" if self.current_page < page_count - 1 else "disabled"
         )
 
-    def _matching_filtered_page_cache(self):
-        if self._filtered_page_cache is None:
-            return None
-        cached_sheet, cached_signature, cached_rows = self._filtered_page_cache
-        active_filters = self.column_filters.get(self.current_sheet) if self.current_sheet else None
-        if not active_filters or cached_sheet != self.current_sheet:
-            return None
-        if cached_signature != tuple(sorted(active_filters.items())):
-            return None
-        return cached_rows
 
-    def previous_page(self):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._refresh_page(cached_filtered_rows=self._matching_filtered_page_cache())
 
-    def next_page(self):
-        if self.current_page < self._page_count() - 1:
-            self.current_page += 1
-            self._refresh_page(cached_filtered_rows=self._matching_filtered_page_cache())
 
     # ---- режим редагування ----
 
-    def toggle_edit_mode(self):
-        if self.edit_mode:
-            if self.has_unsaved_changes and not messagebox.askyesno(
-                self._t("Скасувати редагування"),
-                self._t("Скасувати незбережені зміни в поточній вкладці?"),
-            ):
-                return
-            if not self._discard_current_sheet_changes():
-                return
-            self._exit_edit_mode()
-            self.show_sheet(self.current_sheet)
-        else:
-            if not self.current_sheet or self.store.is_read_only(self.current_sheet):
-                messagebox.showinfo(
-                    self._t("Лише перегляд"),
-                    self._t("Цей лист поки доступний тільки для перегляду."),
-                )
-                return
-            self.edit_mode = True
-            self.has_unsaved_changes = False
-            self.edit_button.config(text=self._t("Скасувати редагування"))
-            self.add_row_button.pack(side="left", padx=4)
-            self.delete_row_button.pack(side="left", padx=4)
-            self.save_button.pack(side="left", padx=4)
-            # add="+" - без цього другий .bind на ту саму подію ПОВНІСТЮ
-            # заміняв би перший (Задача користувача 2026-08-14, ширина
-            # стовпців вище) замість того, щоб обидва спрацьовували разом.
-            self.tree.bind("<ButtonRelease-1>", self._on_double_click, add="+")
 
-    def _exit_edit_mode(self):
-        self.edit_mode = False
-        self.has_unsaved_changes = False
-        self.edit_button.config(text=self._t("Редагувати"))
-        self.add_row_button.pack_forget()
-        self.delete_row_button.pack_forget()
-        self.save_button.pack_forget()
-        self.tree.unbind("<ButtonRelease-1>")
 
-    def _discard_current_sheet_changes(self):
-        if not self.current_sheet:
-            return True
-        try:
-            workbook = excel_source.open_workbook(data_only=True)
-        except RuntimeError as exc:
-            # Аудит коду: раніше тут не було жодного перехоплення — виняток
-            # летів непійманим у Tkinter callback (тихий провал, користувач
-            # не бачив нічого), якщо джерело Excel не налаштоване.
-            messagebox.showerror(self._t("Таблиця Excel"), self._t(str(exc)))
-            return False
-        try:
-            worksheet = workbook[self.current_sheet]
-            self.store.import_sheet(
-                worksheet,
-                self.current_sheet in READ_ONLY_SHEETS,
-            )
-        finally:
-            workbook.close()
-        self.has_unsaved_changes = False
-        return True
 
     @staticmethod
-    def _looks_like_number(text):
-        text = str(text or "").strip()
-        if not text:
-            return False
-        try:
-            float(text.replace(",", "."))
-            return True
-        except ValueError:
-            return False
 
-    def _on_double_click(self, event):
-        if not self.edit_mode or not self.current_sheet:
-            return
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "cell":
-            return
-        column = self.tree.identify_column(event.x)
-        row_id = self.tree.identify_row(event.y)
-        if not row_id:
-            return
-
-        x, y, width, height = self.tree.bbox(row_id, column)
-        current_value = self.tree.set(row_id, column)
-        column_index = int(column.replace("#", "")) - 1
-
-        entry = tk.Entry(self.tree)
-        entry.place(x=x, y=y, width=width, height=height)
-        entry.insert(0, current_value)
-        entry.focus()
-        committed = {"done": False}
-
-        def commit(event=None):
-            if committed["done"]:
-                return
-            committed["done"] = True
-            new_value = entry.get()
-            entry.destroy()
-            # Аудит коду: раніше текст замість числа в раніше числовій
-            # клітинці мовчки обнулявся (utils._number_value("текст") == 0)
-            # — одна випадкова літера в залишку/ціні губила реальне значення
-            # без жодного попередження. Перевіряємо лише коли стара клітинка
-            # ВЖЕ була числом (текстові колонки на кшталт "Порода"/"Клиент"
-            # це не зачіпає) і нове значення непорожнє й нечислове —
-            # порожнє значення й далі приймається як 0, як і раніше.
-            if (
-                self._looks_like_number(current_value)
-                and new_value.strip()
-                and not self._looks_like_number(new_value)
-            ):
-                messagebox.showerror(
-                    self._t("Некоректне значення"),
-                    self._t('Очікується число, введено «{value}» — зміну скасовано.').format(value=new_value),
-                )
-                return
-            # Реальна гонка з аудиту: читання всього рядка й запис усього
-            # рядка назад раніше не мали жодного блокування між ними — якщо
-            # бот саме тоді комітив продаж/прихід у ЦЕЙ САМИЙ рядок (Telegram
-            # і GUI тримають ОКРЕМІ з'єднання до одного файлу), запис тут міг
-            # тихо відкотити щойно оновлений ботом залишок застарілою копією
-            # (той самий клас багу, що й виправлений TOCTOU в
-            # apply_sale_operation, warehouse_data.py). BEGIN IMMEDIATE
-            # одразу набуває блокування — читання й запис тепер один
-            # нероздільний крок.
-            with self.store.conn:
-                self.store.conn.execute("BEGIN IMMEDIATE")
-                row_values = self.store.get_row(int(row_id))
-                while len(row_values) < len(self.current_headers):
-                    row_values.append("")
-                row_values[column_index] = new_value
-                self.store.update_row(int(row_id), row_values)
-            self.tree.set(row_id, column, new_value)
-            self.has_unsaved_changes = True
-
-        entry.bind("<Return>", commit)
-        entry.bind("<FocusOut>", commit)
 
     def add_row(self):
         if not self.current_sheet or self.store.is_read_only(self.current_sheet):
@@ -11259,88 +10209,10 @@ class ExcelViewerApp:
         self.current_page = self._page_count() - 1
         self._refresh_page()
 
-    def delete_row(self):
-        if not self.current_sheet or self.store.is_read_only(self.current_sheet):
-            return
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showinfo(self._t("Видалення рядка"), self._t("Оберіть рядок для видалення."))
-            return
-        # Аудит коду: усі ІНШІ видалення в програмі (кнопка, спосіб оплати,
-        # поле-запит, користувач) мають підтвердження — тут його чомусь не було.
-        if len(selected) == 1:
-            confirmed = messagebox.askyesno(self._t("Видалення рядка"), self._t("Видалити обраний рядок?"))
-        else:
-            confirmed = messagebox.askyesno(
-                self._t("Видалення рядка"),
-                self._t("Видалити обрані рядки ({count})?").format(count=len(selected)),
-            )
-        if not confirmed:
-            return
-        self.store.delete_rows([int(item) for item in selected])
-        self.has_unsaved_changes = True
-        self._refresh_page()
 
-    def save_changes(self):
-        if not self._save_current_sheet_to_excel(show_success=True):
-            return
-        self._exit_edit_mode()
-        self.show_sheet(self.current_sheet)
 
-    def _save_current_sheet_to_excel(self, show_success=True):
-        if not self.current_sheet:
-            return False
-        if self.store.is_read_only(self.current_sheet):
-            messagebox.showinfo(self._t("Лише перегляд"), self._t("Цей лист не синхронізується назад в Excel."))
-            return False
 
-        try:
-            self._sync_current_sheet_to_excel()
-        except PermissionError:
-            messagebox.showerror(
-                self._t("Excel-файл відкритий"),
-                self._t("Не удалось сохранить файл. Закройте Excel-файл и попробуйте еще раз."),
-            )
-            return False
-        except OSError as exc:
-            messagebox.showerror(self._t("Ошибка сохранения"), f"Не удалось сохранить файл:\n{exc}")
-            return False
-        except RuntimeError as exc:
-            messagebox.showerror(self._t("Таблиця Excel"), self._t(str(exc)))
-            return False
 
-        self.has_unsaved_changes = False
-        if show_success:
-            messagebox.showinfo(self._t("Збережено"), self._t("Зміни збережено у файл."))
-        return True
-
-    def _sync_current_sheet_to_excel(self):
-        sync_sheet_to_excel(self.store, self.current_sheet)
-
-    def sync_excel_manually(self):
-        try:
-            sync_sheets_to_excel(self.store, ["СКЛАД", SALES_SHEET_NAME])
-        except PermissionError:
-            messagebox.showerror(
-                self._t("Excel-файл відкритий"),
-                self._t("Не удалось обновить файл. Закройте Excel-файл и попробуйте еще раз."),
-            )
-            return
-        except OSError as exc:
-            messagebox.showerror(self._t("Ошибка обновления"), f"Не удалось обновить файл:\n{exc}")
-            return
-        except RuntimeError as exc:
-            messagebox.showerror(self._t("Таблиця Excel"), self._t(str(exc)))
-            return
-
-        # Задача користувача: "якщо користувач оновив вручну - тоді таймер
-        # відліку скидається на початок" - ці два листи щойно вручну
-        # синхронізовані, тож фоновий відкладений запис (TelegramBotWorker.
-        # _excel_sync_tick) не повинен зайво повторювати те саме одразу.
-        if self.telegram_worker is not None:
-            self.telegram_worker.clear_excel_dirty(["СКЛАД", SALES_SHEET_NAME])
-
-        messagebox.showinfo(self._t("Excel оновлено"), self._t("Дані з SQLite записано в Excel."))
 
     def on_close(self):
         if self.edit_mode and self.has_unsaved_changes:
