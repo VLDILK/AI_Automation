@@ -10,6 +10,8 @@ from warehouse_data import (
     BOT_MESSAGE_DEFAULTS,
 )
 
+from utils import LATH_PRODUCT_NAME
+
 class MenuDialogMixin:
 
     # Усі 5 колишніх пунктів головного меню (ПРИХОД/РЕАЛИЗАЦИЯ/ДАННЫЕ/
@@ -367,6 +369,7 @@ class MenuDialogMixin:
             "keyboard": [
                 [{"text": "ДОСКА AD"}, {"text": "ДОСКА KD"}],
                 [{"text": "ОСБ"}, {"text": "ВАГОНКА"}],
+                [{"text": "РЕЙКА"}],
                 [{"text": "ВСЕ ТОВАРЫ"}],
                 [{"text": "Фильтры"}],
                 [{"text": "Назад"}, {"text": "Главное меню"}],
@@ -404,6 +407,10 @@ class MenuDialogMixin:
             "доска ad": "Доска AD",
             "доска kd": "Доска KD",
             "вагонка": "Вагонка",
+            # Рейка - окрема категорія (рішення користувача 2026-09-07):
+            # у клітинці «Продукт» стоїть просто «Рейка», сухість AD/KD - у
+            # своїй колонці, тож одна кнопка показує і те, і те.
+            "рейка": LATH_PRODUCT_NAME,
         }
         return mapping.get(normalized)
 

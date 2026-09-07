@@ -345,6 +345,27 @@ BUILTIN_OPERATIONS = [
      "label": "ОСБ", "prefill": {"product": "ОСБ"}, "condition_identity": False},
     {"builtin_key": "writeoff_vagonka", "kind": "writeoff", "parent_action_code": "start_writeoff",
      "label": "ВАГОНКА", "prefill": {"product": "Вагонка"}, "condition_identity": False},
+    # Рейка (рішення користувача 2026-09-07): окрема назва продукту, сухість
+    # лишається окремою категорією - «зараз є поки Рейка АД, але в
+    # майбутньому буде і КД». Одиниця - погонні метри.
+    {"builtin_key": "income_reika_ad", "kind": "income", "parent_action_code": "start_income",
+     "label": "РЕЙКА AD", "prefill": {"product": "Рейка", "condition": "AD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "income_reika_kd", "kind": "income", "parent_action_code": "start_income",
+     "label": "РЕЙКА KD", "prefill": {"product": "Рейка", "condition": "KD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "sale_reika_ad", "kind": "sale", "parent_action_code": "start_sale",
+     "label": "РЕЙКА AD", "prefill": {"product": "Рейка", "condition": "AD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "sale_reika_kd", "kind": "sale", "parent_action_code": "start_sale",
+     "label": "РЕЙКА KD", "prefill": {"product": "Рейка", "condition": "KD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "writeoff_reika_ad", "kind": "writeoff", "parent_action_code": "start_writeoff",
+     "label": "РЕЙКА AD", "prefill": {"product": "Рейка", "condition": "AD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "writeoff_reika_kd", "kind": "writeoff", "parent_action_code": "start_writeoff",
+     "label": "РЕЙКА KD", "prefill": {"product": "Рейка", "condition": "KD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
 ]
 
 # АНТИСЕПТИРОВАНИЕ — окрема "service"-дія (requires_row_identity=0: не
@@ -2723,6 +2744,17 @@ class ExcelSqliteStore:
             if key and key not in by_header:
                 by_header[key] = index
         unit_column = columns.get("unit")
+        condition_column = columns.get("condition")
+        # Сухість (AD/KD) у старих рядках могла жити лише в назві («Доска
+        # AD»); після перейменування на «Рейка» вона там не лишиться, тож
+        # переносимо її в колонку «Состояние». Перелік станів беремо з самої
+        # таблиці, нічого не зашиваємо.
+        known_conditions = set()
+        if condition_column is not None:
+            for _row_id, values in self.fetch_rows("СКЛАД", 100000, 0):
+                value = str(row_value(values, condition_column) or "").strip()
+                if value:
+                    known_conditions.add(value)
         now = datetime.now().isoformat(timespec="seconds")
         counts = {"rows": 0, "lath": 0, "measures": 0}
         with self.conn:
@@ -2739,6 +2771,12 @@ class ExcelSqliteStore:
                     continue
                 new_values = list(values)
                 if is_lath_row(product, thickness, width):
+                    if condition_column is not None and not str(row_value(values, condition_column) or "").strip():
+                        plain = str(plain_product_name(product) or "")
+                        for condition in sorted(known_conditions, key=len, reverse=True):
+                            if plain.lower().endswith(" " + condition.lower()):
+                                set_value(new_values, condition_column, condition)
+                                break
                     set_value(new_values, columns["product"], lath_product_name(product, thickness, width))
                 if unit_column is not None:
                     set_value(new_values, unit_column, self._UNIT_LABEL_BY_KIND[kind])
@@ -3650,10 +3688,10 @@ class ExcelSqliteStore:
     # write просто пропускає прив'язку, якщо відповідне значення в item
     # відсутнє, тож зайві прив'язки безпечні) — саме ті два поля, чиї
     # прив'язки на СКЛАД є write_mode='generic' (просте +/-).
-    def _seed_quantity_measure_fields(self, operation_id, kind, now):
+    def _seed_quantity_measure_fields(self, operation_id, kind, now, measure_label="Количество, м3"):
         qty_field_id = self._insert_operation_field(operation_id, "quantity", "Количество, шт", False, "quantity", now)
         measure_field_id = self._insert_operation_field(
-            operation_id, "measure", "Количество, м3", False, "measure", now
+            operation_id, "measure", measure_label, False, "measure", now
         )
         if kind == "income":
             self._insert_operation_field_column(qty_field_id, "СКЛАД", "income_qty", "add", "generic", "income_qty", now)
@@ -3773,7 +3811,7 @@ class ExcelSqliteStore:
                 )
                 operation_id = cursor.lastrowid
                 self._seed_warehouse_identity_fields(operation_id, entry["condition_identity"], now)
-                self._seed_quantity_measure_fields(operation_id, entry["kind"], now)
+                self._seed_quantity_measure_fields(operation_id, entry["kind"], now, entry.get("measure_label", "Количество, м3"))
                 if entry["kind"] == "sale":
                     self._seed_sale_ledger_fields(operation_id, now)
 

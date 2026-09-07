@@ -521,6 +521,7 @@ class ReportsDialogMixin:
             "keyboard": [
                 [{"text": "ДОСКА AD"}, {"text": "ДОСКА KD"}],
                 [{"text": "ОСБ"}, {"text": "ВАГОНКА"}],
+                [{"text": "РЕЙКА"}],
                 [{"text": "ВСЕ ТОВАРЫ"}],
                 [{"text": "Назад"}, {"text": "Главное меню"}],
             ],

@@ -201,7 +201,7 @@ _AREA_BASED_PRODUCT_NAMES = {"вагонка"}
 # листа × шт), товарів «лише штуки» більше нема; ціна ОСБ і далі за лист
 # (рішення 2026-07-28) - див. _PIECE_PRICED_PRODUCT_NAMES.
 _QUANTITY_ONLY_PRODUCT_NAMES = set()
-_LINEAR_PRODUCT_NAMES = {"осб"}
+_LINEAR_PRODUCT_NAMES = {"осб", "рейка"}
 _PIECE_PRICED_PRODUCT_NAMES = {"осб"}
 _LINEAR_METER_SIZES = {(25.0, 50.0), (30.0, 50.0), (50.0, 50.0)}
 
@@ -268,12 +268,15 @@ def row_measure_kind(product, thickness, width):
     return "volume"
 
 
-# --- Рейка (Задача користувача, 2026-09-06) ---
-# Рейка - не окремий продукт, а «Доска» з перерізом 25×50/30×50/50×50
-# (_LINEAR_METER_SIZES вище): рахується в мп. Рішення користувача: у клітинці
-# «Продукт» такі рядки позначаються «(рейка)» - видно і в Excel, і в боті, і
-# у формі. Усі порівняння назв ідуть через plain_product_name, тож позначка
-# ніколи не роздвоює залишок.
+# --- Рейка ---
+# 2026-09-06: рейка була «Доска AD (рейка)» - позначка в клітинці «Продукт».
+# 2026-09-07 рішення користувача: «скрізь давай перейменуємо як просто
+# Рейка». Тепер це окрема назва продукту; сухість (AD/KD) лишається у своїй
+# колонці «Состояние» - «зараз є поки Рейка АД, але в майбутньому буде і КД».
+# Рейкою рядок робить переріз 25×50/30×50/50×50 (_LINEAR_METER_SIZES) або
+# сама назва. LATH_MARK і plain_product_name лишаються, щоб старі клітинки
+# «Доска AD (рейка)» коректно читались до найближчого перечитування Excel.
+LATH_PRODUCT_NAME = "Рейка"
 LATH_MARK = "(рейка)"
 _LATH_MARK_RE = re.compile(r"\s*\(\s*рейка\s*\)", re.IGNORECASE)
 
@@ -286,18 +289,20 @@ def plain_product_name(value):
 
 def is_lath_row(product, thickness, width):
     plain = plain_product_name(product)
+    if _normalize_phrase(plain) == _normalize_phrase(LATH_PRODUCT_NAME):
+        return True
     if is_area_based_product(plain) or is_quantity_only_product(plain) or is_linear_product(plain):
         return False
     return is_linear_meter_size(thickness, width)
 
 
 def lath_product_name(product, thickness, width):
-    """«Доска AD» + 30×50 → «Доска AD (рейка)»; не рейка → назва без позначки."""
+    """«Доска AD» + 30×50 → «Рейка»; не рейка → назва без старої позначки."""
     plain = plain_product_name(product)
     if not plain:
         return product
     if is_lath_row(plain, thickness, width):
-        return plain + " " + LATH_MARK
+        return LATH_PRODUCT_NAME
     return plain
 
 
