@@ -1235,3 +1235,217 @@ html, body {
 .correction-calc-missing {
   color: #d9534f;
 }
+
+/* --- Калькулятор у формі (ТЗ п.6) --- */
+.title-with-calc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.calc-button {
+  margin-left: auto;
+  border: none;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  border-radius: 9px;
+  padding: 4px 10px;
+  font-size: 18px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.calc-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px 12px;
+  overflow-y: auto;
+  z-index: 40;
+}
+
+.calc-panel {
+  background: var(--tg-bg);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 420px;
+  overflow: hidden;
+}
+
+.calc-head {
+  display: flex;
+  align-items: center;
+  padding: 11px 14px;
+  background: var(--tg-secondary-bg);
+}
+
+.calc-title {
+  font-weight: 600;
+}
+
+.calc-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--tg-hint);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.calc-body {
+  padding: 12px 14px 16px;
+}
+
+.calc-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+  padding-bottom: 2px;
+}
+
+.calc-tab {
+  border: 1px solid var(--tg-hint);
+  background: none;
+  color: var(--tg-hint);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.calc-tab.on {
+  background: var(--tg-button);
+  border-color: var(--tg-button);
+  color: var(--tg-button-text);
+  font-weight: 600;
+}
+
+.calc-field {
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.calc-field label {
+  display: block;
+  font-size: 12px;
+  color: var(--tg-hint);
+  margin-bottom: 4px;
+}
+
+.calc-input {
+  width: 100%;
+  border: 1px solid var(--tg-hint);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 15px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+}
+
+.calc-row3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 7px;
+}
+
+.calc-sep {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 13px 0 9px;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--tg-hint);
+}
+
+.calc-sep::before,
+.calc-sep::after {
+  content: "";
+  height: 1px;
+  background: var(--tg-hint);
+  opacity: .35;
+  flex: 1;
+}
+
+.calc-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 3;
+  background: var(--tg-bg);
+  border: 1px solid var(--tg-button);
+  border-radius: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+
+.calc-group {
+  font-size: 11px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--tg-hint);
+  padding: 7px 11px 3px;
+  background: var(--tg-secondary-bg);
+}
+
+.calc-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 11px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.calc-item-tail {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.calc-result {
+  background: var(--tg-secondary-bg);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 6px;
+}
+
+.calc-result-empty {
+  color: var(--tg-hint);
+  font-size: 14px;
+}
+
+.calc-result-head {
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.calc-result-big {
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.calc-result-extra {
+  font-size: 13px;
+  color: var(--tg-hint);
+  background: none;
+  padding: 6px 2px 0;
+}
+
+.calc-plain {
+  margin-top: 14px;
+}
+
+.calc-plain-out {
+  font-size: 16px;
+  font-weight: 600;
+  margin-top: 6px;
+  min-height: 20px;
+}

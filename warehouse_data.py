@@ -6331,6 +6331,51 @@ def warehouse_rows(store):
     return headers, columns, rows
 
 
+def stock_size_options(store):
+    """Розміри, які вже були в таблиці складу - для випадного списку
+    калькулятора (ТЗ п.6; рішення користувача 2026-09-07: «вибір із тих
+    розмірів, що вже коли-небудь були в роботі», цілим рядком).
+
+    Один запис на пару товар+розмір; товар нормалізується так само, як
+    усюди (рейка визначається за перерізом, стан AD/KD лишається в назві).
+    """
+    _headers, columns, rows = warehouse_rows(store)
+    seen = set()
+    # У таблиці трапляється «Доска AD» і «доска AD» - для людини це один
+    # товар, тож перше написання, що трапилось, стає спільним для всіх.
+    spelling = {}
+    options = []
+    for _row_id, values in rows:
+        thickness = _number_value(row_value(values, columns.get("thickness")))
+        width = _number_value(row_value(values, columns.get("width")))
+        length = _number_value(row_value(values, columns.get("length")))
+        if thickness <= 0 or width <= 0 or length <= 0:
+            continue
+        product = plain_product_name(str(row_value(values, columns.get("product")) or "").strip())
+        product = lath_product_name(product, thickness, width) or product
+        if not product:
+            continue
+        product = spelling.setdefault(product.casefold(), product)
+        key = (product, thickness, width, length)
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append({
+            "product": product,
+            "thickness": thickness,
+            "width": width,
+            "length": length,
+            "label": "%s\u00d7%s\u00d7%s" % (
+                _display_bot_number(thickness), _display_bot_number(width), _display_bot_number(length),
+            ),
+            # Чим цей товар міряється - щоб у списку стояла позначка
+            # «пог. м» чи «м2» там, де рахують не куби.
+            "kind": row_measure_kind(product, thickness, width) or "quantity",
+        })
+    options.sort(key=lambda option: (option["product"], option["thickness"], option["width"], option["length"]))
+    return options
+
+
 def sales_rows(store):
     headers = store.get_headers(SALES_SHEET_NAME)
     columns = sales_columns(headers)

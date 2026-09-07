@@ -32,6 +32,7 @@ from utils import (
 from operation_colors import SETTING_KEY as OPERATION_COLORS_SETTING, palettes_for_form
 from warehouse_data import JOURNAL_FILTER_GROUPS, JOURNAL_TYPE_LABELS, journal_entries, journal_page
 from warehouse_data import (
+    stock_size_options,
     movement_report_rows,
     signed_bot_number,
     apply_correction_operation,
@@ -1134,6 +1135,9 @@ class CoreDialogMixin:
                 field["label"] = "Комментарий"
         ctx = {
             "mode": "all_in_one",
+            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
+            # в таблиці складу.
+            "calculator_sizes": stock_size_options(store),
             "kind": "income",
             "title": "Приход одной формой",
             "categories": categories,
@@ -1294,6 +1298,9 @@ class CoreDialogMixin:
         )
         ctx = {
             "mode": "all_in_one",
+            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
+            # в таблиці складу.
+            "calculator_sizes": stock_size_options(store),
             "kind": "sale",
             "title": "Продажа одной формой",
             "categories": categories,
@@ -1369,6 +1376,9 @@ class CoreDialogMixin:
         )
         ctx = {
             "mode": "all_in_one",
+            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
+            # в таблиці складу.
+            "calculator_sizes": stock_size_options(store),
             "kind": "writeoff",
             "title": "Списание одной формой",
             "categories": categories,
@@ -1434,6 +1444,9 @@ class CoreDialogMixin:
                 field["required"] = False
         ctx = {
             "mode": "all_in_one",
+            # Калькулятор у формі (ТЗ п.6): список розмірів, які вже були
+            # в таблиці складу.
+            "calculator_sizes": stock_size_options(store),
             "kind": "exchange",
             "title": "Обмен одной формой",
             "categories": [],

@@ -5017,6 +5017,354 @@
     showScreen("menu");
   }
 
+  // --- Калькулятор (ТЗ п.6) ------------------------------------------
+  // Обраний вигляд (показ 2026-09-07): поля, як у решті форми, плюс
+  // випадний список розмірів, які вже були в таблиці складу - цілим
+  // рядком «25×50×4000». Ручний ввід лишається під списком; правка поля
+  // руками перемикає список на «свой размер», нічого не стираючи.
+  var CALC_MODES = [
+    { key: "volume", label: "Кубатура", input: "Количество, шт", unit: "м³" },
+    { key: "pieces", label: "Штуки", input: "Объём, м³", unit: "шт" },
+    { key: "linear", label: "Пог. м", input: "Количество, шт", unit: "пог. м" },
+    { key: "area", label: "м²", input: "Количество, шт", unit: "м²" }
+  ];
+  var CALC_KIND_MARK = { linear: "пог. м", area: "м²" };
+
+  function calcNumber(value) {
+    if (!isFinite(value)) { return "—"; }
+    var rounded = Math.round(value * 10000) / 10000;
+    var text = String(rounded);
+    if (text.indexOf("e") >= 0) { text = rounded.toFixed(4); }
+    return text.replace(".", ",");
+  }
+
+  function calcParse(value) {
+    var text = String(value == null ? "" : value).replace(",", ".").trim();
+    if (!text) { return 0; }
+    var number = parseFloat(text);
+    return isFinite(number) ? number : 0;
+  }
+
+  function buildCalculator(sizes) {
+    var overlay = document.createElement("div");
+    overlay.className = "calc-overlay";
+    overlay.hidden = true;
+
+    var panel = document.createElement("div");
+    panel.className = "calc-panel";
+    overlay.appendChild(panel);
+
+    var head = document.createElement("div");
+    head.className = "calc-head";
+    var headTitle = document.createElement("div");
+    headTitle.className = "calc-title";
+    headTitle.textContent = "Калькулятор";
+    var closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "calc-close";
+    closeButton.textContent = "✕";
+    head.appendChild(headTitle);
+    head.appendChild(closeButton);
+    panel.appendChild(head);
+
+    var body = document.createElement("div");
+    body.className = "calc-body";
+    panel.appendChild(body);
+
+    // Режими
+    var mode = CALC_MODES[0];
+    var tabs = document.createElement("div");
+    tabs.className = "calc-tabs";
+    var tabEls = {};
+    CALC_MODES.forEach(function (item) {
+      var tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "calc-tab";
+      tab.textContent = item.label;
+      tab.addEventListener("click", function () {
+        mode = item;
+        Object.keys(tabEls).forEach(function (key) {
+          tabEls[key].classList.toggle("on", key === item.key);
+        });
+        amountLabel.textContent = item.input;
+        recalc();
+      });
+      tabEls[item.key] = tab;
+      tabs.appendChild(tab);
+    });
+    tabEls[mode.key].classList.add("on");
+    body.appendChild(tabs);
+
+    // Список розмірів зі складу
+    var pickWrap = document.createElement("div");
+    pickWrap.className = "calc-field";
+    var pickLabel = document.createElement("label");
+    pickLabel.textContent = "Размер из таблицы";
+    pickWrap.appendChild(pickLabel);
+    var pickInput = document.createElement("input");
+    pickInput.type = "text";
+    pickInput.className = "calc-input calc-pick";
+    pickInput.placeholder = sizes.length ? "Выберите размер" : "В таблице пока нет размеров";
+    pickInput.autocomplete = "off";
+    pickWrap.appendChild(pickInput);
+    var list = document.createElement("div");
+    list.className = "calc-list";
+    list.hidden = true;
+    pickWrap.appendChild(list);
+    body.appendChild(pickWrap);
+
+    var separator = document.createElement("div");
+    separator.className = "calc-sep";
+    separator.textContent = "или вручную";
+    body.appendChild(separator);
+
+    // Ручний ввід
+    var sizeRow = document.createElement("div");
+    sizeRow.className = "calc-row3";
+    function sizeField(caption) {
+      var wrap = document.createElement("div");
+      wrap.className = "calc-field";
+      var label = document.createElement("label");
+      label.textContent = caption;
+      var input = document.createElement("input");
+      input.type = "text";
+      input.inputMode = "decimal";
+      input.className = "calc-input";
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      sizeRow.appendChild(wrap);
+      return input;
+    }
+    var thicknessInput = sizeField("Толщина");
+    var widthInput = sizeField("Ширина");
+    var lengthInput = sizeField("Длина");
+    body.appendChild(sizeRow);
+
+    var amountWrap = document.createElement("div");
+    amountWrap.className = "calc-field";
+    var amountLabel = document.createElement("label");
+    amountLabel.textContent = mode.input;
+    var amountInput = document.createElement("input");
+    amountInput.type = "text";
+    amountInput.inputMode = "decimal";
+    amountInput.className = "calc-input";
+    amountWrap.appendChild(amountLabel);
+    amountWrap.appendChild(amountInput);
+    body.appendChild(amountWrap);
+
+    var mainResult = document.createElement("div");
+    mainResult.className = "calc-result";
+    body.appendChild(mainResult);
+    var extraResult = document.createElement("div");
+    extraResult.className = "calc-result calc-result-extra";
+    body.appendChild(extraResult);
+
+    // Звичайна арифметика - окремим рядком унизу, щоб «25 умножить на 64»
+    // не вимагало виходу з калькулятора.
+    var plainWrap = document.createElement("div");
+    plainWrap.className = "calc-field calc-plain";
+    var plainLabel = document.createElement("label");
+    plainLabel.textContent = "Обычный счёт";
+    var plainInput = document.createElement("input");
+    plainInput.type = "text";
+    plainInput.className = "calc-input";
+    plainInput.placeholder = "25 * 64";
+    plainInput.autocomplete = "off";
+    var plainOut = document.createElement("div");
+    plainOut.className = "calc-plain-out";
+    plainWrap.appendChild(plainLabel);
+    plainWrap.appendChild(plainInput);
+    plainWrap.appendChild(plainOut);
+    body.appendChild(plainWrap);
+
+    function renderList(filter) {
+      list.innerHTML = "";
+      var needle = String(filter || "").toLowerCase().replace(",", ".");
+      var shown = 0;
+      var lastProduct = null;
+      sizes.forEach(function (size) {
+        var hay = (size.product + " " + size.label).toLowerCase();
+        if (needle && hay.indexOf(needle) < 0) { return; }
+        if (shown >= 120) { return; }
+        if (size.product !== lastProduct) {
+          var group = document.createElement("div");
+          group.className = "calc-group";
+          group.textContent = size.product;
+          list.appendChild(group);
+          lastProduct = size.product;
+        }
+        var item = document.createElement("div");
+        item.className = "calc-item";
+        var text = document.createElement("span");
+        text.textContent = size.label;
+        item.appendChild(text);
+        var mark = CALC_KIND_MARK[size.kind];
+        if (mark) {
+          var tail = document.createElement("span");
+          tail.className = "calc-item-tail";
+          tail.textContent = mark;
+          item.appendChild(tail);
+        }
+        item.addEventListener("mousedown", function (event) { event.preventDefault(); });
+        item.addEventListener("click", function () {
+          pickInput.value = size.label;
+          thicknessInput.value = String(size.thickness).replace(".", ",");
+          widthInput.value = String(size.width).replace(".", ",");
+          lengthInput.value = String(size.length).replace(".", ",");
+          list.hidden = true;
+          if (size.kind === "linear") { tabEls.linear.click(); }
+          else if (size.kind === "area") { tabEls.area.click(); }
+          else { recalc(); }
+          amountInput.focus();
+        });
+        list.appendChild(item);
+        shown += 1;
+      });
+      if (!shown) {
+        var empty = document.createElement("div");
+        empty.className = "calc-group";
+        empty.textContent = "Ничего не найдено";
+        list.appendChild(empty);
+      }
+    }
+
+    pickInput.addEventListener("focus", function () {
+      if (!sizes.length) { return; }
+      renderList("");
+      list.hidden = false;
+    });
+    pickInput.addEventListener("input", function () {
+      renderList(pickInput.value);
+      list.hidden = false;
+    });
+    pickInput.addEventListener("blur", function () {
+      window.setTimeout(function () { list.hidden = true; }, 120);
+    });
+
+    function markManual() {
+      // Правка руками не стирає нічого - лише знімає позначку «зі списку».
+      if (pickInput.value && pickInput.value !== "свой размер") {
+        pickInput.value = "свой размер";
+      }
+    }
+
+    function recalc() {
+      var thickness = calcParse(thicknessInput.value);
+      var width = calcParse(widthInput.value);
+      var length = calcParse(lengthInput.value);
+      var amount = calcParse(amountInput.value);
+      var onePieceVolume = thickness / 1000 * width / 1000 * length / 1000;
+      var onePieceLinear = length / 1000;
+      var onePieceArea = width / 1000 * length / 1000;
+      if (onePieceVolume <= 0) {
+        mainResult.textContent = "Укажите размер";
+        mainResult.className = "calc-result calc-result-empty";
+        extraResult.hidden = true;
+        return;
+      }
+      mainResult.className = "calc-result";
+      extraResult.hidden = false;
+      var head = "";
+      var big = "";
+      var extra = "";
+      if (mode.key === "pieces") {
+        head = "1 шт — " + calcNumber(onePieceVolume) + " м³";
+        if (amount <= 0) {
+          big = "— шт";
+        } else {
+          var exact = amount / onePieceVolume;
+          var rounded = Math.round(exact);
+          if (Math.abs(exact - rounded) < 0.0001) {
+            big = calcNumber(rounded) + " шт";
+          } else {
+            big = calcNumber(exact) + " шт";
+            extra = "целыми: " + Math.floor(exact) + " шт = " + calcNumber(Math.floor(exact) * onePieceVolume)
+              + " м³ · " + (Math.floor(exact) + 1) + " шт = " + calcNumber((Math.floor(exact) + 1) * onePieceVolume) + " м³";
+          }
+        }
+      } else if (mode.key === "linear") {
+        head = "1 шт — " + calcNumber(onePieceLinear) + " пог. м";
+        big = calcNumber(onePieceLinear * amount) + " пог. м";
+      } else if (mode.key === "area") {
+        head = "1 шт — " + calcNumber(onePieceArea) + " м²";
+        big = calcNumber(onePieceArea * amount) + " м²";
+      } else {
+        // Зауваження користувача (2026-09-07): «в кожній вкладці свій
+        // розрахунок» - вкладка кубатури показує куби, і тільки їх.
+        head = "1 шт — " + calcNumber(onePieceVolume) + " м³";
+        big = calcNumber(onePieceVolume * amount) + " м³";
+      }
+      mainResult.innerHTML = "";
+      var headEl = document.createElement("div");
+      headEl.className = "calc-result-head";
+      headEl.textContent = head;
+      var bigEl = document.createElement("div");
+      bigEl.className = "calc-result-big";
+      bigEl.textContent = big;
+      mainResult.appendChild(headEl);
+      mainResult.appendChild(bigEl);
+      extraResult.textContent = extra;
+      extraResult.hidden = !extra;
+    }
+
+    [thicknessInput, widthInput, lengthInput].forEach(function (input) {
+      input.addEventListener("input", function () { markManual(); recalc(); });
+    });
+    amountInput.addEventListener("input", recalc);
+
+    plainInput.addEventListener("input", function () {
+      var raw = plainInput.value.replace(/,/g, ".");
+      if (!raw.trim()) { plainOut.textContent = ""; return; }
+      if (!/^[0-9+\-*/(). %]+$/.test(raw)) {
+        plainOut.textContent = "Только числа и + − × ÷";
+        return;
+      }
+      try {
+        /* eslint-disable no-new-func */
+        var value = Function('"use strict";return (' + raw + ")")();
+        plainOut.textContent = (typeof value === "number" && isFinite(value)) ? "= " + calcNumber(value) : "—";
+      } catch (err) {
+        plainOut.textContent = "—";
+      }
+    });
+
+    function close() {
+      overlay.hidden = true;
+    }
+    closeButton.addEventListener("click", close);
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) { close(); }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !overlay.hidden) { close(); }
+    });
+
+    document.body.appendChild(overlay);
+    recalc();
+    return {
+      open: function () {
+        overlay.hidden = false;
+        pickInput.focus();
+      }
+    };
+  }
+
+  function attachCalculator(ctx) {
+    var sizes = ctx.calculator_sizes;
+    if (!Array.isArray(sizes)) { return; }
+    var titleEl = document.getElementById("title");
+    if (!titleEl || titleEl.querySelector(".calc-button")) { return; }
+    titleEl.classList.add("title-with-calc");
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "calc-button";
+    button.textContent = "🧮";
+    button.title = "Калькулятор";
+    titleEl.appendChild(button);
+    var calculator = buildCalculator(sizes);
+    button.addEventListener("click", function () { calculator.open(); });
+  }
+
   function main() {
     var token = new URLSearchParams(window.location.search).get("t");
     window.__formToken = token;
@@ -5063,6 +5411,9 @@
     currentFieldLabelStyles = ctx.field_label_styles || {};
 
     document.getElementById("title").textContent = ctx.title || "Данные";
+    // Кнопка калькулятора - у шапці форми (вимога користувача 2026-09-05:
+    // «для форми - має бути кнопка обов'язково, а для чату - ні»).
+    attachCalculator(ctx);
     // Задача користувача: текст заголовка "Проверьте данные" — редагований
     // з Налаштувань (webapp_confirm_heading_text) — той самий елемент
     // існує в DOM незалежно від mode (all_in_one чи однокатегорійна форма),

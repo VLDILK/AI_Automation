@@ -965,6 +965,10 @@ class BotModeDialogMixin:
             f"{_display_bot_number(length)}"
         )
         one_piece_text = _display_bot_number(round(one_piece_volume, 6))
+        # ТЗ п.6 вимагає ще й «расчёт погонных метров»; квадрати поруч -
+        # вагонка міряється ними.
+        one_piece_linear = length / 1000
+        one_piece_area = width / 1000 * length / 1000
         if quantity is not None:
             total_volume = round(one_piece_volume * quantity, 6)
             return (
@@ -972,7 +976,9 @@ class BotModeDialogMixin:
                 f"Размер: {size_text}\n"
                 f"Количество: {_display_bot_number(quantity)} шт\n"
                 f"1 шт: {one_piece_text} м3\n"
-                f"Итого: {_display_bot_number(total_volume)} м3"
+                f"Итого: {_display_bot_number(total_volume)} м3\n"
+                f"Погонных: {_display_bot_number(round(one_piece_linear * quantity, 6))} пог. м\n"
+                f"Площадь: {_display_bot_number(round(one_piece_area * quantity, 6))} м2"
             )
         if volume is not None:
             quantity_float = volume / one_piece_volume
@@ -998,7 +1004,9 @@ class BotModeDialogMixin:
                 f"2. {upper} шт = {_display_bot_number(round(one_piece_volume * upper, 6))} м3"
             )
         return (
-            f"Для {size_text}: 1 шт = {one_piece_text} м3.\n"
+            f"Для {size_text}: 1 шт = {one_piece_text} м3, "
+            f"{_display_bot_number(round(one_piece_linear, 6))} пог. м, "
+            f"{_display_bot_number(round(one_piece_area, 6))} м2.\n"
             "Напишите количество штук или объем, и я досчитаю."
         )
 
