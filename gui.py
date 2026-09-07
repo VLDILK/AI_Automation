@@ -837,31 +837,16 @@ class ExcelViewerApp:
     # просто тому, що це один SQLite-файл, без потреби ділити сам об'єкт
     # з'єднання між потоками.
     def _start_background_data_load(self):
+        """Домашка чужих таблиць не читає (рішення користувача 2026-09-07:
+        «взагалі забери читання чужих екселів, хай клієнти цим займаються»).
+        У фоні лишився тільки плановий знімок власної бази."""
         def worker():
-            excel_error = None
-            try:
-                thread_store = ExcelSqliteStore(self.db_path)
-                try:
-                    self._load_excel_into_store(thread_store)
-                finally:
-                    thread_store.close()
-            except Exception as exc:
-                # Реальний баг (аудит коду, 2026-08-15): лише RuntimeError
-                # ловився тут раніше, але openpyxl.load_workbook (усередині
-                # _load_excel_into_store -> excel_source.open_workbook) кидає
-                # BadZipFile/InvalidFileException на пошкоджений файл і
-                # PermissionError, якщо Excel тримає його відкритим - жоден з
-                # них не RuntimeError. Без широкого except виняток вилітав би
-                # з воркера ДО self.root.after(0, ..._finish_startup...) -
-                # UI ніколи не будувався б, застосунок висів би назавжди на
-                # безрамковому splash-вікні без жодної помилки на екрані.
-                excel_error = exc
             snapshot_error = None
             try:
                 maybe_create_scheduled_snapshot(self.db_path)
             except Exception as exc:
                 snapshot_error = exc
-            self.root.after(0, lambda: self._finish_startup(excel_error, snapshot_error))
+            self.root.after(0, lambda: self._finish_startup(None, snapshot_error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1008,16 +993,12 @@ class ExcelViewerApp:
         self._remote_action_log_rows = {}
 
         self._build_main_menu()
-        self._build_layout()
-        self._build_sheet_buttons()
+        # Домашка не має власних даних і таблиць (рішення користувача
+        # 2026-09-07) - екран «Дані / Таблиця» більше не будується.
         self._build_settings_view()
         self._build_commands_view()
         self._build_custom_buttons_view()
         self._build_payment_methods_view()
-
-        sheet_names = self.store.sheet_names()
-        if sheet_names:
-            self.show_sheet(sheet_names[0])
 
         self._update_telegram_settings_labels()
         # self._start_telegram_from_settings(silent=True) - свідомо
@@ -1177,7 +1158,6 @@ class ExcelViewerApp:
             ("\u25a4", "Журнали", self.show_journals, None),
             ("\U0001F464", "Персонал", self.show_personnel, None),
             ("\u25a6", "Редактор кнопок", self.show_custom_buttons, None),
-            ("\u27f2", "Обновити Excel", self.sync_excel_manually, None),
             ("\u21ea", "Публікація оновлень", self.open_publish_updates_dialog, None),
             ("\u26d3", "Тунель", self.open_tunnel_dialog, None),
             ("\u23fb", "Вихід", self.on_close, "#d1242f"),
@@ -1495,7 +1475,6 @@ class ExcelViewerApp:
     def _show_only(self, frame, view_name):
         for child in (
             self.main_menu_frame,
-            self.table_frame,
             self.settings_frame,
             self.commands_frame,
             self.custom_buttons_frame,
@@ -1506,20 +1485,7 @@ class ExcelViewerApp:
         self.current_view = view_name
 
     def show_main_menu(self):
-        if self.edit_mode and self.has_unsaved_changes:
-            if not messagebox.askyesno(
-                self._t("Незбережені зміни"),
-                self._t("Повернутися до меню без збереження змін?"),
-            ):
-                return
-            if not self._discard_current_sheet_changes():
-                return
-            self._exit_edit_mode()
-            self.show_sheet(self.current_sheet)
         self._show_only(self.main_menu_frame, "main")
-
-    def show_table(self):
-        self._show_only(self.table_frame, "table")
 
     def show_settings(self):
         self._update_telegram_settings_labels()
@@ -1557,7 +1523,6 @@ class ExcelViewerApp:
 
         self._build_journals_hub_view(window)
         self._build_action_log_view(window)
-        self._build_work_log_view(window)
         self._show_journals_view("hub")
         self._center_window(window, width=820, height=560)
 
@@ -1572,7 +1537,7 @@ class ExcelViewerApp:
         self.action_log_list_frame = None
 
     def _show_journals_view(self, view_name):
-        for frame in (self.journals_hub_frame, self.action_log_frame, self.work_log_frame):
+        for frame in (self.journals_hub_frame, self.action_log_frame):
             frame.pack_forget()
         if view_name == "action_log":
             self._refresh_action_log()
@@ -1912,14 +1877,6 @@ class ExcelViewerApp:
         )
         action_log_button.pack(pady=8)
 
-        work_log_button = tk.Button(
-            menu_panel,
-            text=self._t("Журнал виконаних робіт"),
-            width=28,
-            height=2,
-            command=self.show_work_log,
-        )
-        work_log_button.pack(pady=8)
 
     def _build_action_log_view(self, parent):
         self.action_log_frame = tk.Frame(parent)
