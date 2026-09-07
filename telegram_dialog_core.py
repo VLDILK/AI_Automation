@@ -20,6 +20,8 @@ _EFACTURA_DEFAULT_TEXT = "просьба принять информацию и 
 from settings import DisplaySettingsStore, SettingsStore
 from utils import normalize_length_mm
 from utils import (
+    LATH_PRODUCT_NAME,
+    is_lath_row,
     piece_measure,
     row_measure_kind,
     _display_bot_number,
@@ -339,6 +341,21 @@ class CoreDialogMixin:
     # але вже повністю розпродано, для них не легітимна опція. Приход - НЕ
     # передає це (require_balance=False, default) - нова поставка на вже
     # порожню позицію - нормальний, очікуваний сценарій.
+    def _product_matches_row(self, wanted, row_product, thickness, width):
+        """Чи рядок складу належить запитаному продукту.
+
+        Для «Рейка» рядок може ще зватись старою назвою («Доска AD» з
+        перерізом 25×50/30×50/50×50) - його теж беремо, інакше категорія
+        «РЕЙКА» стоїть із порожніми списками, доки таблицю не перечитають
+        новою збіркою (живий випадок 2026-09-07). У зворотний бік правило
+        не діє: «ДОСКА AD» рейкових розмірів у списках не показує.
+        """
+        if self._text_equal(row_product, wanted):
+            return True
+        if _normalize_phrase(wanted or "") == _normalize_phrase(LATH_PRODUCT_NAME):
+            return is_lath_row(row_product, thickness, width)
+        return False
+
     def _existing_dimension_values(self, store, product, condition, field_key, numeric=True, require_balance=False):
         if not product:
             return []
@@ -356,7 +373,10 @@ class CoreDialogMixin:
             row_product, product_suffix_type = self._split_product_condition(
                 row_value(row, columns["product"]), condition_values
             )
-            if not self._text_equal(row_product, product):
+            if not self._product_matches_row(
+                product, row_product,
+                row_value(row, columns.get("thickness")), row_value(row, columns.get("width")),
+            ):
                 continue
             # Реальний баг користувача (розмір 175x225x6500 не з'являвся у
             # дропдауні "Толщина"/"Ширина"/"Длина", хоча реально є на складі
@@ -443,7 +463,10 @@ class CoreDialogMixin:
             row_product, product_suffix_type = self._split_product_condition(
                 row_value(row, columns["product"]), condition_values
             )
-            if not self._text_equal(row_product, product):
+            if not self._product_matches_row(
+                product, row_product,
+                row_value(row, columns.get("thickness")), row_value(row, columns.get("width")),
+            ):
                 continue
             # Той самий фікс, що й у _existing_dimension_values вище - "Состояние"
             # читається НАПРЯМУ, з фолбеком на суфікс лише коли колонка

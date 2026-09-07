@@ -3784,7 +3784,10 @@ class IncomeSaleFlowDialogMixin:
             # dimension_combos - реальна колонка "Состояние", а не лише
             # текстовий суфікс - і None (не ""), коли й вона порожня.
             row_condition = row_value(row, columns.get("condition")) or product_suffix_type or None
-            if payload.get("product") and self._text_equal(row_product, payload.get("product")):
+            if payload.get("product") and self._product_matches_row(
+                payload.get("product"), row_product,
+                row_value(row, columns.get("thickness")), row_value(row, columns.get("width")),
+            ):
                 score += 3
             if payload.get("breed") and self._text_equal(row_value(row, columns["breed"]), payload.get("breed")):
                 score += 2
