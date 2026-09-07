@@ -1576,9 +1576,16 @@ class CoreDialogMixin:
     def _start_calculator_form_reply(self, store, context):
         web_app = self._calculator_webapp_button(store)
         if web_app is None:
-            # Форма не підключена - лишається той самий калькулятор у чаті,
-            # щоб кнопка не була мертвою.
-            return self._start_calculator_operation("калькулятор", store, context)
+            # Реальний випадок (2026-09-07): без тунелю кнопка мовчки
+            # відкривала ТЕКСТОВИЙ калькулятор, а той лишав по собі pending,
+            # який далі з'їдав кожне натискання меню («Не смог посчитать» на
+            # ОБМЕН, ДАННЫЕ, Обновить). Тепер - чесна відмова, без pending,
+            # тим самим рядком, що й у обміну.
+            return self._with_main_menu(
+                "Калькулятор в форме сейчас недоступен (форма не подключена). "
+                "Посчитать можно сообщением: «посчитай 25x50x6000 140 шт».",
+                store,
+            )
         return {
             "type": "message",
             "text": store.get_message_template(

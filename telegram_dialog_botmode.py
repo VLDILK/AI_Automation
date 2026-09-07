@@ -1108,6 +1108,18 @@ class BotModeDialogMixin:
     # розпізнається як команда головного меню, одразу скасовуємо очікування й
     # переходимо туди, а не намагаємось порахувати ці слова як вираз.
     def _calculator_menu_escape_reply(self, text, store, context):
+        # Реальний випадок (2026-09-07): поки висів калькулятор, КОЖНА
+        # кнопка меню («ОБМЕН (форма)», «ДАННЫЕ (форма)», «Обновить»)
+        # діставалась йому як вираз і отримувала «Не смог посчитать» -
+        # вийти можна було лише «Главным меню». Натиск будь-якої кнопки
+        # меню тепер закриває калькулятор і робить те, що на кнопці.
+        custom_root = self._custom_root_button_by_label(text, store)
+        if custom_root:
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._enter_custom_button_node(custom_root, store, context)
+        if self._is_main_menu_back_request(text):
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._main_menu_reply(store)
         if self._is_data_menu_request(text):
             store.delete_pending_operation(context["chat_id"], context["user_id"])
             return self._enter_data_menu_node(store, context, re_entering=True)
