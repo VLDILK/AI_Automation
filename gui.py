@@ -80,7 +80,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.36"
+__version__ = "1.1.37"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -1868,7 +1868,6 @@ class ExcelViewerApp:
             if child.winfo_exists():
                 child.configure(bg=background)
         widgets["mark"].configure(text="▌" if selected else " ", fg="#0969da")
-        widgets["action"].configure(font=("Segoe UI", 9, "bold" if selected else "normal"))
 
     def _restore_action_log_selection(self):
         """Після зміни теми підсвітка обраного рядка малюється заново."""
@@ -1900,14 +1899,23 @@ class ExcelViewerApp:
         summary = self._action_log_summary(action_type, details)
         chip_bg, chip_fg = self._action_log_status_style(details.get("status"))
 
+        # Заголовок - людина (рішення користувача 2026-09-07), дія й статус
+        # рядком нижче.
+        person, who_details = self._action_log_person(telegram)
         head = tk.Frame(frame)
         head.pack(anchor="w", fill="x")
-        tk.Label(head, text=summary["action"], font=("Segoe UI", 13, "bold"), anchor="w").pack(side="left")
+        tk.Label(head, text=person, font=("Segoe UI", 14, "bold"), anchor="w").pack(side="left")
+        tk.Label(head, text="#%s" % log_id, fg="#8c959f", anchor="e").pack(side="right")
+        if who_details:
+            tk.Label(frame, text=who_details, fg="#8c959f", anchor="w").pack(anchor="w", fill="x")
+
+        deed = tk.Frame(frame)
+        deed.pack(anchor="w", fill="x", pady=(8, 0))
+        tk.Label(deed, text=summary["action"], font=("Segoe UI", 11, "bold"), anchor="w").pack(side="left")
         tk.Label(
-            head, text=" %s " % summary["status"], bg=chip_bg, fg=chip_fg,
+            deed, text=" %s " % summary["status"], bg=chip_bg, fg=chip_fg,
             font=("Segoe UI", 9), padx=6,
         ).pack(side="left", padx=10)
-        tk.Label(head, text="#%s" % log_id, fg="#8c959f", anchor="e").pack(side="right")
 
         def field(caption, value, fg=None):
             if value in (None, ""):
@@ -1923,11 +1931,6 @@ class ExcelViewerApp:
                 label.configure(fg=fg)
             label.pack(side="left", fill="x", expand=True)
 
-        user_id = telegram.get("user_id")
-        user_line = summary["user"]
-        if user_id:
-            user_line = "%s · id %s" % (user_line, user_id)
-        field("Пользователь", user_line)
         field("Время", self._format_action_log_time(created_at))
         field("Пришло", details.get("incoming_text"))
         field("Ответ бота", self._action_log_reply_label(details.get("reply") or {}))
@@ -8299,35 +8302,44 @@ class ExcelViewerApp:
             inner = tk.Frame(row)
             inner.pack(side="left", fill="x", expand=True, padx=(2, 8), pady=5)
 
+            # Перший ярус - людина (рішення користувача 2026-09-07: «акцент
+            # має бути на користувачеві, а в ньому вже дія»), другий - сама
+            # дія. Раніше було навпаки.
+            person, _who_details = self._action_log_person(details.get("telegram"))
             line1 = tk.Frame(inner)
             line1.pack(fill="x")
-            dot = tk.Label(line1, text="●", fg=chip_fg, font=("Segoe UI", 8))
-            dot.pack(side="left", padx=(0, 6))
-            action = tk.Label(line1, text=summary["action"], anchor="w", font=("Segoe UI", 9))
-            action.pack(side="left")
+            who = tk.Label(
+                line1, text=self._short_text(person, 26), anchor="w", font=("Segoe UI", 10, "bold"),
+            )
+            who.pack(side="left")
             when = tk.Label(
                 line1, text=self._action_log_short_time(created_at), anchor="e", fg="#8c959f",
                 font=("Segoe UI", 8),
             )
             when.pack(side="right")
 
-            # Другий рядок: хто і що написав. Тут - і тільки тут - текст
-            # обрізається: перелік навмисно вузький, а повний текст видно
-            # праворуч у подробицях.
-            subtitle = "%s · %s" % (summary["user"], summary["text"]) if summary["text"] else summary["user"]
-            second = tk.Label(
-                line1.master, text=self._short_text(subtitle, 46), anchor="w", fg="#8c959f",
+            # Другий ярус: дія і що людина написала. Тут - і тільки тут -
+            # текст обрізається: перелік навмисно вузький, а повний текст
+            # видно праворуч у подробицях.
+            line2 = tk.Frame(inner)
+            line2.pack(fill="x")
+            dot = tk.Label(line2, text="●", fg=chip_fg, font=("Segoe UI", 8))
+            dot.pack(side="left", padx=(0, 6))
+            deed = "%s · %s" % (summary["action"], summary["text"]) if summary["text"] else summary["action"]
+            action = tk.Label(
+                line2, text=self._short_text(deed, 42), anchor="w", fg="#8c959f",
                 font=("Segoe UI", 8),
             )
-            second.pack(fill="x")
+            action.pack(side="left")
 
             self._action_log_row_widgets[log_id] = {
                 "row": row,
                 "mark": mark,
                 "action": action,
-                "painted": [inner, line1, dot, action, when, second, mark],
+                "who": who,
+                "painted": [inner, line1, line2, dot, action, when, who, mark],
             }
-            for widget in (row, inner, line1, dot, action, when, second, mark):
+            for widget in (row, inner, line1, line2, dot, action, when, who, mark):
                 widget.bind("<Button-1>", lambda event, item_id=log_id: self._select_action_log_row(item_id))
         self._apply_theme(self.action_log_list_frame)
         # Перший запис обраний одразу: порожня панель праворуч на старті
@@ -8362,6 +8374,30 @@ class ExcelViewerApp:
             "action": command,
             "text": str(text).replace("\n", " "),
         }
+
+    def _action_log_person(self, telegram):
+        """Людина двома частинами: чим її звати (заголовок) і чим уточнити
+        (@нік та id). Задача користувача (2026-09-07): «акцент має бути на
+        користувачеві» - тому імʼя окремо, а не злите з ніком одним рядком,
+        як у _action_log_user_label нижче."""
+        telegram = telegram or {}
+        full_name = str(telegram.get("full_name") or "").strip()
+        username = str(telegram.get("username") or "").strip()
+        user_id = str(telegram.get("user_id") or "").strip()
+        if full_name:
+            title = full_name
+        elif username:
+            title = "@%s" % username
+        elif user_id:
+            title = user_id
+        else:
+            title = self._t("Неизвестно")
+        parts = []
+        if full_name and username:
+            parts.append("@%s" % username)
+        if user_id:
+            parts.append("id %s" % user_id)
+        return title, " · ".join(parts)
 
     def _action_log_user_label(self, telegram):
         full_name = telegram.get("full_name") or ""
