@@ -53,6 +53,50 @@ def entry(parent, colors, variable, width=220, placeholder=""):
                         border_color=colors["line"], text_color=colors["fg"], placeholder_text=placeholder)
 
 
+def add_window_grips(window, colors, handle=None, size=10):
+    """Ручки зміни розміру в чотирьох кутах вікна і перетягування за handle
+    (правило користувача: кожне окреме вікно - з ручками в усіх кутах)."""
+    state = {}
+
+    def start(event, corner):
+        state.update(corner=corner, x=event.x_root, y=event.y_root, w=window.winfo_width(), h=window.winfo_height(),
+                     wx=window.winfo_x(), wy=window.winfo_y())
+
+    def drag(event):
+        corner = state.get("corner")
+        if not corner:
+            return
+        dx, dy = event.x_root - state["x"], event.y_root - state["y"]
+        w, h, x, y = state["w"], state["h"], state["wx"], state["wy"]
+        if "e" in corner:
+            w += dx
+        if "s" in corner:
+            h += dy
+        if "w" in corner:
+            w, x = w - dx, x + dx
+        if "n" in corner:
+            h, y = h - dy, y + dy
+        min_w, min_h = window.minsize()
+        w, h = max(w, min_w or 120), max(h, min_h or 120)
+        window.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+    cursors = {"nw": "size_nw_se", "se": "size_nw_se", "ne": "size_ne_sw", "sw": "size_ne_sw"}
+    for corner in ("nw", "ne", "sw", "se"):
+        grip = tk.Frame(window, width=size, height=size, bg=colors["accent"], cursor=cursors[corner])
+        grip.place(relx=0 if "w" in corner else 1, rely=0 if "n" in corner else 1, anchor=corner)
+        grip.bind("<ButtonPress-1>", lambda event, c=corner: start(event, c))
+        grip.bind("<B1-Motion>", drag)
+    if handle is not None:
+        def move_start(event):
+            state.update(mx=event.x_root, my=event.y_root, wx=window.winfo_x(), wy=window.winfo_y())
+
+        def move(event):
+            window.geometry("+%d+%d" % (state["wx"] + event.x_root - state["mx"], state["wy"] + event.y_root - state["my"]))
+
+        handle.bind("<ButtonPress-1>", move_start)
+        handle.bind("<B1-Motion>", move)
+
+
 class MultiChoice:
     """Вибір кількох значень (рішення користувача 2026-09-06): закритий
     випадний список «Выберите…», під ним «Добавить», нижче - вибране рядками

@@ -30,7 +30,7 @@ from openpyxl.worksheet.filters import AutoFilter
 import excel_source
 import xlsx_columns
 import permissions
-from utils import is_lath_row, is_piece_priced_product, lath_product_name, plain_product_name
+from utils import is_lath_row, is_piece_priced_product, lath_product_name, plain_product_name, set_product_measure_kinds
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
@@ -2225,11 +2225,93 @@ class ExcelSqliteStore:
         self._seed_known_personnel()
         self._normalize_existing_stock_once()
         self._backfill_movement_amounts()
+        set_product_measure_kinds(self.product_measure_kinds())
 
     # Сума для старих рухів (2026-09-06): продаж - із листа ПРОДАЖА за
     # документом, розміром і кількістю; антисептик - з листа АНТИСЕПТИРОВАНИЕ
     # за датою й об'ємом (у руху не було номера послуги). Береться лише
     # однозначний збіг, інакше сума лишається порожньою. Разово.
+    # Нові продукти з вікна «Новый размер» (2026-09-07): одиниця виміру
+    # (app_meta JSON {назва: kind}) і три категорії у формах бота.
+    _PRODUCT_KINDS_KEY = "product_measure_kinds"
+    _NEW_PRODUCT_SOURCES = (("income_osb", "start_income", "income"), ("sale_osb", "start_sale", "sale"),
+                            ("writeoff_osb", "start_writeoff", "writeoff"))
+    _MEASURE_FIELD_LABELS = {"volume": "Количество, м3", "area": "Количество, м2", "linear": "Количество, мп"}
+
+    def product_measure_kinds(self):
+        row = self.conn.execute("SELECT value FROM app_meta WHERE key = ?", (self._PRODUCT_KINDS_KEY,)).fetchone()
+        try:
+            data = json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def set_product_measure_kind(self, product, kind):
+        mapping = self.product_measure_kinds()
+        mapping[str(product).strip()] = kind
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                              (self._PRODUCT_KINDS_KEY, json.dumps(mapping, ensure_ascii=False)))
+        set_product_measure_kinds(mapping)
+
+    def ensure_product_operations(self, product, measure_kind=None):
+        """Новий продукт сам стає категорією у формах бота (прихід, продаж,
+        списання) - копія полів «ОСБ» (без стану), підпис поля виміру за
+        одиницею; без виміру, коли одиниця «шт». Повертає id створених."""
+        product = str(product or "").strip()
+        if not product:
+            return []
+        created = []
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            for builtin_key, parent, kind in self._NEW_PRODUCT_SOURCES:
+                exists = any(
+                    row[2] == kind and _normalize_phrase((json.loads(row[6]) if row[6] else {}).get("product") or "") == _normalize_phrase(product)
+                    for row in self.list_operations(parent, include_disabled=True)
+                )
+                if exists:
+                    continue
+                source = self.conn.execute("SELECT id, requires_row_identity FROM bot_operations WHERE builtin_key = ?", (builtin_key,)).fetchone()
+                if source is None:
+                    continue
+                position = self.conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM bot_operations WHERE parent_action_code = ?", (parent,)).fetchone()[0]
+                base_code = "%s_%s" % (kind, _normalize_phrase(product).replace(" ", "_") or "product")
+                code, suffix = base_code, 2
+                while self.conn.execute("SELECT 1 FROM bot_operations WHERE code = ?", (code,)).fetchone():
+                    code, suffix = "%s_%d" % (base_code, suffix), suffix + 1
+                cursor = self.conn.execute(
+                    "INSERT INTO bot_operations (code, kind, requires_row_identity, label, parent_action_code, prefill_json, position, enabled, builtin_key, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)",
+                    (code, kind, source[1], product.upper(), parent, json.dumps({"product": product}, ensure_ascii=False), position, now, now),
+                )
+                operation_id = cursor.lastrowid
+                fields = self.conn.execute(
+                    "SELECT id, field_key, label, is_identity, position, enabled FROM bot_operation_fields WHERE operation_id = ? ORDER BY position, id",
+                    (source[0],),
+                ).fetchall()
+                for field_id, field_key, label, is_identity, field_position, enabled in fields:
+                    if field_key == "measure":
+                        if measure_kind in (None, "quantity"):
+                            continue
+                        label = self._MEASURE_FIELD_LABELS.get(measure_kind, label)
+                    field_cursor = self.conn.execute(
+                        "INSERT INTO bot_operation_fields (operation_id, field_key, label, is_identity, position, enabled, builtin_key, created_at, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                        (operation_id, field_key, label, is_identity, field_position, enabled, now, now),
+                    )
+                    columns = self.conn.execute(
+                        "SELECT sheet, column_key, marker, write_mode, position FROM bot_operation_field_columns WHERE operation_field_id = ? ORDER BY position, id",
+                        (field_id,),
+                    ).fetchall()
+                    for column in columns:
+                        self.conn.execute(
+                            "INSERT INTO bot_operation_field_columns (operation_field_id, sheet, column_key, marker, write_mode, position, builtin_key, created_at, updated_at)"
+                            " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                            (field_cursor.lastrowid, *column, now, now),
+                        )
+                created.append(operation_id)
+        return created
+
     _MOVEMENT_AMOUNTS_KEY = "movement_amounts_v1"
 
     def _backfill_movement_amounts(self, force=False):
@@ -6214,6 +6296,27 @@ def add_to_row_value(row_values, index, amount):
     row_values[index] = _number_value(row_values[index]) + _number_value(amount)
 
 
+def _new_stock_row_values(store, position_payload, item):
+    """Порожній рядок СКЛАД для нової позиції з вікна корекції: назва (з
+    позначкою рейки), порода, стан, розмір, одиниця за видом, нулі, SKU."""
+    headers = store.get_headers("СКЛАД")
+    columns = warehouse_columns(headers)
+    values = [""] * len(headers)
+    product = lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width"))
+    set_value(values, columns.get("product"), product)
+    set_value(values, columns.get("breed"), position_payload.get("breed") or "")
+    set_value(values, columns.get("condition"), position_payload.get("condition") or "")
+    for key in ("thickness", "width", "length"):
+        set_value(values, columns.get(key), item.get(key))
+    kind = row_measure_kind(product, item.get("thickness"), item.get("width"))
+    set_value(values, columns.get("unit"), ExcelSqliteStore._UNIT_LABEL_BY_KIND.get(kind, "шт"))
+    for key in ("income_qty", "sold_qty", "balance_qty"):
+        if columns.get(key) is not None:
+            set_value(values, columns.get(key), 0)
+    set_value(values, columns.get("sku"), "%s|%s|%s" % (product, position_payload.get("breed") or "", income_item_size(item)))
+    return values
+
+
 def find_stock_row_id(store, position, item):
     """Рядок СКЛАД за ознаками: продукт (без стану й позначки рейки), порода,
     стан, розмір. Потрібен, коли номер рядка застарів після перечитування
@@ -8337,6 +8440,11 @@ def apply_correction_operation(store, payload, sync_mode, dirty_notifier=None):
                 row_values = store.get_row(row_id) if row_id is not None else None
                 if row_values:
                     item = {**item, "row_id": row_id}
+            if not row_values and item.get("new_row"):
+                # Нова позиція з вікна «Новый размер» (2026-09-07): рядок
+                # складу створюється при записі з нуля тією ж «Коррекция №N».
+                row_values = _new_stock_row_values(store, position_payload, item)
+                item = {**item, "row_id": None}
             if not row_values:
                 return {
                     "ok": False,
@@ -8365,6 +8473,9 @@ def apply_correction_operation(store, payload, sync_mode, dirty_notifier=None):
     with store.conn:
         store.conn.execute("BEGIN IMMEDIATE")
         row_values_by_row_id = {}
+        for _position_payload, entry, row_values in changed:
+            if entry.get("row_id") is None:
+                entry["row_id"] = store.add_row("СКЛАД", row_values)
         for position_payload, entry, row_values in changed:
             row_values = row_values_by_row_id.setdefault(entry["row_id"], row_values)
             add_to_row_value(row_values, columns["balance_qty"], entry["delta_quantity"])

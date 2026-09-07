@@ -206,6 +206,25 @@ _PIECE_PRICED_PRODUCT_NAMES = {"осб"}
 _LINEAR_METER_SIZES = {(25.0, 50.0), (30.0, 50.0), (50.0, 50.0)}
 
 
+# Одиниця виміру нових продуктів (2026-09-07): задається у вікні «Новый
+# размер» клієнта, зберігається в його базі (ExcelSqliteStore.
+# product_measure_kinds) і кладеться сюди при відкритті сховища.
+# Значення: "volume" | "area" | "linear" | "quantity" (лише штуки).
+_PRODUCT_MEASURE_KIND_OVERRIDES = {}
+
+
+def set_product_measure_kinds(mapping):
+    global _PRODUCT_MEASURE_KIND_OVERRIDES
+    _PRODUCT_MEASURE_KIND_OVERRIDES = {
+        _normalize_phrase(product): kind for product, kind in (mapping or {}).items()
+        if _normalize_phrase(product) and kind in ("volume", "area", "linear", "quantity")
+    }
+
+
+def product_measure_kind_override(product):
+    return _PRODUCT_MEASURE_KIND_OVERRIDES.get(_normalize_phrase(product))
+
+
 def is_area_based_product(value):
     return _normalize_phrase(value) in _AREA_BASED_PRODUCT_NAMES
 
@@ -235,6 +254,11 @@ def is_linear_meter_size(thickness, width):
 # _row_measure_kind - товарна властивість (площинний товар) перевіряється
 # ПЕРШОЮ, потім розмір-специфічна (мп), інакше об'єм за замовчуванням.
 def row_measure_kind(product, thickness, width):
+    override = product_measure_kind_override(product)
+    if override == "quantity":
+        return None
+    if override in ("volume", "area", "linear"):
+        return override
     if is_quantity_only_product(product):
         return None
     if is_area_based_product(product):
@@ -314,10 +338,11 @@ def piece_measure(thickness, width, length, measure_kind):
 # тут - webapp_server.py (register_context) кладе це в ctx КОЖНОЇ форми,
 # JS читає звідти замість власної копії.
 def measure_classification_data():
+    overrides = _PRODUCT_MEASURE_KIND_OVERRIDES
     return {
-        "area_based_products": sorted(_AREA_BASED_PRODUCT_NAMES),
-        "quantity_only_products": sorted(_QUANTITY_ONLY_PRODUCT_NAMES),
-        "linear_products": sorted(_LINEAR_PRODUCT_NAMES),
+        "area_based_products": sorted(_AREA_BASED_PRODUCT_NAMES | {p for p, k in overrides.items() if k == "area"}),
+        "quantity_only_products": sorted(_QUANTITY_ONLY_PRODUCT_NAMES | {p for p, k in overrides.items() if k == "quantity"}),
+        "linear_products": sorted(_LINEAR_PRODUCT_NAMES | {p for p, k in overrides.items() if k == "linear"}),
         "piece_priced_products": sorted(_PIECE_PRICED_PRODUCT_NAMES),
         "linear_meter_sizes": [list(pair) for pair in sorted(_LINEAR_METER_SIZES)],
     }

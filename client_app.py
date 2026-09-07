@@ -2851,6 +2851,23 @@ class ClientApp(ctk.CTk):
             info = rows_by_id.get(row_id)
             if info is None or abs(new_quantity - info["now"]) < 1e-9:
                 continue
+            if info.get("new"):
+                # Нова позиція з вікна «Новый размер» (2026-09-07). Новий
+                # продукт: одиниця виміру в базу клієнта і три категорії у
+                # формах бота, щоб він підтягнувся скрізь.
+                if info.get("new_product"):
+                    kind = info.get("unit_kind")
+                    if kind:
+                        self.store.set_product_measure_kind(info["product"], kind)
+                    self.store.ensure_product_operations(info["product"], kind)
+                positions.append({
+                    "product": info["product"], "condition": info["condition"], "breed": info["breed"],
+                    "rows": [{
+                        "new_row": True, "thickness": info["thickness"], "width": info["width"],
+                        "length": info["length"], "new_quantity": new_quantity,
+                    }],
+                })
+                continue
             positions.append({
                 "product": info["product"], "condition": info["condition"], "breed": info["breed"],
                 "rows": [{
