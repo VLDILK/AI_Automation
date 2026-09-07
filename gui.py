@@ -127,6 +127,39 @@ RU_MONTHS = [
 # тунель, тож джерело читає кеш останнього fetch і шле дії віддалено.
 # Кожна дія - у фоні (_push_custom_button_action); після успіху дерево
 # перечитується, і лише тоді панель перемальовується (then).
+# Прокрутка не йде вище стелі (правило користувача 2026-09-07: «якщо
+# вертикальний скрол додається - то НІКОЛИ не має скролитись вверх, що
+# робить порожній простір у вікні між текстом і тим що над ним»). Дві
+# функції на всі власні прокрутки домашки: область прокрутки не менша за
+# видиму частину (короткий вміст не «пливе» вниз) і колесо, затиснуте з
+# обох боків.
+def _visible_canvas_height(canvas):
+    # Рамка й підсвітка з'їдають кілька пікселів: без цього видима частина
+    # виходить меншою за область прокрутки, і вміст можна зрушити на 1-2 px
+    # угору - та сама порожнеча зверху, лише дрібна.
+    inset = 0
+    for option in ("highlightthickness", "borderwidth"):
+        try:
+            inset += 2 * int(float(canvas.cget(option) or 0))
+        except (ValueError, TypeError):
+            pass
+    return max(canvas.winfo_height() - inset, 1)
+
+
+def _scroll_region_with_ceiling(canvas):
+    box = canvas.bbox("all") or (0, 0, 1, 1)
+    canvas.configure(scrollregion=(0, 0, box[2], max(box[3], _visible_canvas_height(canvas))))
+
+
+def _wheel_blocked(canvas, event):
+    first, last = canvas.yview()
+    if event.delta > 0 and first <= 1e-6:
+        return True
+    if event.delta < 0 and last >= 1 - 1e-6:
+        return True
+    return False
+
+
 class _RemoteButtonSource(button_editor.ButtonSource):
     def __init__(self, app):
         self.app = app
@@ -3288,7 +3321,7 @@ class ExcelViewerApp:
         canvas.pack(side="left", fill="both", expand=True)
 
         def update_scroll_region(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            _scroll_region_with_ceiling(canvas)
             content_height = list_frame.winfo_reqheight()
             canvas_height = canvas.winfo_height()
             if content_height > canvas_height:
@@ -3303,7 +3336,7 @@ class ExcelViewerApp:
             update_scroll_region()
 
         def on_mousewheel(event):
-            if scrollbar.winfo_manager():
+            if scrollbar.winfo_manager() and not _wheel_blocked(canvas, event):
                 canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def unbind_mousewheel(event=None):
@@ -3776,7 +3809,7 @@ class ExcelViewerApp:
         scrollbar.pack(side="right", fill="y")
 
         def update_scroll_region(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            _scroll_region_with_ceiling(canvas)
             canvas.itemconfigure(window_id, width=canvas.winfo_width())
 
         list_frame.bind("<Configure>", update_scroll_region)
@@ -4025,13 +4058,15 @@ class ExcelViewerApp:
         controls_scrollbar.pack(side="right", fill="y")
 
         def _update_controls_scroll_region(event=None):
-            controls_canvas.configure(scrollregion=controls_canvas.bbox("all"))
+            _scroll_region_with_ceiling(controls_canvas)
 
         def _resize_controls_window(event):
             controls_canvas.itemconfigure(controls_window_id, width=event.width)
             _update_controls_scroll_region()
 
         def _on_controls_mousewheel(event):
+            if _wheel_blocked(controls_canvas, event):
+                return
             controls_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def _unbind_controls_mousewheel(event=None):
@@ -4322,13 +4357,15 @@ class ExcelViewerApp:
         entry_scrollbar.pack(side="right", fill="y")
 
         def _update_entry_scroll_region(event=None):
-            entry_canvas.configure(scrollregion=entry_canvas.bbox("all"))
+            _scroll_region_with_ceiling(entry_canvas)
 
         def _resize_entry_window(event):
             entry_canvas.itemconfigure(entry_window_id, width=event.width)
             _update_entry_scroll_region()
 
         def _on_entry_mousewheel(event):
+            if _wheel_blocked(entry_canvas, event):
+                return
             entry_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def _unbind_entry_mousewheel(event=None):
@@ -6188,7 +6225,7 @@ class ExcelViewerApp:
         body_id = canvas.create_window((0, 0), window=body, anchor="nw")
 
         def sync_scroll(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            _scroll_region_with_ceiling(canvas)
             # Смуга з'являється лише коли є що гортати - постійна смуга у
             # вікні, яке зазвичай уміщається, лише заважає.
             needed = body.winfo_reqheight() > canvas.winfo_height()
@@ -6204,7 +6241,7 @@ class ExcelViewerApp:
         )
 
         def on_wheel(event):
-            if body.winfo_reqheight() <= canvas.winfo_height():
+            if body.winfo_reqheight() <= canvas.winfo_height() or _wheel_blocked(canvas, event):
                 return
             canvas.yview_scroll(int(-event.delta / 120), "units")
 

@@ -53,6 +53,64 @@ def entry(parent, colors, variable, width=220, placeholder=""):
                         border_color=colors["line"], text_color=colors["fg"], placeholder_text=placeholder)
 
 
+class ScrollColumn(tk.Frame):
+    """Стовпчик вмісту з вертикальною прокруткою, яка НІКОЛИ не йде вище
+    початку вмісту (правило користувача 2026-09-07: «скрол лише вниз, зверху
+    завжди стеля»). Три речі разом: область прокрутки не менша за видиму
+    частину, колесо затиснуте з обох боків, повзунок теж. Вміст класти в
+    .body; коли він уміщається - смуги немає взагалі."""
+
+    def __init__(self, parent, colors, **kwargs):
+        super().__init__(parent, bg=colors["bg"], highlightthickness=0, bd=0, **kwargs)
+        self.colors = colors
+        self.canvas = tk.Canvas(self, bg=colors["bg"], highlightthickness=0, bd=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scroll = ttk.Scrollbar(self, orient="vertical", command=self._yview)
+        self.body = tk.Frame(self.canvas, bg=colors["bg"])
+        self._window = self.canvas.create_window(0, 0, anchor="nw", window=self.body)
+        self.canvas.configure(yscrollcommand=self._on_scroll_set)
+        self.body.bind("<Configure>", lambda event: self.sync())
+        self.canvas.bind("<Configure>", lambda event: self.sync())
+        self.canvas.bind("<MouseWheel>", self.on_wheel)
+
+    def content_height(self):
+        self.body.update_idletasks()
+        return max(self.body.winfo_reqheight(), 1)
+
+    def sync(self):
+        width = max(self.canvas.winfo_width(), 1)
+        self.canvas.itemconfigure(self._window, width=width)
+        height = self.content_height()
+        # Рамка/підсвітка з'їдають кілька пікселів - інакше вміст можна
+        # зрушити на 1-2 px угору (та сама порожнеча зверху, лише дрібна).
+        inset = 2 * (int(float(self.canvas.cget("highlightthickness") or 0)) + int(float(self.canvas.cget("borderwidth") or 0)))
+        visible = max(self.canvas.winfo_height() - inset, 1)
+        # Стеля: область прокрутки ніколи не менша за видиму частину, інакше
+        # короткий вміст «пливе» вниз і зверху лишається порожнеча.
+        self.canvas.configure(scrollregion=(0, 0, width, max(height, visible)))
+        if height <= visible:
+            self.canvas.yview_moveto(0)
+            if self.scroll.winfo_manager():
+                self.scroll.pack_forget()
+        elif not self.scroll.winfo_manager():
+            self.scroll.pack(side="right", fill="y")
+
+    def _on_scroll_set(self, first, last):
+        self.scroll.set(first, last)
+
+    def _yview(self, *args):
+        return self.canvas.yview(*args)
+
+    def on_wheel(self, event):
+        first, last = self.canvas.yview()
+        if event.delta > 0 and first <= 1e-6:
+            return "break"
+        if event.delta < 0 and last >= 1 - 1e-6:
+            return "break"
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+
 def add_window_grips(window, colors, handle=None, size=10):
     """Ручки зміни розміру в чотирьох кутах вікна і перетягування за handle
     (правило користувача: кожне окреме вікно - з ручками в усіх кутах)."""

@@ -16,7 +16,8 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from ui_kit import DEFAULT_COLORS, CanvasTable, MultiChoice, Popup, accent_button, add_window_grips, checkbox, entry, ghost_button
+from ui_kit import (DEFAULT_COLORS, CanvasTable, MultiChoice, Popup, ScrollColumn, accent_button,
+                    add_window_grips, checkbox, entry, ghost_button)
 from utils import LATH_MARK, normalize_length_mm, piece_measure, plain_product_name, row_measure_kind
 from utils import _number_value
 
@@ -553,8 +554,12 @@ class CorrectionWindow:
 
 class NewSizeDialog:
     """Окреме вікно «Новый размер» (варіант 05): продукт/порода/стан зі
-    списків або свої, розмір, кількість, одиниця для нового продукту.
-    «‹ Назад» угорі, Esc, ручки в чотирьох кутах, перетягування за шапку."""
+    списків АБО свої - пункт «+ свой…» робить сам список полем для набору,
+    тож нічого не з'являється й не зникає, розкладка стоїть на місці
+    (рішення користувача 2026-09-07). Розмір, кількість, одиниця для нового
+    продукту. «‹ Назад» угорі, Esc, ручки в чотирьох кутах, перетягування за
+    шапку. Вміст у ScrollColumn: на малому екрані з'являється прокрутка, і
+    вона ніколи не йде вище стелі."""
 
     OWN = "+ свой…"
     NONE = "— нет —"
@@ -569,87 +574,112 @@ class NewSizeDialog:
         window.title("Новый размер")
         window.configure(bg=colors["bg"])
         window.transient(owner.window)
-        window.geometry("400x440")
-        window.minsize(340, 400)
+        window.minsize(380, 280)
         bar = tk.Frame(window, bg=colors["bg"])
         bar.pack(fill="x", padx=14, pady=(12, 4))
         ghost_button(bar, colors, "‹ Назад", command=self.close, width=84, small=True).pack(side="left")
-        title = tk.Label(bar, text="Новый размер", font=("Segoe UI", 11, "bold"), bg=colors["bg"], fg=colors["fg"])
-        title.pack(side="left", padx=(10, 0))
-        body = tk.Frame(window, bg=colors["bg"])
-        body.pack(fill="both", expand=True, padx=16, pady=(4, 12))
+        tk.Label(bar, text="Новый размер", font=("Segoe UI", 11, "bold"), bg=colors["bg"], fg=colors["fg"]).pack(side="left", padx=(10, 0))
+        buttons = tk.Frame(window, bg=colors["bg"])
+        buttons.pack(fill="x", side="bottom", padx=16, pady=(6, 12))
+        accent_button(buttons, colors, "Добавить в таблицу", command=self.add, width=170).pack(side="right")
+        ghost_button(buttons, colors, "Отмена", command=self.close, width=90).pack(side="right", padx=(0, 8))
+        self.scroll = ScrollColumn(window, colors)
+        self.scroll.pack(fill="both", expand=True, padx=16, pady=(4, 0))
+        body = self.scroll.body
+
         self.products = owner.facet("product")
         self.breeds = owner.facet("breed")
         self.conditions = owner.facet("condition")
-        self.product_combo, self.product_own, self.product_own_entry = self._choice(body, "Продукт", self.products, "Выберите продукт…")
-        self.breed_combo, self.breed_own, self.breed_own_entry = self._choice(body, "Порода", self.breeds, "Выберите породу…")
-        self.condition_combo, self.condition_own, self.condition_own_entry = self._choice(body, "Состояние", self.conditions, self.NONE)
-        tk.Label(body, text="Т × Ш × Д, мм", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
+        self.product_combo, self.product_var = self._choice(body, "Продукт", self.products, "Выберите продукт…")
+        self.breed_combo, self.breed_var = self._choice(body, "Порода", self.breeds, "Выберите породу…")
+        self.condition_combo, self.condition_var = self._choice(body, "Состояние", self.conditions, self.NONE)
+        tk.Label(body, text="Т × Ш × Д, мм", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
         dims = tk.Frame(body, bg=colors["bg"])
         dims.pack(anchor="w", pady=(2, 0))
         self.dim_vars = []
-        for index in range(3):
+        for _index in range(3):
             var = tk.StringVar()
             entry(dims, colors, var, width=76).pack(side="left", padx=(0, 6))
             var.trace_add("write", lambda *_a: self._update_unit_default())
             self.dim_vars.append(var)
-        tk.Label(body, text="Количество, шт", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
+        tk.Label(body, text="Количество, шт", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
         self.quantity_var = tk.StringVar()
         entry(body, colors, self.quantity_var, width=110).pack(anchor="w", pady=(2, 0))
+        # Рядок одиниці стоїть завжди (нічого не «їздить»): для наявного
+        # продукту він лише приглушений і вимкнений.
         self.unit_row = tk.Frame(body, bg=colors["bg"])
-        tk.Label(self.unit_row, text="Единица нового продукта", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w")
+        self.unit_row.pack(anchor="w", fill="x", pady=(8, 0))
+        self.unit_label = tk.Label(self.unit_row, text="Единица нового продукта", bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9))
+        self.unit_label.pack(anchor="w")
         self.unit_control = ctk.CTkSegmentedButton(self.unit_row, values=[label for label, _kind in self.UNITS], height=28,
                                                    selected_color=colors["accent"], selected_hover_color=colors["accent"],
                                                    unselected_color=colors["row"], unselected_hover_color=colors["hover"],
                                                    text_color=colors["fg"], font=ctk.CTkFont(size=12))
         self.unit_control.pack(anchor="w", pady=(2, 0))
         self.unit_control.set("м3")
-        self.error = tk.Label(body, text="", bg=colors["bg"], fg=colors["minus"], font=("Segoe UI", 9), anchor="w", wraplength=340, justify="left")
-        self.error.pack(anchor="w", pady=(8, 0))
-        buttons = tk.Frame(body, bg=colors["bg"])
-        buttons.pack(fill="x", pady=(8, 0), side="bottom")
-        accent_button(buttons, colors, "Добавить в таблицу", command=self.add, width=170).pack(side="right")
-        ghost_button(buttons, colors, "Отмена", command=self.close, width=90).pack(side="right", padx=(0, 8))
+        self.error = tk.Label(body, text="", bg=colors["bg"], fg=colors["minus"], font=("Segoe UI", 9), anchor="w", justify="left", wraplength=320)
+        self.error.pack(anchor="w", fill="x", pady=(8, 4))
+
         add_window_grips(window, colors, handle=bar)
         window.bind("<Escape>", lambda event: self.close())
+        window.bind("<MouseWheel>", self.scroll.on_wheel)
         window.protocol("WM_DELETE_WINDOW", self.close)
         self._update_unit_default()
+        self._fit_window()
+
+    def _fit_window(self):
+        """Вікно під вміст, але не вище екрана - інакше нижні поля обрізались
+        би (живий випадок 2026-09-07). Не вміщається - лишається прокрутка."""
+        self.window.update_idletasks()
+        needed = self.scroll.content_height() + 130
+        screen = self.window.winfo_screenheight() or 900
+        height = max(300, min(needed, int(screen * 0.85)))
+        self.window.geometry("%dx%d" % (420, height))
+        self.window.update_idletasks()
+        self.scroll.sync()
 
     def _choice(self, parent, label, values, placeholder):
+        """Список зі своїм значенням: «+ свой…» перетворює сам список на поле
+        для набору. Жодних додаткових полів, розкладка не змінюється."""
         colors = self.colors
-        tk.Label(parent, text=label, bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 0))
-        own_var = tk.StringVar()
-        own_entry = entry(parent, colors, own_var, width=250, placeholder="новое значение")
+        tk.Label(parent, text=label, bg=colors["bg"], fg=colors["muted"], font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        var = tk.StringVar(value=placeholder)
         combo = ctk.CTkComboBox(
             parent, values=[placeholder] + list(values) + [self.OWN], width=250, height=30, corner_radius=8, state="readonly",
-            fg_color=colors["row"], border_color=colors["line"], text_color=colors["fg"], button_color=colors["accent"],
+            variable=var, fg_color=colors["row"], border_color=colors["line"], text_color=colors["fg"], button_color=colors["accent"],
             button_hover_color=colors["accent"], dropdown_fg_color=colors["row"], dropdown_text_color=colors["fg"],
-            dropdown_hover_color=colors["hover"], command=lambda value, e=own_entry: self._on_choice(value, e),
+            dropdown_hover_color=colors["hover"],
         )
-        combo.set(placeholder)
+        combo.configure(command=lambda value, c=combo: self._on_choice(c, value))
         combo.pack(anchor="w", pady=(2, 0))
-        own_var.trace_add("write", lambda *_a: self._update_unit_default())
-        return combo, own_var, own_entry
+        var.trace_add("write", lambda *_a: self._update_unit_default())
+        combo._placeholder = placeholder
+        return combo, var
 
-    def _on_choice(self, value, own_entry):
+    def _on_choice(self, combo, value):
         if value == self.OWN:
-            own_entry.pack(anchor="w", pady=(4, 0))
+            combo.configure(state="normal")
+            combo.set("")
+            try:
+                combo.focus_set()
+            except Exception:
+                pass
         else:
-            own_entry.pack_forget()
+            combo.configure(state="readonly")
         self._update_unit_default()
 
-    def _value(self, combo, own_var, placeholder):
-        text = combo.get()
-        if text == self.OWN:
-            return own_var.get().strip()
-        return "" if text == placeholder else text.strip()
+    def _value(self, combo):
+        text = str(combo.get()).strip()
+        if text in (combo._placeholder, self.OWN, self.NONE, ""):
+            return ""
+        return text
 
     def product_text(self):
-        return self._value(self.product_combo, self.product_own, "Выберите продукт…")
+        return self._value(self.product_combo)
 
     def product_is_new(self):
         product = self.product_text()
-        return bool(product) and product.lower() not in {p.lower() for p in self.products}
+        return bool(product) and product.lower() not in {value.lower() for value in self.products}
 
     def dims(self):
         values = []
@@ -669,40 +699,39 @@ class NewSizeDialog:
         return values
 
     def unit_visible(self):
-        return bool(self.unit_row.winfo_manager())
+        """Чи справді питаємо одиницю: рядок стоїть завжди, але для наявного
+        продукту він вимкнений."""
+        return str(self.unit_control.cget("state")) != "disabled"
 
     def unit_kind(self):
-        label = self.unit_control.get()
-        return dict(self.UNITS).get(label, "volume")
+        return dict(self.UNITS).get(self.unit_control.get(), "volume")
 
     def _update_unit_default(self):
-        if not self.product_is_new():
-            self.unit_row.pack_forget()
-            return
-        if not self.unit_visible():
-            self.unit_row.pack(anchor="w", pady=(8, 0))
+        is_new = self.product_is_new()
         dims = self.dims() or [None, None, None]
         kind = row_measure_kind(self.product_text(), dims[0], dims[1])
         self.unit_control.set({"volume": "м3", "area": "м2", "linear": "мп"}.get(kind, "шт"))
+        self.unit_control.configure(state="normal" if is_new else "disabled")
+        self.unit_label.configure(
+            text="Единица нового продукта" if is_new else "Единица — у этого продукта уже задана",
+            fg=self.colors["fg"] if is_new else self.colors["muted"],
+        )
 
     def set_values(self, product=None, breed=None, condition=None, thickness=None, width=None, length=None, quantity=None, unit=None):
-        for combo, own_var, own_entry, values, value in (
-            (self.product_combo, self.product_own, self.product_own_entry, self.products, product),
-            (self.breed_combo, self.breed_own, self.breed_own_entry, self.breeds, breed),
-            (self.condition_combo, self.condition_own, self.condition_own_entry, self.conditions, condition),
-        ):
+        for combo, values, value in ((self.product_combo, self.products, product),
+                                     (self.breed_combo, self.breeds, breed),
+                                     (self.condition_combo, self.conditions, condition)):
             if value is None:
                 continue
-            if value in values:
+            if value == "":
+                combo.configure(state="readonly")
+                combo.set(combo._placeholder)
+            elif value in values:
+                combo.configure(state="readonly")
                 combo.set(value)
-                self._on_choice(value, own_entry)
-            elif value == "":
-                combo.set(self.NONE if combo is self.condition_combo else combo.cget("values")[0])
-                self._on_choice(combo.get(), own_entry)
             else:
-                combo.set(self.OWN)
-                self._on_choice(self.OWN, own_entry)
-                own_var.set(value)
+                combo.configure(state="normal")
+                combo.set(value)
         for var, value in zip(self.dim_vars, (thickness, width, length)):
             if value is not None:
                 var.set(str(value))
@@ -714,8 +743,8 @@ class NewSizeDialog:
 
     def add(self):
         product = self.product_text()
-        breed = self._value(self.breed_combo, self.breed_own, "Выберите породу…")
-        condition = self._value(self.condition_combo, self.condition_own, self.NONE)
+        breed = self._value(self.breed_combo)
+        condition = self._value(self.condition_combo)
         dims = self.dims()
         raw_quantity = self.quantity_var.get().strip().replace(",", ".")
         try:
@@ -723,19 +752,23 @@ class NewSizeDialog:
         except ValueError:
             quantity = -1
         if not product:
-            self.error.configure(text="Укажите продукт.")
+            self._fail("Укажите продукт.")
             return None
         if dims is None:
-            self.error.configure(text="Толщина, ширина и длина — числа больше нуля.")
+            self._fail("Толщина, ширина и длина — числа больше нуля.")
             return None
         if quantity <= 0:
-            self.error.configure(text="Количество — число больше нуля.")
+            self._fail("Количество — число больше нуля.")
             return None
         new_product = self.product_is_new()
         row_id = self.owner.add_new_row(product, breed, condition, dims[0], dims[1], dims[2], quantity,
                                         unit_kind=self.unit_kind() if new_product else None, new_product=new_product)
         self.close()
         return row_id
+
+    def _fail(self, text):
+        self.error.configure(text=text)
+        self.scroll.sync()
 
     def close(self):
         if self.window.winfo_exists():
