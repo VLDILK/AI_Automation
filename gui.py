@@ -80,7 +80,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.35"
+__version__ = "1.1.36"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -296,12 +296,16 @@ class ExcelViewerApp:
     _LAST_SEEN_WIDTH = 16
     _SEMANTIC_FG_COLORS = {
         "white", "#d1242f", "#1a7f37", "#0969da", "#2F7BD9", "#255FA8",
+        "#24292f",  # текст сірого чіпа «Не распознано» в журналі дій
         "#1D9E75", "#B23B3B", "red", "green", "darkgreen",
         "#8a5a00",  # бейдж "виняток" (одиниця виміру) - лишається впізнаваним у обох темах
         "#B0B8C0", "#DFE6EE",  # текст на "телефоні" редактора кнопок
     } | {fg for _bg, fg in _ROLE_CHIP_COLORS.values()}
     _SEMANTIC_BG_COLORS = {bg.lower() for bg, _fg in _ROLE_CHIP_COLORS.values()} | {
         "#fff3d6",
+        # Чіпи статусу в журналі дій: помилка і «не розпізнано». Зелений
+        # (#dafbe1) і жовтий (#fff3d6) уже в наборі вище.
+        "#ffebe9", "#eaeef2",
         "#ddf4ff",  # бейдж "gui" (журнал оновлень)
         "#dafbe1",  # бейдж "client" (журнал оновлень)
         # "Телефон" у редакторі кнопок (button_editor.py) - кольори Telegram.
@@ -546,6 +550,9 @@ class ExcelViewerApp:
         self.display_settings.set("dark_mode", self._dark_mode)
         self.root.configure(bg=self._theme()["bg"])
         self._apply_theme()
+        # Підсвітку обраного рядка журналу дій тема щойно стерла (будь-який
+        # Frame повертається до свого фону) - малюємо її наново.
+        self._restore_action_log_selection()
 
     # Задача користувача: "скрізь зроби їх видимими кнопками, бо зараз не
     # видно що це те, на що можна натиснути" — стандартний tk.Button з
@@ -1518,13 +1525,22 @@ class ExcelViewerApp:
         window = tk.Toplevel(self.root)
         window.title(self._t("Журнали"))
         window.protocol("WM_DELETE_WINDOW", lambda: self._close_journals_window(window))
-        window.bind("<Escape>", lambda event: self._close_journals_window(window))
+        # Правило користувача (2026-09-05): Esc - ОДИН крок назад. З журналу
+        # дій він повертає до переліку журналів (те саме, що кнопка «Назад»),
+        # і лише з самого переліку закриває вікно.
+        window.bind("<Escape>", lambda event: self._journals_escape(window))
         self.journals_window = window
 
         self._build_journals_hub_view(window)
         self._build_action_log_view(window)
         self._show_journals_view("hub")
         self._center_window(window, width=820, height=560)
+
+    def _journals_escape(self, window):
+        if getattr(self, "action_log_frame", None) is not None and self.action_log_frame.winfo_manager():
+            self._show_journals_view("hub")
+            return
+        self._close_journals_window(window)
 
     def _close_journals_window(self, window):
         window.destroy()
@@ -1535,6 +1551,9 @@ class ExcelViewerApp:
         # кидало б TclError у відкладеному callback'у (_apply_action_log_rows),
         # той самий клас бага, що вже виправлений для Персоналу нижче.
         self.action_log_list_frame = None
+        self.action_log_detail_frame = None
+        self._action_log_row_widgets = {}
+        self._action_log_selected_id = None
 
     def _show_journals_view(self, view_name):
         for frame in (self.journals_hub_frame, self.action_log_frame):
@@ -1878,8 +1897,35 @@ class ExcelViewerApp:
         action_log_button.pack(pady=8)
 
 
+    # Задача користувача (2026-09-07): «журнал дій у домашці онови, щоб
+    # було читабельно, зараз там ніби консоль якась». З п'яти показаних
+    # виглядів обрано четвертий: список ліворуч, подробиці праворуч,
+    # спливаючого вікна «Детально» на цьому екрані більше немає.
+    #
+    # Колір статусу - смисловий, з тих наборів, які _apply_theme НЕ
+    # перефарбовує (див. _SEMANTIC_FG_COLORS/_SEMANTIC_BG_COLORS вище),
+    # тому чіп лишається впізнаваним і в темній темі.
+    _ACTION_LOG_STATUS_STYLE = {
+        "success": ("#dafbe1", "#1a7f37"),
+        "waiting": ("#fff3d6", "#8a5a00"),
+        "error": ("#ffebe9", "#d1242f"),
+        "cancelled": ("#eaeef2", "#24292f"),
+        "unknown": ("#eaeef2", "#24292f"),
+    }
+    _ACTION_LOG_DEFAULT_STATUS_STYLE = ("#eaeef2", "#24292f")
+    # Ширина лівого переліку. Достатньо для «Сообщение Telegram» і часу в
+    # одному рядку; решта вікна лишається подробицям.
+    _ACTION_LOG_LIST_WIDTH = 320
+
+    def _action_log_status_style(self, status):
+        return self._ACTION_LOG_STATUS_STYLE.get(
+            str(status or ""), self._ACTION_LOG_DEFAULT_STATUS_STYLE
+        )
+
     def _build_action_log_view(self, parent):
         self.action_log_frame = tk.Frame(parent)
+        self._action_log_row_widgets = {}
+        self._action_log_selected_id = None
 
         top_bar = tk.Frame(self.action_log_frame)
         top_bar.pack(side="top", fill="x", padx=8, pady=6)
@@ -1899,27 +1945,130 @@ class ExcelViewerApp:
         # лишені непрацюючими проти власної порожньої локальної бази.
         tk.Label(
             top_bar,
-            text=self._t("Перегляд лише для читання - дані тягнуться напряму з client_app.py."),
-            fg="#666666",
-        ).pack(side="left", padx=8)
+            text=self._t("Только чтение · данные client_app.py"),
+            fg="#8c959f",
+        ).pack(side="right")
 
-        content = tk.Frame(self.action_log_frame)
-        content.pack(side="top", fill="both", expand=True, padx=20, pady=20)
+        body = tk.Frame(self.action_log_frame)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=(0, 14))
 
-        header = tk.Frame(content)
-        header.pack(fill="x", pady=(0, 8))
+        # Перелік має сталу ширину (pack_propagate(False)), інакше довгий
+        # рядок тексту всередині розсував би його на пів вікна.
+        list_side = tk.Frame(body, width=self._ACTION_LOG_LIST_WIDTH, highlightthickness=1,
+                             highlightbackground="#8c959f")
+        list_side.pack(side="left", fill="y")
+        list_side.pack_propagate(False)
+        self.action_log_list_frame = self._create_scrollable_list(list_side)
 
-        for text, width in (
-            ("Пользователь", 20),
-            ("Действие", 18),
-            ("Статус", 16),
-            ("Время", 22),
-            ("Кратко", 46),
-            ("Действия", 18),
-        ):
-            tk.Label(header, text=text, width=width, anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left")
+        detail_side = tk.Frame(body)
+        detail_side.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        self.action_log_detail_frame = self._create_scrollable_list(detail_side)
 
-        self.action_log_list_frame = self._create_scrollable_list(content)
+    def _action_log_detail_placeholder(self, text):
+        frame = getattr(self, "action_log_detail_frame", None)
+        if frame is None:
+            return
+        self._clear_frame(frame)
+        tk.Label(frame, text=self._t(text), anchor="w", fg="#8c959f").pack(anchor="w", fill="x", pady=4)
+        self._apply_theme(frame)
+
+    def _paint_action_log_row(self, log_id, selected):
+        """Позначка обраного рядка. Викликається наново після кожного
+        _apply_theme: тема перефарбовує будь-який Frame назад у свій фон,
+        тож підсвітку доводиться класти зверху, а не покладатись на неї."""
+        widgets = getattr(self, "_action_log_row_widgets", {}).get(log_id)
+        if not widgets:
+            return
+        theme = self._theme()
+        row = widgets["row"]
+        if not row.winfo_exists():
+            return
+        background = theme["select_bg"] if selected else theme["bg"]
+        row.configure(bg=background)
+        for child in widgets["painted"]:
+            if child.winfo_exists():
+                child.configure(bg=background)
+        widgets["mark"].configure(text="▌" if selected else " ", fg="#0969da")
+        widgets["action"].configure(font=("Segoe UI", 9, "bold" if selected else "normal"))
+
+    def _restore_action_log_selection(self):
+        """Після зміни теми підсвітка обраного рядка малюється заново."""
+        selected = getattr(self, "_action_log_selected_id", None)
+        for log_id in list(getattr(self, "_action_log_row_widgets", {})):
+            self._paint_action_log_row(log_id, log_id == selected)
+
+    def _select_action_log_row(self, log_id):
+        previous = getattr(self, "_action_log_selected_id", None)
+        if previous is not None and previous != log_id:
+            self._paint_action_log_row(previous, False)
+        self._action_log_selected_id = log_id
+        self._paint_action_log_row(log_id, True)
+        self._render_action_log_detail(log_id)
+
+    def _render_action_log_detail(self, log_id):
+        frame = getattr(self, "action_log_detail_frame", None)
+        if frame is None:
+            return
+        row = self._remote_action_log_rows.get(log_id)
+        if not row:
+            self._action_log_detail_placeholder("Запись не найдена.")
+            return
+        self._clear_frame(frame)
+
+        log_id, action_type, details_json, created_at = row
+        details = self._parse_action_log_details(details_json)
+        telegram = details.get("telegram") or {}
+        summary = self._action_log_summary(action_type, details)
+        chip_bg, chip_fg = self._action_log_status_style(details.get("status"))
+
+        head = tk.Frame(frame)
+        head.pack(anchor="w", fill="x")
+        tk.Label(head, text=summary["action"], font=("Segoe UI", 13, "bold"), anchor="w").pack(side="left")
+        tk.Label(
+            head, text=" %s " % summary["status"], bg=chip_bg, fg=chip_fg,
+            font=("Segoe UI", 9), padx=6,
+        ).pack(side="left", padx=10)
+        tk.Label(head, text="#%s" % log_id, fg="#8c959f", anchor="e").pack(side="right")
+
+        def field(caption, value, fg=None):
+            if value in (None, ""):
+                return
+            line = tk.Frame(frame)
+            line.pack(anchor="w", fill="x", pady=(9, 0))
+            tk.Label(
+                line, text=self._t(caption), width=16, anchor="nw", fg="#8c959f",
+                font=("Segoe UI", 9),
+            ).pack(side="left")
+            label = tk.Label(line, text=str(value), anchor="w", justify="left", wraplength=520)
+            if fg:
+                label.configure(fg=fg)
+            label.pack(side="left", fill="x", expand=True)
+
+        user_id = telegram.get("user_id")
+        user_line = summary["user"]
+        if user_id:
+            user_line = "%s · id %s" % (user_line, user_id)
+        field("Пользователь", user_line)
+        field("Время", self._format_action_log_time(created_at))
+        field("Пришло", details.get("incoming_text"))
+        field("Ответ бота", self._action_log_reply_label(details.get("reply") or {}))
+        field("Ошибка", details.get("error"), fg="#d1242f")
+        duration = details.get("duration_ms")
+        if duration not in (None, ""):
+            field("Обработка", "%s мс" % duration)
+
+        # Технічні дані - унизу й дрібним: адміну вони потрібні рідко, але
+        # коли потрібні, іншого місця подивитись їх уже немає.
+        tk.Label(
+            frame, text=self._t("Технические данные"), anchor="w", fg="#8c959f",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", fill="x", pady=(16, 3))
+        tk.Label(
+            frame,
+            text=json.dumps(details, ensure_ascii=False, indent=2),
+            anchor="w", justify="left", fg="#666666", font=("Consolas", 9),
+        ).pack(anchor="w", fill="x")
+        self._apply_theme(frame)
 
     def _build_work_log_view(self, parent):
         self.work_log_frame = tk.Frame(parent)
@@ -8464,6 +8613,25 @@ class ExcelViewerApp:
             return f"{value:%d.%m.%y %H:%M}"
         return f"{value:%Y.%m.%d} {weekday} {value:%H:%M}"
 
+    def _action_log_short_time(self, created_at):
+        """Час для вузького переліку: сьогоднішнє - самим часом, учорашнє -
+        словом, старше - датою без року. Рахується з самої позначки, а не з
+        відформатованого рядка: формат дати налаштовуваний (date_format), і
+        в частині варіантів час стоїть попереду дати. Повна позначка
+        лишається праворуч у подробицях."""
+        try:
+            value = datetime.fromisoformat(str(created_at))
+        except (TypeError, ValueError):
+            return str(created_at or "")
+        days_ago = (datetime.now().date() - value.date()).days
+        if days_ago == 0:
+            return f"{value:%H:%M}"
+        if days_ago == 1:
+            return self._t("вчора")
+        if value.year == datetime.now().year:
+            return f"{value:%d.%m}"
+        return f"{value:%d.%m.%y}"
+
     def _format_action_log_time(self, created_at):
         try:
             value = datetime.fromisoformat(str(created_at))
@@ -8513,10 +8681,13 @@ class ExcelViewerApp:
     # результат повертається через _run_on_main_thread.
     def _refresh_action_log(self):
         self._clear_frame(self.action_log_list_frame)
+        self._action_log_row_widgets = {}
+        self._action_log_selected_id = None
         tk.Label(
             self.action_log_list_frame, text=self._t("Завантаження..."), anchor="w",
         ).pack(anchor="w", fill="x", pady=4)
         self._apply_theme(self.action_log_list_frame)
+        self._action_log_detail_placeholder("Завантаження...")
 
         # Реальний баг (аудит коду, 2026-08-15): без лічильника поколінь
         # запізніла відповідь РАНІШЕ розпочатого (але повільнішого через
@@ -8541,11 +8712,16 @@ class ExcelViewerApp:
         if rows is None:
             tk.Label(
                 self.action_log_list_frame,
-                text=self._t("Не вдалось отримати журнал з client_app.py. Перевірте з'єднання."),
+                text=self._t("Немає зв'язку з client_app.py."),
                 fg="#d1242f",
                 anchor="w",
+                wraplength=self._ACTION_LOG_LIST_WIDTH - 30,
+                justify="left",
             ).pack(anchor="w", fill="x", pady=4)
             self._apply_theme(self.action_log_list_frame)
+            self._action_log_detail_placeholder(
+                "Не вдалось отримати журнал з client_app.py. Перевірте з'єднання."
+            )
             return
         self._remote_action_log_rows = {row[0]: row for row in rows}
         if not rows:
@@ -8555,32 +8731,60 @@ class ExcelViewerApp:
                 anchor="w",
             ).pack(anchor="w", fill="x", pady=4)
             self._apply_theme(self.action_log_list_frame)
+            self._action_log_detail_placeholder("Журнал действий пока пуст.")
             return
 
+        self._action_log_row_widgets = {}
         for log_id, action_type, details_json, created_at in rows:
             details = self._parse_action_log_details(details_json)
             summary = self._action_log_summary(action_type, details)
+            _chip_bg, chip_fg = self._action_log_status_style(details.get("status"))
+
             row = tk.Frame(self.action_log_list_frame)
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x")
 
-            values = (
-                self._short_text(summary["user"], 20),
-                self._short_text(summary["action"], 18),
-                self._short_text(summary["status"], 16),
-                self._short_text(self._format_action_log_time(created_at), 22),
-                self._short_text(summary["text"], 46),
-            )
-            widths = (20, 18, 16, 22, 46)
-            for value, width in zip(values, widths):
-                tk.Label(row, text=value, width=width, anchor="w").pack(side="left")
+            mark = tk.Label(row, text=" ", fg="#0969da", font=("Segoe UI", 9))
+            mark.pack(side="left", fill="y")
 
-            detail_button = tk.Button(
-                row,
-                text=self._t("Детально"),
-                command=lambda item_id=log_id: self.open_action_log_details(item_id),
+            inner = tk.Frame(row)
+            inner.pack(side="left", fill="x", expand=True, padx=(2, 8), pady=5)
+
+            line1 = tk.Frame(inner)
+            line1.pack(fill="x")
+            dot = tk.Label(line1, text="●", fg=chip_fg, font=("Segoe UI", 8))
+            dot.pack(side="left", padx=(0, 6))
+            action = tk.Label(line1, text=summary["action"], anchor="w", font=("Segoe UI", 9))
+            action.pack(side="left")
+            when = tk.Label(
+                line1, text=self._action_log_short_time(created_at), anchor="e", fg="#8c959f",
+                font=("Segoe UI", 8),
             )
-            detail_button.pack(side="left", padx=(8, 0))
+            when.pack(side="right")
+
+            # Другий рядок: хто і що написав. Тут - і тільки тут - текст
+            # обрізається: перелік навмисно вузький, а повний текст видно
+            # праворуч у подробицях.
+            subtitle = "%s · %s" % (summary["user"], summary["text"]) if summary["text"] else summary["user"]
+            second = tk.Label(
+                line1.master, text=self._short_text(subtitle, 46), anchor="w", fg="#8c959f",
+                font=("Segoe UI", 8),
+            )
+            second.pack(fill="x")
+
+            self._action_log_row_widgets[log_id] = {
+                "row": row,
+                "mark": mark,
+                "action": action,
+                "painted": [inner, line1, dot, action, when, second, mark],
+            }
+            for widget in (row, inner, line1, dot, action, when, second, mark):
+                widget.bind("<Button-1>", lambda event, item_id=log_id: self._select_action_log_row(item_id))
         self._apply_theme(self.action_log_list_frame)
+        # Перший запис обраний одразу: порожня панель праворуч на старті
+        # нічого б не пояснювала.
+        first_id = rows[0][0]
+        self._action_log_selected_id = None
+        self._select_action_log_row(first_id)
 
     def _refresh_work_log(self):
         self._clear_frame(self.work_log_list_frame)
