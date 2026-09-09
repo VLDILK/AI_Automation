@@ -96,8 +96,12 @@ def _request(path, token, method="GET", payload=None, timeout=_TIMEOUT, with_sta
 _TOKEN_CHARS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _TOKEN_MIN = 30
 _TOKEN_MAX = 200
-# Довжина справжнього API-токена Cloudflare.
-_API_TOKEN_LENGTH = 40
+# Токен тунелю з команди cloudflared - це base64 від JSON, тож він завжди
+# починається з «eyJ» і має пару сотень символів. Саме це його й видає;
+# довжина API-токена для цього НЕ підходить (живий випадок 2026-09-09:
+# справжній ключ користувача - 53 символи, і його відхиляли).
+_TUNNEL_TOKEN_PREFIX = "eyJ"
+_TUNNEL_TOKEN_MIN = 120
 
 
 def describe_token_shape(token):
@@ -113,6 +117,18 @@ def describe_token_shape(token):
             for character in bad[:5]
         )
         return f"У токені є сторонні символи ({shown}) - скопійовано разом із чимось зайвим."
+    # Токен тунелю - раніше за загальні перевірки довжини: інакше він
+    # ловився б у «рядок задовгий», і людина не дізналась би, що саме
+    # вставила. Впізнаємо за тим, чим він справді відрізняється (base64 від
+    # JSON: «eyJ» на початку, пара сотень символів), а НЕ за довжиною
+    # API-токена - вона не фіксована, і саме на цьому спіткнувся живий ключ
+    # на 53 символи (2026-09-09).
+    if token.startswith(_TUNNEL_TOKEN_PREFIX) and len(token) >= _TUNNEL_TOKEN_MIN:
+        return (
+            "Це схоже на ТОКЕН ТУНЕЛЮ з команди cloudflared - він для цього вікна не підходить. "
+            "Потрібен ключ із «My Profile → API Tokens → Create Token» з правами "
+            "Zone → Zone → Read і Account → Cloudflare Tunnel → Read."
+        )
     if len(token) < _TOKEN_MIN:
         return (
             f"Схоже, скопійовано не весь токен: лише {len(token)} символів. "
@@ -121,18 +137,6 @@ def describe_token_shape(token):
     if len(token) > _TOKEN_MAX:
         return (
             f"Рядок задовгий для токена ({len(token)} символів) - схоже, прихопили щось стороннє."
-        )
-    # Живий випадок 2026-09-07: сюди вставили ТОКЕН ТУНЕЛЮ (довгий рядок із
-    # команди cloudflared). Він теж із дозволених символів і теж довгий, але
-    # це не ключ API - Cloudflare на нього відповідає 400. API-токен рівно
-    # 40 символів, тож усе, що помітно довше, називаємо своїм ім'ям одразу.
-    if len(token) > _API_TOKEN_LENGTH + 8:
-        return (
-            f"Це не схоже на API-токен Cloudflare: у нього рівно {_API_TOKEN_LENGTH} символів, "
-            f"а тут {len(token)}. Найчастіше сюди помилково вставляють ТОКЕН ТУНЕЛЮ з команди "
-            "cloudflared - він довший і для цього вікна не підходить. Потрібен ключ із "
-            "«My Profile → API Tokens → Create Token» з правами Zone → Zone → Read і "
-            "Account → Cloudflare Tunnel → Read."
         )
     return None
 
