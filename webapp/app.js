@@ -3836,13 +3836,6 @@
       formEl.classList.toggle("collapsed", !!state && exchanges.length > 0);
     }
 
-    function exchangeLines(block) {
-      var give = block.give.map(function (item) { return item.summary; }).join("; ");
-      var take = block.take.map(function (item) {
-        return item.summary + (item.isNew ? " — новая позиция" : "");
-      }).join("; ");
-      return { give: give, take: take };
-    }
 
     function renderExchanges() {
       exchangesList.innerHTML = "";
@@ -3852,15 +3845,24 @@
         row.className = "cart-item";
         var textWrap = document.createElement("div");
         textWrap.className = "cart-item-text-wrap";
-        var lines = exchangeLines(block);
-        var text = document.createElement("span");
-        text.className = "cart-item-text";
-        text.textContent = (index + 1) + ". Отдаём: " + lines.give;
-        textWrap.appendChild(text);
-        var takeLine = document.createElement("span");
-        takeLine.className = "cart-item-sum";
-        takeLine.textContent = "Получаем: " + lines.take;
-        textWrap.appendChild(takeLine);
+        // Обраний вигляд (2026-09-09): рядок на КОЖНУ позицію, «−» - зі
+        // складу, «+» - на склад. Раніше обидва боки склеювались через «; »
+        // в один рядок і обрізались - другий розмір людина просто не бачила,
+        // хоча він відправлявся.
+        function exchangeCartLine(sign, item) {
+          var line = document.createElement("div");
+          line.className = "exchange-cart-line";
+          var mark = document.createElement("span");
+          mark.className = "exchange-cart-sign " + (sign === "-" ? "give" : "take");
+          mark.textContent = sign === "-" ? "−" : "+";
+          line.appendChild(mark);
+          var body = document.createElement("span");
+          body.textContent = item.summary + (item.isNew ? " — новая позиция" : "");
+          line.appendChild(body);
+          textWrap.appendChild(line);
+        }
+        block.give.forEach(function (item) { exchangeCartLine("-", item); });
+        block.take.forEach(function (item) { exchangeCartLine("+", item); });
         row.appendChild(textWrap);
         var actions = document.createElement("div");
         actions.className = "cart-item-actions";

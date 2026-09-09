@@ -1500,3 +1500,29 @@ html, body {
   max-width: none;
   border-radius: 0;
 }
+
+/* Картка збереженої заміни (обраний вигляд 2026-09-09): рядок на позицію,
+   знак замість слів «Отдаём»/«Получаем». Нічого не обрізається - довга
+   назва переноситься, а не ховається за «…». */
+.exchange-cart-line {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+
+.exchange-cart-sign {
+  flex: none;
+  font-weight: 700;
+  width: 10px;
+  text-align: center;
+}
+
+.exchange-cart-sign.give {
+  color: #C0392B;
+}
+
+.exchange-cart-sign.take {
+  color: #2C7A57;
+}
