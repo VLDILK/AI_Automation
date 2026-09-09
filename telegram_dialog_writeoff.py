@@ -187,7 +187,7 @@ class WriteoffDialogMixin:
             }]
             lines = ["Списание:", ""]
             for number, position in enumerate(positions, start=1):
-                lines.append(f"{number}. {display_product_name(position)} / {position.get('breed')}")
+                lines.append(f"{number}. {self._position_title(position)}")
                 lines.extend(self._writeoff_row_lines(position, indent="   ", numbered=False))
                 lines.append("")
             lines.pop()

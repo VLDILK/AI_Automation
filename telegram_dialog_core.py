@@ -578,6 +578,15 @@ class CoreDialogMixin:
         "не открылась — сообщите разработчику."
     )
 
+    # Рішення користувача (2026-09-09): «якщо тип не Н/А - він має
+    # відображатись у повідомленнях. це поки один тип рейки, а якщо їх буде
+    # декілька - це має бути видно, щоб уникнути помилок». Записана операція
+    # уже показує «Позиция: Доска / Сосна / AD»; тепер так само й у
+    # розпізнаванні. Тип додається лише коли він є.
+    def _position_title(self, position):
+        parts = [display_product_name(position), position.get("breed"), position.get("condition")]
+        return " / ".join(str(part).strip() for part in parts if str(part or "").strip())
+
     def _form_not_ready_reply(self, store, button):
         return self._with_main_menu(self._FORM_NOT_READY_TEXT.format(button=button), store)
 

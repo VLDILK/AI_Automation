@@ -3877,7 +3877,7 @@ class IncomeSaleFlowDialogMixin:
         index = 0
         lines.append("")
         for position in completed_positions:
-            lines.append(f"Позиция: {display_product_name(position)} / {position.get('breed')}")
+            lines.append(f"Позиция: {self._position_title(position)}")
             for item in position.get("rows") or []:
                 index += 1
                 marker = " новая позиция" if item.get("create_new") else ""
@@ -3897,7 +3897,7 @@ class IncomeSaleFlowDialogMixin:
                 )
             lines.append("")
         if multi_position:
-            lines.append(f"Позиция: {display_product_name(payload)} / {payload.get('breed')}")
+            lines.append(f"Позиция: {self._position_title(payload)}")
         else:
             lines.extend([
                 f"Продукт: {display_product_name(payload)}",
@@ -3944,7 +3944,7 @@ class IncomeSaleFlowDialogMixin:
     # збережене при архівації), і для живого payload (де total_amount ще
     # не існує).
     def _sale_position_lines(self, index, position):
-        lines = [f"{index}. {display_product_name(position)} / {position.get('breed')}"]
+        lines = [f"{index}. {self._position_title(position)}"]
         for item in position.get("rows") or []:
             measure_key = self._row_measure_kind(position, item)
             if measure_key is None:
