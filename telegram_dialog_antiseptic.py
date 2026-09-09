@@ -730,11 +730,7 @@ class AntisepticDialogMixin:
             return denied
         web_app = self._antiseptic_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Антисептирование одной формой сейчас недоступно (форма не подключена "
-                "или нет категорий товара). Используйте обычное «Антисептирование».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "АНТИСЕПТИРОВАНИЕ (форма)")
         # antiseptic_all_in_one - той самий статус-маркер, що sale_all_in_one/
         # writeoff_all_in_one/income_all_in_one вже мають (_continue_operation_
         # with_webapp_payload, telegram_dialog_core.py) - страховка на випадок,

@@ -53,11 +53,7 @@ class WriteoffDialogMixin:
             return denied
         web_app = self._writeoff_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Списание одной формой сейчас недоступно (форма не подключена). "
-                "Используйте обычное «СПИСАНИЕ».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "СПИСАНИЕ (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "stock_writeoff", "writeoff_all_in_one", {},
         )

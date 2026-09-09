@@ -568,6 +568,19 @@ class CoreDialogMixin:
     # подальшого тексту - лише головне меню (людина повертається у форму
     # заново, якщо хоче спробувати ще раз), і pending прибирається одразу,
     # щоб застарілий payload не міг "зловити" наступне випадкове повідомлення.
+    # Текст користувача (2026-09-09) на всі кнопки «(форма)», коли форма ще
+    # не піднялась. Раніше кожна кнопка казала своє «форма не подключена» і
+    # радила старі текстові команди, яких у боті вже немає.
+    _FORM_NOT_READY_TEXT = (
+        "\u23f3 Форма ещё запускается — так бывает первые минуты после перезапуска "
+        "программы.\n\n"
+        "Подождите минуту и нажмите «{button}» ещё раз. Если через 10 минут форма "
+        "не открылась — сообщите разработчику."
+    )
+
+    def _form_not_ready_reply(self, store, button):
+        return self._with_main_menu(self._FORM_NOT_READY_TEXT.format(button=button), store)
+
     def _webapp_form_terminal_reply(self, store, context, text, parse_mode=None):
         store.delete_pending_operation(context["chat_id"], context["user_id"])
         return self._with_main_menu(text, store, parse_mode=parse_mode)
@@ -1519,7 +1532,7 @@ class CoreDialogMixin:
             return denied
         web_app = self._exchange_all_in_one_webapp_button(store, resume=resume)
         if web_app is None:
-            return self._with_main_menu("Обмен одной формой сейчас недоступен (форма не подключена).", store)
+            return self._form_not_ready_reply(store, "ОБМЕН (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "stock_exchange", "exchange_all_in_one", {},
         )
@@ -1569,10 +1582,7 @@ class CoreDialogMixin:
             # який далі з'їдав кожне натискання меню («Не смог посчитать» на
             # ОБМЕН, ДАННЫЕ, Обновить). Тепер - чесна відмова, без pending,
             # тим самим рядком, що й у обміну.
-            return self._with_main_menu(
-                "Калькулятор сейчас недоступен: форма не подключена.",
-                store,
-            )
+            return self._form_not_ready_reply(store, "КАЛЬКУЛЯТОР (форма)")
         return {
             "type": "message",
             "text": store.get_message_template(
@@ -2131,11 +2141,7 @@ class CoreDialogMixin:
             return denied
         web_app = self._data_browser_webapp_button(store, context)
         if web_app is None:
-            return self._with_main_menu(
-                "Просмотр данных одной формой сейчас недоступен (форма не подключена "
-                "или на складе пока нет данных). Используйте обычное «ДАННЫЕ».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "ДАННЫЕ (форма)")
         keyboard = {
             "keyboard": [
                 [{"text": "Открыть данные склада", **web_app}],
@@ -2331,7 +2337,7 @@ class CoreDialogMixin:
             return denied
         web_app = self._admin_form_webapp_button(store, context)
         if web_app is None:
-            return self._with_main_menu("Админ-форма сейчас недоступна (форма не подключена).", store)
+            return self._form_not_ready_reply(store, "Админ (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "stock_correction", "admin_form", {},
         )

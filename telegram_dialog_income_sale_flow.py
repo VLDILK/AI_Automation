@@ -392,11 +392,7 @@ class IncomeSaleFlowDialogMixin:
             return denied
         web_app = self._income_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Приход одной формой сейчас недоступен (форма не подключена). "
-                "Используйте обычный «ПРИХОД».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "ПРИХОД (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "add_income", "income_all_in_one", {},
         )
@@ -424,11 +420,7 @@ class IncomeSaleFlowDialogMixin:
             return denied
         web_app = self._sale_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Продажа одной формой сейчас недоступна (форма не подключена). "
-                "Используйте обычную «РЕАЛИЗАЦИЯ».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "РЕАЛИЗАЦИЯ (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "stock_sale", "sale_all_in_one", {},
         )
