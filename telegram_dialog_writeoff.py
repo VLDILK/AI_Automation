@@ -196,8 +196,12 @@ class WriteoffDialogMixin:
                 "Списание:",
                 f"Товар: {display_product_name(payload)}",
                 f"Порода: {payload.get('breed')}",
-                "",
             ]
+            # Одна позиція - заголовка «Товар / Порода / Тип» немає, тож тип
+            # пишеться окремим рядком (рішення користувача 2026-09-09).
+            if str(payload.get("condition") or "").strip():
+                lines.append(f"Тип: {payload['condition']}")
+            lines.append("")
             lines.extend(self._writeoff_row_lines(payload))
         if payload.get("comment"):
             lines.append("")

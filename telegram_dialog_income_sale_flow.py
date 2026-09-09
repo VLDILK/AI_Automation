@@ -3897,13 +3897,20 @@ class IncomeSaleFlowDialogMixin:
                 )
             lines.append("")
         if multi_position:
+            # Порожній рядок тут раніше стояв для ОБОХ гілок - і заголовок
+            # другої позиції відбивався від своїх рядків, на відміну від
+            # першої (помічено користувачем 2026-09-09).
             lines.append(f"Позиция: {self._position_title(payload)}")
         else:
             lines.extend([
                 f"Продукт: {display_product_name(payload)}",
                 f"Порода: {payload['breed']}",
             ])
-        lines.append("")
+            # Одна позиція - заголовка «Продукт / Порода / Тип» немає, тож
+            # тип пишеться окремим рядком (рішення користувача 2026-09-09).
+            if str(payload.get("condition") or "").strip():
+                lines.append(f"Тип: {payload['condition']}")
+            lines.append("")
         for item in payload["rows"]:
             index += 1
             marker = " новая позиция" if item.get("create_new") else ""
