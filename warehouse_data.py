@@ -6461,7 +6461,16 @@ def find_stock_row_id(store, position, item):
     wanted_breed = _normalize_phrase(position.get("breed") or "")
     dims = [_number_value(item.get(key)) for key in ("thickness", "width", "length")]
     for row_id, row in rows:
-        product = _normalize_phrase(plain_product_name(row_value(row, columns.get("product")) or "") or "")
+        # Той самий двобічний звід, що й у _warehouse_row_matches
+        # (2026-09-09): рядок «Доска AD» із рейковим перерізом - це рейка,
+        # незалежно від того, що стоїть у клітинці.
+        raw_product = plain_product_name(row_value(row, columns.get("product")) or "") or ""
+        raw_product = lath_product_name(
+            raw_product,
+            row_value(row, columns.get("thickness")),
+            row_value(row, columns.get("width")),
+        ) or raw_product
+        product = _normalize_phrase(raw_product)
         row_condition = _normalize_phrase(row_value(row, columns.get("condition")) or "")
         if condition and product.endswith(" " + condition):
             product = product[: -len(condition)].strip()

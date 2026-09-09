@@ -3830,6 +3830,18 @@ class IncomeSaleFlowDialogMixin:
             item.get("stock_thickness", item.get("thickness")),
             item.get("stock_width", item.get("width")),
         )
+        # Живий випадок (2026-09-09): зведення до рейки було в ОДИН бік -
+        # категорія «ДОСКА AD» 30×50 ставала рейкою, а рядок складу зі
+        # старою назвою «Доска AD» лишався дошкою. Переглядач малював його
+        # «Рейкою» (там переріз уже вирішував), а продаж не знаходив:
+        # «Не найдено на складе: Рейка / Сосна / 50x50x4000» при наявному
+        # залишку. Рішення користувача: зводити в ОБИДВА боки, щоб пошук не
+        # залежав від того, що написано в клітинці.
+        row_product = lath_product_name(
+            row_product,
+            row_value(row, columns.get("thickness")),
+            row_value(row, columns.get("width")),
+        ) or row_product
         if not self._text_equal(row_product, wanted_product):
             return False
         # Реальний баг (живий продакшн, 2026-08-17): "Не найдено на складе"
