@@ -2162,6 +2162,11 @@ class ExcelSqliteStore:
         # «rollback» пам'ятає, ЯКУ операцію він скасував (тип, час, автор,
         # номер) - JSON у цій колонці; сам скасований рух видаляється.
         self._ensure_column("stock_movements", "rollback_of", "TEXT")
+        # Відкат (2026-09-10): чи цей рух СТВОРИВ рядок СКЛАД (прихід нового
+        # розміру, «получаем» обміну). Без цієї ознаки відкат не відрізнить
+        # рядок, заведений операцією, від порожнього рядка, який лежав у
+        # таблиці до неї, - і стер би чужий.
+        self._ensure_column("stock_movements", "created_stock_row", "INTEGER")
         # Шаблони/недавні мега-форми (Задача користувача: "в історії
         # зберігається все... окрім ціни, штук") спершу забули адресу
         # вивантаження - вона теж мала зберігатись разом з клієнтом/оплатою.
@@ -4705,9 +4710,9 @@ class ExcelSqliteStore:
                 movement_type, source, telegram_user_id, username, full_name,
                 product, breed, condition, thickness, width, length,
                 quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at,
-                document, balance_after, amount, rollback_of
+                document, balance_after, amount, rollback_of, created_stock_row
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("movement_type", "income"),
@@ -4733,6 +4738,7 @@ class ExcelSqliteStore:
                 movement.get("balance_after"),
                 movement.get("amount"),
                 movement.get("rollback_of"),
+                1 if movement.get("created_stock_row") else None,
             ),
         )
         if not was_in_transaction:
@@ -4852,7 +4858,7 @@ class ExcelSqliteStore:
         sql = (
             "SELECT id, movement_type, source, telegram_user_id, username, full_name, product, breed, condition,"
             " thickness, width, length, quantity, volume, area, linear, reason, sheet_row_id, created_at, document,"
-            " balance_after, amount, rollback_of FROM stock_movements" + where_sql
+            " balance_after, amount, rollback_of, created_stock_row FROM stock_movements" + where_sql
         )
         direction = "ASC" if str(sort).lower() == "asc" else "DESC"
         sql += " ORDER BY created_at %s, id %s LIMIT ? OFFSET ?" % (direction, direction)
@@ -7697,6 +7703,8 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                 is_area = item.get("area") is not None
                 is_linear = item.get("linear") is not None
                 sheet_row_id = item.get("row_id")
+                # Відкат (2026-09-10): рух пам'ятає, що рядок створив саме він.
+                created_stock_row = False
                 if item.get("row_id"):
                     row_values = row_values_by_row_id[item["row_id"]]
                     if operation_id is not None:
@@ -7784,6 +7792,7 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                     # самий словник обслуговує обидві гілки (знайдено/
                     # створено).
                     row_values_by_row_id[sheet_row_id] = values
+                    created_stock_row = True
                     created += 1
 
                 user = payload.get("user") or {}
@@ -7813,6 +7822,7 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                         "original_text": payload.get("original_text"),
                         "created_at": now,
                         "balance_after": _number_value(row_value(row_values_by_row_id.get(sheet_row_id) or [], columns["balance_qty"])),
+                        "created_stock_row": created_stock_row,
                     }
                 )
 
@@ -8486,10 +8496,12 @@ def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
             existing_count = len(store.fetch_rows(EXCHANGE_SHEET_NAME, 100000, 0))
             document_number = "Обмен №%d" % _next_document_number(store, EXCHANGE_SHEET_NAME, existing_count)
             for side_label, movement_type, done in (
-                (EXCHANGE_GIVE_LABEL, "exchange_out", [(p, i, r) for p, i, r in give_done]),
-                (EXCHANGE_TAKE_LABEL, "exchange_in", [(p, i, r) for p, i, r, _new in take_done]),
+                # Відкат (2026-09-10): четвертий елемент - чи створив цей
+                # бік новий рядок СКЛАД («получаем» нового розміру).
+                (EXCHANGE_GIVE_LABEL, "exchange_out", [(p, i, r, False) for p, i, r in give_done]),
+                (EXCHANGE_TAKE_LABEL, "exchange_in", list(take_done)),
             ):
-                for position_payload, item, _row_values in done:
+                for position_payload, item, _row_values, created_stock_row in done:
                     insert_sheet_row(
                         store, EXCHANGE_SHEET_NAME,
                         exchange_sheet_values(store, position_payload, item, side_label, now, document_number), now,
@@ -8516,6 +8528,7 @@ def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
                         "created_at": now,
                         "balance_after": _number_value(row_value(_row_values, columns["balance_qty"])),
                         "document": document_number,
+                        "created_stock_row": created_stock_row,
                     })
     except _ExchangeAbort as exc:
         return {"ok": False, "message": exc.message}
@@ -9036,8 +9049,19 @@ def _rollback_load_group(store, movement_ids):
         % ",".join("?" for _ in kind_types),
         [first.get("created_at"), first.get("document") or "", str(first.get("telegram_user_id") or ""), *kind_types],
     )
-    if sorted(row["id"] for row in siblings) != ids:
-        raise _RollbackAbort("Откатывается операция целиком, а её состав в журнале изменился. Обновите журнал и повторите.")
+    # Надіслані id - вказівник на операцію, а не її повний склад: у формі
+    # картку могли обрізати фільтр чи межа сторінки. Чуже сюди не пройде
+    # (усе, що поза операцією, - відмова), а решту рухів добираємо самі,
+    # бо операція відкатується лише цілком.
+    sibling_ids = sorted(row["id"] for row in siblings)
+    if set(ids) - set(sibling_ids):
+        raise _RollbackAbort("Выбраны записи разных операций — откат делается по одной операции.")
+    if sibling_ids != ids:
+        rows = _movement_row_dicts(
+            store,
+            "SELECT * FROM stock_movements WHERE id IN (%s) ORDER BY id" % ",".join("?" for _ in sibling_ids),
+            sibling_ids,
+        )
     return kind, rows
 
 
@@ -9074,7 +9098,7 @@ def _sheet_rows_by_document(store, sheet_name, document):
         return []
     headers = store.get_headers(sheet_name)
     index = None
-    for name in ("Документ", "№ документа", "№ услуги", "№ послуги"):
+    for name in ("Документ", "№ документа", "Обмен №", "Коррекция №", "№ услуги", "№ послуги"):
         index = _header_index(headers, name)
         if index is not None:
             break
@@ -9118,6 +9142,7 @@ def _plan_rollback(store, movement_ids):
         columns = warehouse_columns(headers)
         initial_index = _header_index(headers, _WAREHOUSE_QTY_HEADERS[0])
         by_row = {}
+        remapped = False
         for movement in rows:
             row_id = movement.get("sheet_row_id")
             if row_id is None:
@@ -9126,10 +9151,23 @@ def _plan_rollback(store, movement_ids):
             if entry is None:
                 values = store.get_row(row_id)
                 if not values:
-                    raise _RollbackAbort(
-                        "Строка склада для «%s» не найдена: таблицу перечитывали после операции "
-                        "(«Обновить эксели»). Откат невозможен." % _rollback_movement_title(movement)
-                    )
+                    # Після «Обновить эксели» рядки СКЛАД заводяться заново з
+                    # новими id, тож sheet_row_id руху вказує в порожнечу. Той
+                    # самий запасний пошук за ознаками, що вже має корекція.
+                    new_id = find_stock_row_id(store, movement, movement)
+                    values = store.get_row(new_id) if new_id is not None else None
+                    if not values:
+                        raise _RollbackAbort(
+                            "Строка склада для «%s» не найдена: таблицу перечитывали после операции "
+                            "(«Обновить эксели»). Откат невозможен." % _rollback_movement_title(movement)
+                        )
+                    movement["sheet_row_id"] = row_id = new_id
+                    remapped = True
+                    entry = by_row.get(row_id)
+                    if entry is not None:
+                        entry["movements"].append(movement)
+                        _apply_reverse_delta(entry["values"], columns, movement)
+                        continue
                 entry = by_row[row_id] = {"values": list(values), "before": list(values), "movements": []}
             entry["movements"].append(movement)
             _apply_reverse_delta(entry["values"], columns, movement)
@@ -9153,12 +9191,18 @@ def _plan_rollback(store, movement_ids):
                 "SELECT COUNT(*) FROM stock_movements WHERE sheet_row_id = ? AND id NOT IN (%s)" % placeholders,
                 [row_id, *ids],
             ).fetchone()[0]
+            # Рядок прибирається, лише коли його СТВОРИЛА сама ця операція
+            # (рішення користувача). «Порожній» цього не доводить: нульовий
+            # рядок міг лежати в таблиці й до неї. Після перечитування Excel
+            # id рядків нові, тож і «інших рухів» порахувати чесно не можна -
+            # там не видаляємо нічого.
+            created_here = any(movement.get("created_stock_row") for movement in entry["movements"])
             plan["stock"].append({
                 "row_id": row_id,
                 "title": title,
                 "balance_before": balance_before,
                 "balance_after": balance_after,
-                "delete": bool(empty and others == 0),
+                "delete": bool(created_here and empty and others == 0 and not remapped),
                 "values": values,
                 "movements": entry["movements"],
             })

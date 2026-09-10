@@ -637,6 +637,16 @@ class JournalWindow:
     # причина - один раз. Записи документа йдуть підряд (той самий час).
     _EXCHANGE_PREFIX = {"exchange_out": "отдаём", "exchange_in": "получаем"}
 
+    @staticmethod
+    def _group_key(entry):
+        """Ключ операції для збирання сусідніх рухів в один запис. Відкат
+        (2026-09-10) свого номера не має - його позиції тримає разом
+        скасована операція."""
+        if (entry.get("type") or "") == "rollback" and isinstance(entry.get("rollback_of"), dict):
+            rolled = entry["rollback_of"]
+            return "rollback|%s|%s" % (rolled.get("created_at") or "", rolled.get("document") or "")
+        return str(entry.get("document") or "")
+
     def _rows_for(self, entries):
         """Рухи з тим самим номером документа - один запис журналу.
 
@@ -646,12 +656,12 @@ class JournalWindow:
         rows = []
         index = 0
         while index < len(entries):
-            document = str(entries[index].get("document") or "")
+            document = self._group_key(entries[index])
             group = [entries[index]]
             if document:
                 while index + len(group) < len(entries):
                     candidate = entries[index + len(group)]
-                    if str(candidate.get("document") or "") == document:
+                    if self._group_key(candidate) == document:
                         group.append(candidate)
                     else:
                         break
@@ -671,7 +681,7 @@ class JournalWindow:
         first = group[0]
         row = self._row_for(first)
         row["ids"] = [entry.get("id") for entry in group]
-        document = str(first.get("document") or "")
+        document = self._group_key(first)
         row["group_key"] = document
         expanded = document in self.expanded
         if is_exchange:

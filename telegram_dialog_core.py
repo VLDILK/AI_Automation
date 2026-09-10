@@ -645,13 +645,13 @@ class CoreDialogMixin:
         # відомо, яка саме операція (категорія дерева/антисептирование) -
         # її обирає сама форма (поле "Категория"), тож дисптечеризація за
         # operation_type тут ще НЕ застосовна - окрема гілка ПЕРЕД нею.
-        if pending.get("status") == "exchange_all_in_one":
-            return self._continue_exchange_all_in_one_submission(store, context, submitted)
-        # Відкат (2026-09-10) - ПЕРЕД гілкою admin_form: з відкритої
-        # адмін-форми pending завжди admin_form, і без цієї перевірки
-        # відкат пішов би в корекцію.
+        # Відкат (2026-09-10) - ПЕРЕД усіма гілками за pending: маркер шле
+        # лише адмін-форма, а pending на момент подання може бути будь-яким
+        # (admin_form, exchange_all_in_one - якщо форму відкрили раніше).
         if isinstance(submitted, dict) and submitted.get("positions_kind") == "rollback":
             return self._continue_rollback_submission(store, context, submitted)
+        if pending.get("status") == "exchange_all_in_one":
+            return self._continue_exchange_all_in_one_submission(store, context, submitted)
         if pending.get("status") == "admin_form" or (
             isinstance(submitted, dict) and submitted.get("positions_kind") == "correction"
         ):
