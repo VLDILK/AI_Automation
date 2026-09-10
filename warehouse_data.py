@@ -7975,7 +7975,9 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
             groups.append({"payload": position_payload, "rows": []})
         groups[group_index_by_key[key]]["rows"].extend(position["rows"])
 
-    lines = ["Приход записан:", ""]
+    # Номер у заголовку (рішення користувача, 2026-09-10): усі п'ять
+    # операцій називають свій документ однаково.
+    lines = ["<b>%s</b> записан:" % _esc(income_document_number), ""]
     index = 0
     for group_number, group in enumerate(groups, start=1):
         position_payload = group["payload"]
@@ -8219,7 +8221,7 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
 
     excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", WRITEOFF_SHEET_NAME], dirty_notifier)
 
-    lines = ["Списание записано:"]
+    lines = ["<b>%s</b> записано:" % _esc(writeoff_document_number)]
     index = 0
     for position_payload in positions:
         header_parts = [
