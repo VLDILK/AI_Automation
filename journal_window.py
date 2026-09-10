@@ -45,6 +45,8 @@ TYPE_COLORS = {
     "exchange_in": (("#E3E1F7", "#534AB7"), ("#2B2750", "#B9B3F2")),
     "antiseptic": (("#D9F0F4", "#0E7490"), ("#123540", "#7CD4E6")),
     "correction": (("#DDE6FB", "#1D4ED8"), ("#1C2A4A", "#9DB9F7")),
+    # Відкат (2026-09-10): сірий - скасування операції, а не операція.
+    "rollback": (("#E9EBEE", "#4B5563"), ("#2A2F36", "#C5CAD3")),
 }
 
 COLUMNS = (
@@ -601,6 +603,18 @@ class JournalWindow:
         product = entry.get("product") or ""
         if entry.get("breed"):
             product += " / " + entry["breed"]
+        reason = entry.get("reason") or ""
+        # Відкат (2026-09-10): у колонці «Причина / клиент» - яку операцію
+        # скасовано, і коментар відкату, якщо він є.
+        rolled = entry.get("rollback_of") if (entry.get("type") or "") == "rollback" else None
+        if isinstance(rolled, dict):
+            origin = " ".join(part for part in (
+                rolled.get("document") or rolled.get("type_label") or "",
+                rolled.get("time") or "",
+            ) if part)
+            if rolled.get("who"):
+                origin += " · " + str(rolled["who"])
+            reason = "откат: " + origin + (" · " + reason if reason else "")
         values = {
             # Знак «№» у самому рядку, не лише в заголовку (2026-09-06).
             "time": entry.get("time") or "", "type": entry.get("type_label") or "", "document": ("№" + number) if number else "",
@@ -609,7 +623,7 @@ class JournalWindow:
             "qty": _fmt_signed(entry.get("quantity")),
             "measure": _fmt_signed(entry.get("measure"), entry.get("unit") or "") if entry.get("measure") is not None else "",
             "balance": _display_bot_number(entry["balance_after"]) if entry.get("balance_after") not in (None, "") else "",
-            "reason": entry.get("reason") or "", "delete": "✕",
+            "reason": reason, "delete": "✕",
         }
         sign = 1 if quantity > 0 else (-1 if quantity < 0 else 0)
         return {

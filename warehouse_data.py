@@ -2158,6 +2158,10 @@ class ExcelSqliteStore:
         # Сума операції в MDL (2026-09-06): продаж і антисептик у журналі
         # показують дохід, а не «+м3».
         self._ensure_column("stock_movements", "amount", "REAL")
+        # Відкат операції (рішення користувача, 2026-09-10): рух типу
+        # «rollback» пам'ятає, ЯКУ операцію він скасував (тип, час, автор,
+        # номер) - JSON у цій колонці; сам скасований рух видаляється.
+        self._ensure_column("stock_movements", "rollback_of", "TEXT")
         # Шаблони/недавні мега-форми (Задача користувача: "в історії
         # зберігається все... окрім ціни, штук") спершу забули адресу
         # вивантаження - вона теж мала зберігатись разом з клієнтом/оплатою.
@@ -4701,9 +4705,9 @@ class ExcelSqliteStore:
                 movement_type, source, telegram_user_id, username, full_name,
                 product, breed, condition, thickness, width, length,
                 quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at,
-                document, balance_after, amount
+                document, balance_after, amount, rollback_of
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("movement_type", "income"),
@@ -4728,6 +4732,7 @@ class ExcelSqliteStore:
                 movement.get("document"),
                 movement.get("balance_after"),
                 movement.get("amount"),
+                movement.get("rollback_of"),
             ),
         )
         if not was_in_transaction:
@@ -4750,7 +4755,9 @@ class ExcelSqliteStore:
         where = []
         params = []
         negative = "movement_type IN (%s)" % ",".join("'%s'" % t for t in self._JOURNAL_NEGATIVE_TYPES)
-        signed_qty = "(CASE WHEN movement_type = 'correction' THEN coalesce(quantity, 0) WHEN %s THEN -abs(coalesce(quantity, 0)) ELSE abs(coalesce(quantity, 0)) END)" % negative
+        # Корекція і відкат зберігають кількість уже зі знаком: у відкату
+        # знак залежить від скасованої операції, а не від типу.
+        signed_qty = "(CASE WHEN movement_type IN ('correction', 'rollback') THEN coalesce(quantity, 0) WHEN %s THEN -abs(coalesce(quantity, 0)) ELSE abs(coalesce(quantity, 0)) END)" % negative
         measure_expr = "coalesce(volume, area, linear, 0)"
         size_expr = ("(printf('%g', coalesce(thickness, 0)) || 'x' || printf('%g', coalesce(width, 0)) || 'x'"
                      " || printf('%g', coalesce(length, 0)))")
@@ -4845,7 +4852,7 @@ class ExcelSqliteStore:
         sql = (
             "SELECT id, movement_type, source, telegram_user_id, username, full_name, product, breed, condition,"
             " thickness, width, length, quantity, volume, area, linear, reason, sheet_row_id, created_at, document,"
-            " balance_after, amount FROM stock_movements" + where_sql
+            " balance_after, amount, rollback_of FROM stock_movements" + where_sql
         )
         direction = "ASC" if str(sort).lower() == "asc" else "DESC"
         sql += " ORDER BY created_at %s, id %s LIMIT ? OFFSET ?" % (direction, direction)
@@ -5908,8 +5915,11 @@ JOURNAL_TYPE_LABELS = {
     "exchange_in": "Обмен: получаем",
     "antiseptic": "Антисептирование",
     "correction": "Коррекция",
+    "rollback": "Откат",
 }
 JOURNAL_NEGATIVE_TYPES = frozenset({"sale", "writeoff", "exchange_out"})
+# Типи, що зберігають кількість уже зі знаком (не виводиться з типу).
+JOURNAL_SIGNED_TYPES = frozenset({"correction", "rollback"})
 # Групи прапорців у фільтрі «Операция»: один прапорець «Обмен» = обидва боки.
 JOURNAL_FILTER_GROUPS = (
     ("Продажа", ("sale",)),
@@ -5918,7 +5928,39 @@ JOURNAL_FILTER_GROUPS = (
     ("Обмен", ("exchange_out", "exchange_in")),
     ("Антисептирование", ("antiseptic",)),
     ("Коррекция", ("correction",)),
+    ("Откат", ("rollback",)),
 )
+
+
+def _is_service_movement(row):
+    """Рух без штук: антисептик і відкат антисептика - лише гроші."""
+    movement_type = row.get("movement_type") or ""
+    return movement_type == "antiseptic" or (movement_type == "rollback" and row.get("quantity") is None)
+
+
+def _rollback_of_info(raw):
+    """JSON колонки rollback_of → словник для журналу (або None)."""
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    created = str(info.get("created_at") or "")
+    try:
+        time_text = datetime.fromisoformat(created).strftime("%H:%M %Y.%m.%d")
+    except ValueError:
+        time_text = created
+    return {
+        "type": info.get("type") or "",
+        "type_label": info.get("type_label") or JOURNAL_TYPE_LABELS.get(info.get("type") or "", ""),
+        "document": info.get("document") or "",
+        "created_at": created,
+        "time": time_text,
+        "who": info.get("who") or "",
+    }
 
 
 def movement_report_rows(store):
@@ -5930,12 +5972,12 @@ def movement_report_rows(store):
     result = []
     for row in rows:
         movement_type = row.get("movement_type") or ""
-        if movement_type == "antiseptic":
+        if _is_service_movement(row):
             continue
         kind = item_measure_kind(row)
         quantity = _number_value(row.get("quantity"))
         measure = _number_value(row.get(kind)) if kind else 0
-        if movement_type != "correction":
+        if movement_type not in JOURNAL_SIGNED_TYPES:
             sign = -1 if movement_type in JOURNAL_NEGATIVE_TYPES else 1
             quantity = abs(quantity) * sign
             measure = abs(measure) * sign
@@ -5968,7 +6010,8 @@ def journal_entries(rows):
         quantity = _number_value(row.get("quantity"))
         measure_kind = item_measure_kind(row)
         measure = _number_value(row.get(measure_kind)) if measure_kind else None
-        if movement_type != "correction":
+        service = _is_service_movement(row)
+        if movement_type not in JOURNAL_SIGNED_TYPES:
             sign = -1 if movement_type in JOURNAL_NEGATIVE_TYPES else 1
             quantity = abs(quantity) * sign
             if measure is not None:
@@ -5988,14 +6031,16 @@ def journal_entries(rows):
             "condition": row.get("condition") or "",
             "size": size,
             # Антисептик (2026-09-06): лише дохід, без «± шт / ± м3» - це
-            # послуга, а не рух на складі.
-            "quantity": None if movement_type == "antiseptic" else round(quantity, 6),
-            "measure_kind": None if movement_type == "antiseptic" else measure_kind,
-            "measure": None if movement_type == "antiseptic" or measure is None else round(measure, 6),
-            "unit": "" if movement_type == "antiseptic" else (ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else ""),
+            # послуга, а не рух на складі. Те саме - відкат антисептика.
+            "quantity": None if service else round(quantity, 6),
+            "measure_kind": None if service else measure_kind,
+            "measure": None if service or measure is None else round(measure, 6),
+            "unit": "" if service else (ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else ""),
             "amount": _number_value(row.get("amount")) if row.get("amount") not in (None, "") else None,
             "balance_after": row.get("balance_after"),
             "reason": row.get("reason") or "",
+            # Відкат (2026-09-10): яку операцію скасовано - для картки журналу.
+            "rollback_of": _rollback_of_info(row.get("rollback_of")) if movement_type == "rollback" else None,
         })
     return entries
 
@@ -8884,3 +8929,462 @@ def sync_antiseptic_after_operation(sync_mode, store, dirty_notifier=None):
             "Проверьте настройку источника Excel-таблицы в программе."
         )
     return None
+
+
+# ---------------- Відкат операції (рішення користувача, 2026-09-10) ----------------
+# Обрано «Як не було»: операція стирається - склад повертається зворотними
+# дельтами з чисел самого руху, рядки її листа й рухи видаляються; слідом
+# лишається рух «rollback» (власна картка в журналі, без змоги відкату) і
+# запис operation_rolled_back у журналі дій. Коментар необов'язковий.
+# Порожній рядок СКЛАД, який створила сама операція, прибирається (рішення
+# користувача: «хтось випадково каракулі введе, запам'ятає»).
+# Відкатуються: продаж, прихід, списання, обмін, антисептирування.
+# Корекція й сам відкат - ні («відкат відкотити неможливо»).
+
+ROLLBACK_SHEET_BY_KIND = {
+    "sale": SALES_SHEET_NAME,
+    "income": INCOME_SHEET_NAME,
+    "writeoff": WRITEOFF_SHEET_NAME,
+    "exchange": EXCHANGE_SHEET_NAME,
+    "antiseptic": ANTISEPTIC_SHEET_NAME,
+}
+_ROLLBACK_KIND_BY_TYPE = {
+    "sale": "sale", "income": "income", "writeoff": "writeoff",
+    "exchange_out": "exchange", "exchange_in": "exchange", "antiseptic": "antiseptic",
+}
+_ROLLBACK_TYPES_BY_KIND = {
+    "sale": ("sale",), "income": ("income",), "writeoff": ("writeoff",),
+    "exchange": ("exchange_out", "exchange_in"), "antiseptic": ("antiseptic",),
+}
+_ROLLBACK_KIND_LABELS = {
+    "sale": "Продажа", "income": "Приход", "writeoff": "Списание", "exchange": "Обмен",
+    "antiseptic": "Антисептирование",
+}
+# Знак руху відкату відносно складу: що операція зняла - повертається (+),
+# що додала - знімається (−). Антисептик складу не чіпає (None).
+_ROLLBACK_SIGN_BY_TYPE = {"sale": 1, "writeoff": 1, "exchange_out": 1, "income": -1, "exchange_in": -1}
+_ROLLBACK_LOCKED_MESSAGES = {
+    "rollback": "Откат откатить нельзя.",
+    "correction": "Коррекцию откатить нельзя — исправьте её новой коррекцией.",
+}
+
+
+class _RollbackAbort(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def _movement_row_dicts(store, sql, params):
+    cursor = store.conn.execute(sql, params)
+    keys = [column[0] for column in cursor.description]
+    return [dict(zip(keys, values)) for values in cursor.fetchall()]
+
+
+def _header_index(headers, name):
+    target = _normalize_phrase(name)
+    for index, header in enumerate(headers):
+        if header is not None and _normalize_phrase(str(header)) == target:
+            return index
+    return None
+
+
+def _rollback_movement_title(movement):
+    parts = [movement.get("product"), movement.get("breed")]
+    condition = movement.get("condition")
+    if condition and condition != movement.get("product"):
+        parts.append(condition)
+    head = " / ".join(str(part) for part in parts if part)
+    size = plain_item_size(movement) if movement.get("thickness") not in (None, "") else ""
+    return (head + " " + size).strip()
+
+
+def _rollback_load_group(store, movement_ids):
+    """Рухи однієї операції за id з форми. Операція відкатується лише
+    цілком: набір id мусить збігатися з усіма рухами того самого часу,
+    автора, документа й типу."""
+    try:
+        ids = sorted({int(value) for value in (movement_ids or [])})
+    except (TypeError, ValueError):
+        ids = []
+    if not ids:
+        raise _RollbackAbort("Не выбрана операция для отката.")
+    placeholders = ",".join("?" for _ in ids)
+    rows = _movement_row_dicts(
+        store, "SELECT * FROM stock_movements WHERE id IN (%s) ORDER BY id" % placeholders, ids,
+    )
+    if len(rows) != len(ids):
+        raise _RollbackAbort("Часть записей этой операции уже удалена из журнала — откатывать нечего. Обновите журнал.")
+    types = {row.get("movement_type") or "" for row in rows}
+    for locked, message in _ROLLBACK_LOCKED_MESSAGES.items():
+        if locked in types:
+            raise _RollbackAbort(message)
+    kinds = {_ROLLBACK_KIND_BY_TYPE.get(movement_type) for movement_type in types}
+    if len(kinds) != 1 or None in kinds:
+        raise _RollbackAbort("Выбраны записи разных операций — откат делается по одной операции.")
+    kind = kinds.pop()
+    first = rows[0]
+    same_stamp = len({row.get("created_at") for row in rows}) == 1
+    same_document = len({row.get("document") or "" for row in rows}) == 1
+    if not (same_stamp and same_document):
+        raise _RollbackAbort("Выбраны записи разных операций — откат делается по одной операции.")
+    kind_types = _ROLLBACK_TYPES_BY_KIND[kind]
+    siblings = _movement_row_dicts(
+        store,
+        "SELECT id FROM stock_movements WHERE created_at = ? AND coalesce(document, '') = ?"
+        " AND CAST(coalesce(telegram_user_id, '') AS TEXT) = ? AND movement_type IN (%s)"
+        % ",".join("?" for _ in kind_types),
+        [first.get("created_at"), first.get("document") or "", str(first.get("telegram_user_id") or ""), *kind_types],
+    )
+    if sorted(row["id"] for row in siblings) != ids:
+        raise _RollbackAbort("Откатывается операция целиком, а её состав в журнале изменился. Обновите журнал и повторите.")
+    return kind, rows
+
+
+def _apply_reverse_delta(values, columns, movement):
+    """Зворотна дельта рядка СКЛАД з чисел руху. Виміри теж повертаються
+    дельтою; update_row потім перерахує їх зі штук, як і в самій операції."""
+    movement_type = movement.get("movement_type") or ""
+    quantity = abs(_number_value(movement.get("quantity")))
+    kind = item_measure_kind(movement)
+    measure = abs(_number_value(movement.get(kind))) if kind else None
+
+    def add(prefix, sign):
+        add_to_row_value(values, columns.get(prefix + "_qty"), sign * quantity)
+        if kind and measure is not None:
+            add_to_row_value(values, columns.get(prefix + "_" + kind), sign * measure)
+
+    if movement_type == "sale":
+        add("sold", -1)
+        add("balance", 1)
+    elif movement_type in ("income", "exchange_in"):
+        add("income", -1)
+        add("balance", -1)
+    elif movement_type in ("writeoff", "exchange_out"):
+        add("balance", 1)
+    else:
+        raise _RollbackAbort("Операцию «%s» откатить нельзя." % JOURNAL_TYPE_LABELS.get(movement_type, movement_type))
+
+
+def _sheet_rows_by_document(store, sheet_name, document):
+    """Запасний пошук рядків листа за клітинкою документа/№ послуги -
+    коли час рядка вже не збігається з часом руху (лист правили)."""
+    document = str(document or "").strip()
+    if not document:
+        return []
+    headers = store.get_headers(sheet_name)
+    index = None
+    for name in ("Документ", "№ документа", "№ услуги", "№ послуги"):
+        index = _header_index(headers, name)
+        if index is not None:
+            break
+    if index is None:
+        return []
+    found = []
+    for row_id, values in store.fetch_all_rows_with_ids(sheet_name):
+        if str(row_value(values, index) or "").strip() == document:
+            found.append(row_id)
+    return found
+
+
+def _plan_rollback(store, movement_ids):
+    """Що саме зробить відкат - без жодного запису. Той самий план читає
+    підтвердження в чаті й сам запис (усередині своєї транзакції)."""
+    kind, rows = _rollback_load_group(store, movement_ids)
+    first = rows[0]
+    ids = [row["id"] for row in rows]
+    created = str(first.get("created_at") or "")
+    try:
+        time_text = datetime.fromisoformat(created).strftime("%H:%M %d.%m.%Y")
+    except ValueError:
+        time_text = created
+    plan = {
+        "kind": kind,
+        "label": _ROLLBACK_KIND_LABELS[kind],
+        "rows": rows,
+        "ids": ids,
+        "document": first.get("document") or "",
+        "created_at": created,
+        "time": time_text,
+        "who": first.get("full_name") or first.get("username") or "",
+        "sheet_name": ROLLBACK_SHEET_BY_KIND[kind],
+        "sheet_row_ids": [],
+        "stock": [],
+        "notes": [],
+    }
+
+    if kind != "antiseptic":
+        headers = store.get_headers("СКЛАД")
+        columns = warehouse_columns(headers)
+        initial_index = _header_index(headers, _WAREHOUSE_QTY_HEADERS[0])
+        by_row = {}
+        for movement in rows:
+            row_id = movement.get("sheet_row_id")
+            if row_id is None:
+                raise _RollbackAbort("У записи «%s» нет строки склада — откат невозможен." % _rollback_movement_title(movement))
+            entry = by_row.get(row_id)
+            if entry is None:
+                values = store.get_row(row_id)
+                if not values:
+                    raise _RollbackAbort(
+                        "Строка склада для «%s» не найдена: таблицу перечитывали после операции "
+                        "(«Обновить эксели»). Откат невозможен." % _rollback_movement_title(movement)
+                    )
+                entry = by_row[row_id] = {"values": list(values), "before": list(values), "movements": []}
+            entry["movements"].append(movement)
+            _apply_reverse_delta(entry["values"], columns, movement)
+        placeholders = ",".join("?" for _ in ids)
+        for row_id, entry in by_row.items():
+            values = entry["values"]
+            balance_before = _number_value(row_value(entry["before"], columns["balance_qty"]))
+            balance_after = _number_value(row_value(values, columns["balance_qty"]))
+            title = _rollback_movement_title(entry["movements"][0])
+            if balance_after < -INCOME_QUANTITY_TOLERANCE:
+                raise _RollbackAbort(
+                    "После этой операции товар «%s» уже уходил со склада: остаток стал бы %s шт. "
+                    "Сначала откатите те операции." % (title, _display_bot_number(balance_after))
+                )
+            initial = _number_value(row_value(values, initial_index)) if initial_index is not None else 0.0
+            empty = abs(initial) < 1e-9 and all(
+                abs(_number_value(row_value(values, columns.get(key)))) < 1e-9
+                for key in ("income_qty", "sold_qty", "balance_qty")
+            )
+            others = store.conn.execute(
+                "SELECT COUNT(*) FROM stock_movements WHERE sheet_row_id = ? AND id NOT IN (%s)" % placeholders,
+                [row_id, *ids],
+            ).fetchone()[0]
+            plan["stock"].append({
+                "row_id": row_id,
+                "title": title,
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+                "delete": bool(empty and others == 0),
+                "values": values,
+                "movements": entry["movements"],
+            })
+        if kind == "writeoff":
+            plan["notes"].append("«Причина списания» в строке склада не меняется.")
+
+    # Рядки листа операції: той самий час, що й у рухів (одна змінна now у
+    # кожній apply_*). Рядки, що прийшли з імпорту Excel, мають час імпорту
+    # (sheet_meta.imported_at) - їх виключаємо, інакше імпорт у ту саму
+    # секунду, що й операція, підмішав би весь лист.
+    sheet_ids = [
+        row[0] for row in store.conn.execute(
+            "SELECT id FROM sheet_rows WHERE sheet_name = ? AND updated_at = ?"
+            " AND updated_at != coalesce((SELECT imported_at FROM sheet_meta WHERE sheet_name = ?), '')",
+            (plan["sheet_name"], created, plan["sheet_name"]),
+        ).fetchall()
+    ]
+    if len(sheet_ids) != len(rows):
+        by_document = _sheet_rows_by_document(store, plan["sheet_name"], plan["document"])
+        if len(by_document) == len(rows):
+            sheet_ids = by_document
+        else:
+            raise _RollbackAbort(
+                "Строки листа «%s» этой операции не найдены (таблицу перечитывали или правили после неё). "
+                "Откат невозможен." % plan["sheet_name"]
+            )
+    plan["sheet_row_ids"] = sheet_ids
+    return plan
+
+
+def _rollback_line_text(movement, stock_entry):
+    """Один рядок звіту/підтвердження: позиція, скільки повертається або
+    знімається, залишок після."""
+    movement_type = movement.get("movement_type") or ""
+    if movement_type == "antiseptic":
+        amount = movement.get("amount")
+        document = str(movement.get("document") or "").strip()
+        text = document if document.lower().startswith("услуга") else ("Услуга %s" % document)
+        if amount not in (None, ""):
+            text += " на %s MDL" % _display_bot_number(_number_value(amount))
+        return text.strip()
+    sign = _ROLLBACK_SIGN_BY_TYPE.get(movement_type, 1)
+    quantity = sign * abs(_number_value(movement.get("quantity")))
+    text = "%s: %s шт" % (_rollback_movement_title(movement), signed_bot_number(quantity))
+    kind = item_measure_kind(movement)
+    if kind:
+        text += " (%s %s)" % (signed_bot_number(sign * abs(_number_value(movement.get(kind)))), ITEM_MEASURE_UNIT[kind])
+    if stock_entry is not None:
+        if stock_entry["delete"]:
+            text += " → строка склада будет удалена (была создана этой операцией)"
+        else:
+            text += " → остаток %s → %s шт" % (
+                _display_bot_number(stock_entry["balance_before"]), _display_bot_number(stock_entry["balance_after"]),
+            )
+    return text
+
+
+def _rollback_stock_entry(plan, movement):
+    for entry in plan["stock"]:
+        if entry["row_id"] == movement.get("sheet_row_id"):
+            return entry
+    return None
+
+
+def _rollback_heading(plan):
+    head = "«%s»" % (plan["document"] or plan["label"])
+    return "%s от %s (%s)" % (head, plan["time"], plan["who"] or "—")
+
+
+def rollback_preview(store, movement_ids):
+    """Текст підтвердження для чату: що повернеться, що зникне."""
+    try:
+        plan = _plan_rollback(store, movement_ids)
+    except _RollbackAbort as exc:
+        return {"ok": False, "message": exc.message}
+    lines = ["↶ Откатить %s?" % _rollback_heading(plan), ""]
+    if plan["kind"] == "antiseptic":
+        lines.append(_rollback_line_text(plan["rows"][0], None))
+    else:
+        lines.append("Вернётся на склад:" if plan["kind"] in ("sale", "writeoff") else "Изменится на складе:")
+        for index, movement in enumerate(plan["rows"], start=1):
+            lines.append("%d. %s" % (index, _rollback_line_text(movement, _rollback_stock_entry(plan, movement))))
+    lines.append("")
+    count = len(plan["sheet_row_ids"])
+    lines.append("Из листа %s исчезнет строк: %d." % (plan["sheet_name"], count))
+    lines.extend(plan["notes"])
+    return {"ok": True, "text": "\n".join(lines), "plan": plan}
+
+
+def apply_rollback_operation(store, payload, sync_mode, dirty_notifier=None):
+    """Відкат операції одним записом: склад ← зворотні дельти, рядки листа
+    й рухи операції - геть, рух «rollback» на кожен скасований, журнал дій."""
+    user = payload.get("user") or {}
+    comment = str(payload.get("comment") or "").strip() or None
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with store.conn:
+            store.conn.execute("BEGIN IMMEDIATE")
+            plan = _plan_rollback(store, payload.get("movement_ids") or [])
+            ids = plan["ids"]
+            for entry in plan["stock"]:
+                if entry["delete"]:
+                    # Прямий DELETE, а не store.delete_rows: той має власний
+                    # with self.conn і закомітив би транзакцію достроково.
+                    # warehouse_items зникає каскадом (FOREIGN KEY ... ON DELETE CASCADE).
+                    store.conn.execute("DELETE FROM sheet_rows WHERE id = ?", (entry["row_id"],))
+                else:
+                    store.update_row(entry["row_id"], entry["values"])
+            if plan["sheet_row_ids"]:
+                store.conn.execute(
+                    "DELETE FROM sheet_rows WHERE id IN (%s)" % ",".join("?" for _ in plan["sheet_row_ids"]),
+                    plan["sheet_row_ids"],
+                )
+            store.conn.execute("DELETE FROM stock_movements WHERE id IN (%s)" % ",".join("?" for _ in ids), ids)
+            balance_by_row = {
+                entry["row_id"]: (None if entry["delete"] else entry["balance_after"]) for entry in plan["stock"]
+            }
+            for movement in plan["rows"]:
+                movement_type = movement.get("movement_type") or ""
+                sign = _ROLLBACK_SIGN_BY_TYPE.get(movement_type)
+
+                def signed(value):
+                    if value in (None, "") or sign is None:
+                        return None
+                    return sign * abs(_number_value(value))
+
+                store.add_stock_movement({
+                    "movement_type": "rollback",
+                    "source": payload.get("source") or "telegram",
+                    "telegram_user_id": user.get("id"),
+                    "username": user.get("username"),
+                    "full_name": user.get("full_name"),
+                    "product": movement.get("product"),
+                    "breed": movement.get("breed"),
+                    "condition": movement.get("condition"),
+                    "thickness": movement.get("thickness"),
+                    "width": movement.get("width"),
+                    "length": movement.get("length"),
+                    "quantity": signed(movement.get("quantity")),
+                    "volume": signed(movement.get("volume")),
+                    "area": signed(movement.get("area")),
+                    "linear": signed(movement.get("linear")),
+                    "reason": comment,
+                    "sheet_row_id": movement.get("sheet_row_id"),
+                    "original_text": None,
+                    "created_at": now,
+                    "document": None,
+                    "balance_after": balance_by_row.get(movement.get("sheet_row_id")),
+                    "amount": (-_number_value(movement.get("amount"))) if movement.get("amount") not in (None, "") else None,
+                    "rollback_of": json.dumps({
+                        "type": movement_type,
+                        "type_label": JOURNAL_TYPE_LABELS.get(movement_type, movement_type),
+                        "document": movement.get("document") or "",
+                        "created_at": movement.get("created_at") or "",
+                        "who": movement.get("full_name") or movement.get("username") or "",
+                        "movement_id": movement.get("id"),
+                    }, ensure_ascii=False),
+                })
+    except _RollbackAbort as exc:
+        return {"ok": False, "message": exc.message}
+
+    if plan["kind"] == "antiseptic":
+        excel_warning = sync_antiseptic_after_operation(sync_mode, store, dirty_notifier)
+    else:
+        excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", plan["sheet_name"]], dirty_notifier)
+
+    plain_lines = ["Откат выполнен: %s" % _rollback_heading(plan)]
+    html_lines = ["<b>Откат выполнен:</b> %s" % _esc(_rollback_heading(plan))]
+    if plan["kind"] == "antiseptic":
+        line = _rollback_line_text(plan["rows"][0], None)
+        plain_lines.append(line)
+        html_lines.append(_esc(line))
+    else:
+        for index, movement in enumerate(plan["rows"], start=1):
+            line = "%d. %s" % (index, _rollback_line_text(movement, _rollback_stock_entry(plan, movement)))
+            plain_lines.append(line)
+            html_lines.append(_esc(line))
+    sheet_line = "Из листа %s удалено строк: %d." % (plan["sheet_name"], len(plan["sheet_row_ids"]))
+    plain_lines.append(sheet_line)
+    html_lines.append(_esc(sheet_line))
+    for note in plan["notes"]:
+        plain_lines.append(note)
+        html_lines.append(_esc(note))
+    if comment:
+        plain_lines.append("Комментарий: %s" % comment)
+        html_lines.append("Комментарий: %s" % _esc(comment))
+    if excel_warning:
+        plain_lines += ["", excel_warning]
+        html_lines += ["", _esc(excel_warning)]
+
+    # Журнал дій - після транзакції: add_action_log має власний with self.conn.
+    store.add_action_log("operation_rolled_back", {
+        "status": "success",
+        "telegram": {
+            "user_id": user.get("id"),
+            "username": user.get("username") or "",
+            "full_name": user.get("full_name") or "",
+        },
+        "incoming_text": "Откат: %s" % _rollback_heading(plan),
+        "reply": {"type": "message", "text": "\n".join(plain_lines)},
+        "rolled_back": {
+            "kind": plan["kind"],
+            "label": plan["label"],
+            "document": plan["document"],
+            "created_at": plan["created_at"],
+            "who": plan["who"],
+            "movement_ids": plan["ids"],
+        },
+        "comment": comment or "",
+        "stock": [
+            {
+                "row_id": entry["row_id"],
+                "title": entry["title"],
+                "balance_before": entry["balance_before"],
+                "balance_after": None if entry["delete"] else entry["balance_after"],
+                "deleted": entry["delete"],
+            }
+            for entry in plan["stock"]
+        ],
+        "sheet": {"name": plan["sheet_name"], "deleted_rows": len(plan["sheet_row_ids"])},
+    })
+    return {
+        "ok": True,
+        "message": "\n".join(html_lines),
+        "kind": plan["kind"],
+        "document": plan["document"],
+        "deleted_movement_ids": plan["ids"],
+        "deleted_stock_rows": [entry["row_id"] for entry in plan["stock"] if entry["delete"]],
+    }

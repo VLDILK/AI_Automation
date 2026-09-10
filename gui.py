@@ -80,7 +80,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.1.41"
+__version__ = "1.1.42"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -8436,6 +8436,7 @@ class ExcelViewerApp:
             "claude_key_help": "Инструкция Claude API",
             "claude_chat": "Разговор с Claude",
             "stock_income_history": "История прихода",
+            "operation_rolled_back": "Откат операции",
             "status": "Статус",
             "start": "Старт",
             "help": "Помощь",

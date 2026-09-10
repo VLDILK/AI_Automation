@@ -36,6 +36,8 @@ from warehouse_data import (
     movement_report_rows,
     signed_bot_number,
     apply_correction_operation,
+    apply_rollback_operation,
+    rollback_preview,
     GROUP_SEES_SIZE_RECALC_SETTING,
     ITEM_MEASURE_UNIT,
     apply_exchange_operation,
@@ -253,7 +255,14 @@ class CoreDialogMixin:
                 # розрізняється від продажу за РЕАЛЬНИМ kind категорії
                 # (_continue_direct_open_webapp_submission), не за окремим
                 # клієнтським прапорцем.
-                if "category_operation_id" not in submitted and not submitted.get("positions"):
+                # Відкат з адмін-форми (2026-09-10) позицій не несе - лише id
+                # рухів; pending при цьому може вже не бути (форму відкрили
+                # давно), тож він розпізнається за positions_kind.
+                if (
+                    "category_operation_id" not in submitted
+                    and not submitted.get("positions")
+                    and submitted.get("positions_kind") != "rollback"
+                ):
                     reply = self._webapp_unrecognized_submission_reply(store, submitted)
                     return reply
                 reply = self._continue_direct_open_webapp_submission(store, context, submitted)
@@ -638,6 +647,11 @@ class CoreDialogMixin:
         # operation_type тут ще НЕ застосовна - окрема гілка ПЕРЕД нею.
         if pending.get("status") == "exchange_all_in_one":
             return self._continue_exchange_all_in_one_submission(store, context, submitted)
+        # Відкат (2026-09-10) - ПЕРЕД гілкою admin_form: з відкритої
+        # адмін-форми pending завжди admin_form, і без цієї перевірки
+        # відкат пішов би в корекцію.
+        if isinstance(submitted, dict) and submitted.get("positions_kind") == "rollback":
+            return self._continue_rollback_submission(store, context, submitted)
         if pending.get("status") == "admin_form" or (
             isinstance(submitted, dict) and submitted.get("positions_kind") == "correction"
         ):
@@ -2287,6 +2301,8 @@ class CoreDialogMixin:
     # ---------------- Адмін-форма (2026-09-06) ----------------
     # Журнал операцій і корекція залишків, лише роль адміністратора.
     _CORRECTION_CONFIRM_LABEL = "Записать коррекцию"
+    # Відкат операції (2026-09-10): кнопка підтвердження в чаті.
+    _ROLLBACK_CONFIRM_LABEL = "Да, откатить"
     # Журнал операцій (2026-09-06): форматування й фільтри живуть у
     # warehouse_data (journal_entries/journal_page) - ті самі для форми
     # адміністратора, клієнта й домашки.
@@ -2514,6 +2530,80 @@ class CoreDialogMixin:
             "reply_markup": self._correction_confirm_keyboard(),
         }
 
+    # ---------------- Відкат операції (2026-09-10) ----------------
+    # Той самий шлях, що й у корекції: форма → sendData → підтвердження
+    # кнопкою в чаті → запис. Лише адміністратор. Відкат відкатити не можна
+    # (warehouse_data відмовляє, а форма кнопки не малює).
+    def _rollback_confirm_keyboard(self):
+        return {
+            "keyboard": [[{"text": self._ROLLBACK_CONFIRM_LABEL}], [{"text": "Отмена"}]],
+            "resize_keyboard": True,
+            "one_time_keyboard": True,
+        }
+
+    def _continue_rollback_submission(self, store, context, submitted):
+        denied = self._require_admin(store, context)
+        if denied:
+            return denied
+        store.delete_pending_operation(context["chat_id"], context["user_id"])
+        submitted = dict(submitted) if isinstance(submitted, dict) else {}
+        raw_ids = submitted.get("movement_ids")
+        try:
+            movement_ids = sorted({int(value) for value in raw_ids}) if isinstance(raw_ids, list) else []
+        except (TypeError, ValueError):
+            movement_ids = []
+        if not movement_ids:
+            return self._start_admin_form_reply(store, context, prefix_text="⚠️ Не выбрана операция для отката.")
+        comment = submitted.get("comment")
+        comment = comment.strip() if isinstance(comment, str) else ""
+        preview = rollback_preview(store, movement_ids)
+        if not preview.get("ok"):
+            return self._start_admin_form_reply(store, context, prefix_text="⚠️ " + preview["message"])
+        payload = {
+            "movement_ids": movement_ids,
+            "comment": comment,
+            "user": {
+                "id": context["user_id"],
+                "username": context["username"],
+                "full_name": context["full_name"],
+            },
+        }
+        store.save_pending_operation(
+            context["chat_id"], context["user_id"], "stock_rollback", "confirm_rollback", payload,
+        )
+        text = preview["text"]
+        if comment:
+            text += "\nКомментарий: %s" % comment
+        text += "\n\nОткатить?"
+        return {
+            "type": "message",
+            "text": text,
+            "reply_markup": self._rollback_confirm_keyboard(),
+        }
+
+    def _continue_rollback_operation(self, text, store, context, pending):
+        status = pending["status"]
+        payload = pending["payload"] or {}
+        normalized = _normalize_phrase(text or "")
+        if status != "confirm_rollback":
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._with_main_menu("Предыдущая операция сброшена. Отправьте запрос заново.", store)
+        if normalized in (_normalize_phrase(self._ROLLBACK_CONFIRM_LABEL), "да", "откатить"):
+            result = apply_rollback_operation(store, payload, self._excel_sync_mode(), self)
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            if not result.get("ok"):
+                return self._start_admin_form_reply(store, context, prefix_text="⚠️ " + result["message"])
+            self._notify_report_broadcast(context, result["message"])
+            return self._webapp_form_terminal_reply(store, context, result["message"], parse_mode="HTML")
+        if self._yes_no(text or "") is False:
+            store.delete_pending_operation(context["chat_id"], context["user_id"])
+            return self._with_main_menu("Откат отменён.", store)
+        return {
+            "type": "message",
+            "text": "Ответьте, пожалуйста: %s или Отмена." % self._ROLLBACK_CONFIRM_LABEL,
+            "reply_markup": self._rollback_confirm_keyboard(),
+        }
+
     # Рішення користувача (2026-09-06): довжина «3»/«6» з форми - метри →
     # 3000/6000. Форма переписує сама (app.js), тут - страховка для будь-якого
     # подання (продаж, прихід, списання, обмін, корекція, «Вернуться в форму»).
@@ -2538,6 +2628,8 @@ class CoreDialogMixin:
             return self._continue_writeoff_all_in_one_submission(store, context, submitted)
         if isinstance(submitted, dict) and submitted.get("positions_kind") == "correction":
             return self._continue_correction_submission(store, context, submitted)
+        if isinstance(submitted, dict) and submitted.get("positions_kind") == "rollback":
+            return self._continue_rollback_submission(store, context, submitted)
         # "Антисептирование (форма)" перевикористовує РЕАЛЬНІ sale-категорії
         # (Доска AD/KD/ОСБ/Вагонка) для вибору товару/розміру - тому
         # category_operation_id тут веде на operation[2] == "sale", той самий

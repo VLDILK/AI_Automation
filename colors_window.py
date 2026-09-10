@@ -22,6 +22,7 @@ PREVIEW_ROWS = (
     ("exchange", "18:43", "Обмен", "Доска AD 60×150×6000", "-12", -1),
     ("antiseptic", "14:00", "Антисептирование", "Доска AD 50×150×6000", "2,1 м3", 0),
     ("correction", "09:41", "Коррекция", "Доска KD 47×100×6000", "+4", 1),
+    ("rollback", "16:40", "Откат", "Доска AD 25×150×6000", "+120", 1),
 )
 LIGHT_PREVIEW = dict(DEFAULT_COLORS)
 DARK_PREVIEW = dict(DEFAULT_COLORS, bg="#16181C", fg="#E5E7EA", muted="#9AA1AB", row="#1E2126", zebra="#23272D",

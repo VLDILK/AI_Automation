@@ -287,7 +287,7 @@
       return;
     }
     var root = document.documentElement;
-    ["income", "sale", "writeoff", "exchange", "antiseptic", "correction"].forEach(function (key) {
+    ["income", "sale", "writeoff", "exchange", "antiseptic", "correction", "rollback"].forEach(function (key) {
       var pair = set[key];
       if (!pair || pair.length < 2) {
         return;
@@ -4150,30 +4150,40 @@
     menuScreen.className = "admin-screen";
     var journalScreen = document.createElement("div");
     journalScreen.className = "admin-screen";
+    // Відкат операції (рішення користувача, 2026-09-10): окремий екран
+    // «Откат операции» з карткою операції та полем коментаря.
+    var rollbackScreen = document.createElement("div");
+    rollbackScreen.className = "admin-screen";
     app.insertBefore(menuScreen, formEl);
     app.insertBefore(journalScreen, formEl);
+    app.insertBefore(rollbackScreen, formEl);
 
+    var SCREEN_TITLES = {
+      menu: "Админ", journal: "Журнал операций", correction: "Коррекция остатков", rollback: "Откат операции",
+    };
     var current = "menu";
     var journalLoaded = false;
     function showScreen(name) {
       current = name;
       menuScreen.hidden = name !== "menu";
       journalScreen.hidden = name !== "journal";
+      rollbackScreen.hidden = name !== "rollback";
       formEl.style.display = name === "correction" ? "" : "none";
       confirmView.style.display = "none";
       confirmPayload = null;
       errorEl.textContent = "";
       backButton.style.visibility = name === "menu" ? "hidden" : "";
-      topTitle.textContent = name === "menu" ? "Админ" : name === "journal" ? "Журнал операций" : "Коррекция остатков";
+      topTitle.textContent = SCREEN_TITLES[name] || "Админ";
+      var sends = name === "correction" || name === "rollback";
       if (tg && tg.MainButton) {
-        if (name === "correction") {
+        if (sends) {
           tg.MainButton.setText("Отправить");
           tg.MainButton.show();
         } else {
           tg.MainButton.hide();
         }
       } else {
-        fallback.style.display = name === "correction" ? "block" : "none";
+        fallback.style.display = sends ? "block" : "none";
       }
       if (name === "journal" && !journalLoaded) {
         loadJournal(true);
@@ -4183,6 +4193,11 @@
     function goBack() {
       if (confirmView.style.display !== "none") {
         hideConfirm();
+        return;
+      }
+      // Esc/«Назад» з екрана відкату - один крок назад, у журнал.
+      if (current === "rollback") {
+        showScreen("journal");
         return;
       }
       if (current !== "menu") {
@@ -4506,12 +4521,24 @@
       if (entry.amount !== null && entry.amount !== undefined && entry.amount !== "") {
         var money = document.createElement("span");
         money.className = "journal-money";
-        money.textContent = formatMoney(entry.amount) + " MDL";
+        // Відкат (2026-09-10) уперше дає відʼємну суму - мінус той самий,
+        // що й у штук/вимірів («−», не дефіс).
+        money.textContent = formatMoney(entry.amount).replace(/^-/, "−") + " MDL";
         line.appendChild(money);
       }
       return line;
     }
-    function documentElement(group) {
+    // Відкат (2026-09-10): картка відкату - вигляд 01 «як усі картки»:
+    // тег «↶ Откат», рядок «откачена: [Продажа] час · хто», позиції зі
+    // знаком, рядок коментаря (порожнє місце, якщо коментаря немає) і БЕЗ
+    // кнопки відкату. Кнопка «↶ Откатить» - на всіх інших картках, крім
+    // корекції (рішення користувача: корекцію не відкатують).
+    var ROLLBACK_VERB = {
+      sale: "откачена", income: "откачен", writeoff: "откачено",
+      exchange_out: "откачен", exchange_in: "откачен", antiseptic: "откачено",
+    };
+    var NO_ROLLBACK_TYPES = { rollback: true, correction: true };
+    function documentElement(group, preview) {
       var first = group[0];
       var base = baseType(first.type);
       var card = document.createElement("div");
@@ -4520,7 +4547,7 @@
       head.className = "journal-doc-head";
       var tag = document.createElement("span");
       tag.className = "journal-tag journal-tag-" + base;
-      tag.textContent = first.document || groupLabelFor(first.type);
+      tag.textContent = base === "rollback" ? "↶ " + groupLabelFor(first.type) : (first.document || groupLabelFor(first.type));
       head.appendChild(tag);
       var time = document.createElement("span");
       time.className = "journal-meta";
@@ -4532,6 +4559,22 @@
         head.appendChild(who);
       }
       card.appendChild(head);
+      var rolled = base === "rollback" ? (first.rollback_of || null) : null;
+      if (base === "rollback") {
+        var ref = document.createElement("div");
+        ref.className = "journal-ref";
+        var verb = (rolled && ROLLBACK_VERB[rolled.type]) || "откачено";
+        ref.appendChild(document.createTextNode(verb + ": "));
+        var refTag = document.createElement("span");
+        refTag.className = "journal-tag journal-tag-" + baseType(rolled ? rolled.type : "");
+        refTag.textContent = rolled ? (rolled.document || rolled.type_label || "") : "";
+        ref.appendChild(refTag);
+        var refMeta = [rolled ? rolled.time : "", rolled ? rolled.who : ""].filter(function (v) { return v; }).join(" · ");
+        if (refMeta) {
+          ref.appendChild(document.createTextNode(" " + refMeta));
+        }
+        card.appendChild(ref);
+      }
       group.slice().sort(function (a, b) {
         return (a.type === "exchange_in" ? 1 : 0) - (b.type === "exchange_in" ? 1 : 0);
       }).forEach(function (entry) {
@@ -4543,7 +4586,7 @@
         if (entry.balance_after !== null && entry.balance_after !== undefined) {
           balances.push(formatServerNumber(entry.balance_after));
         }
-        if (entry.reason && reasons.indexOf(entry.reason) === -1) {
+        if (base !== "rollback" && entry.reason && reasons.indexOf(entry.reason) === -1) {
           reasons.push(entry.reason);
         }
       });
@@ -4560,7 +4603,75 @@
         tailEl.textContent = tail.join(" · ");
         card.appendChild(tailEl);
       }
+      if (base === "rollback") {
+        // Є коментар - показується; немає - місце лишається порожнім
+        // (слова користувача: «пусто на тому місці коментаря»).
+        var commentEl = document.createElement("div");
+        if (first.reason) {
+          commentEl.className = "journal-comment";
+          commentEl.textContent = first.reason;
+        } else {
+          commentEl.className = "journal-comment-empty";
+        }
+        card.appendChild(commentEl);
+      } else if (!preview && !NO_ROLLBACK_TYPES[base]) {
+        var act = document.createElement("div");
+        act.className = "journal-doc-act";
+        var rollbackButton = document.createElement("button");
+        rollbackButton.type = "button";
+        rollbackButton.className = "journal-rollback-button";
+        rollbackButton.textContent = "↶ Откатить";
+        rollbackButton.addEventListener("click", function () {
+          openRollback(group);
+        });
+        act.appendChild(rollbackButton);
+        card.appendChild(act);
+      }
       return card;
+    }
+    // Екран «Откат операции»: картка (без кнопки), що зміниться, коментар.
+    var rollbackTarget = null;
+    var rollbackCommentInput = null;
+    function rollbackSummary(group) {
+      var wrap = document.createElement("div");
+      wrap.className = "rollback-summary";
+      var first = group[0];
+      var base = baseType(first.type);
+      var headline = document.createElement("div");
+      if (base === "antiseptic") {
+        headline.textContent = "Запись услуги исчезнет из журнала и листа АНТИСЕПТИРОВАНИЕ.";
+        wrap.appendChild(headline);
+        return wrap;
+      }
+      headline.textContent = base === "sale" || base === "writeoff" ? "Вернётся на склад:" : "Изменится на складе:";
+      wrap.appendChild(headline);
+      group.forEach(function (entry) {
+        if (entry.quantity === null || entry.quantity === undefined) {
+          return;
+        }
+        var line = document.createElement("div");
+        var what = [entry.product, entry.breed, entry.condition && entry.condition !== entry.product ? entry.condition : "", entry.size].filter(function (v) { return v; }).join(" ");
+        var text = "• " + what + ": " + signed(-(Number(entry.quantity) || 0)) + " шт";
+        if (entry.measure !== null && entry.measure !== undefined && entry.unit) {
+          text += " · " + signed(-(Number(entry.measure) || 0)) + " " + entry.unit;
+        }
+        line.textContent = text;
+        wrap.appendChild(line);
+      });
+      var sheetLine = document.createElement("div");
+      sheetLine.textContent = "Строки этой операции исчезнут из её листа. Точный остаток покажет подтверждение в чате.";
+      wrap.appendChild(sheetLine);
+      return wrap;
+    }
+    function openRollback(group) {
+      rollbackTarget = group;
+      rollbackScreen.innerHTML = "";
+      rollbackScreen.appendChild(documentElement(group, true));
+      rollbackScreen.appendChild(rollbackSummary(group));
+      var fieldWrap = document.createElement("div");
+      rollbackScreen.appendChild(fieldWrap);
+      rollbackCommentInput = buildFieldElement({ key: "rollback_comment", label: "Комментарий", type: "text", required: false }, fieldWrap);
+      showScreen("rollback");
     }
     function groupEntries(entries) {
       var result = [];
@@ -4568,8 +4679,14 @@
       var currentKey = null;
       entries.forEach(function (entry) {
         // Старі записи без номера документа (один прихід на кілька позицій)
-        // тримаються разом за типом, часом і людиною.
-        var key = (entry.document || ("~" + entry.time + "|" + (entry.who || ""))) + "|" + baseType(entry.type);
+        // тримаються разом за типом, часом і людиною. Час - до секунди
+        // (created_at): одна операція = одна секунда запису, а хвилина
+        // зліплювала б дві продажі поспіль (і два відкати) в одну картку.
+        var base = baseType(entry.type);
+        var key = (entry.document || ("~" + (entry.created_at || entry.time) + "|" + (entry.who || ""))) + "|" + base;
+        if (base === "rollback" && entry.rollback_of) {
+          key += "|" + (entry.rollback_of.created_at || "") + "|" + (entry.rollback_of.document || "");
+        }
         if (current && key === currentKey) {
           current.push(entry);
           return;
@@ -4967,7 +5084,40 @@
     confirmEditButton.addEventListener("click", hideConfirm);
 
     var isSending = false;
+    // Відкат (2026-09-10): без проміжного confirm-view - підтвердження
+    // одне, кнопкою в чаті, як у корекції.
+    function submitRollback() {
+      if (!rollbackTarget || isSending) {
+        return;
+      }
+      var ids = rollbackTarget.map(function (entry) { return entry.id; }).filter(function (value) {
+        return value !== null && value !== undefined;
+      });
+      if (!ids.length) {
+        fail("Не удалось определить записи операции. Обновите журнал.");
+        return;
+      }
+      var comment = rollbackCommentInput ? String(readFieldValue(rollbackCommentInput) || "").trim() : "";
+      var payload = { positions_kind: "rollback", movement_ids: ids };
+      if (comment) {
+        payload.comment = comment;
+      }
+      var json = JSON.stringify(payload);
+      if (!tg) {
+        window.alert(json);
+        return;
+      }
+      isSending = true;
+      if (tg.MainButton && tg.MainButton.showProgress) {
+        tg.MainButton.showProgress(false);
+      }
+      tg.sendData(json);
+    }
     function submit() {
+      if (current === "rollback") {
+        submitRollback();
+        return;
+      }
       if (current !== "correction") {
         return;
       }

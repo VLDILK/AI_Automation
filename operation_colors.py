@@ -13,14 +13,16 @@
 
 import colorsys
 
-OPERATION_TYPES = ("income", "sale", "writeoff", "exchange", "antiseptic", "correction")
+OPERATION_TYPES = ("income", "sale", "writeoff", "exchange", "antiseptic", "correction", "rollback")
 OPERATION_LABELS = {
     "income": "Приход", "sale": "Продажа", "writeoff": "Списание", "exchange": "Обмен",
-    "antiseptic": "Антисептирование", "correction": "Коррекция",
+    "antiseptic": "Антисептирование", "correction": "Коррекция", "rollback": "Откат",
 }
 DEFAULT_OPERATION_COLORS = {
     "income": "#0F6E56", "sale": "#8A3A05", "writeoff": "#B42318",
     "exchange": "#534AB7", "antiseptic": "#0E7490", "correction": "#1D4ED8",
+    # Відкат (2026-09-10): сірий - це не операція, а її скасування.
+    "rollback": "#6B7280",
 }
 # Палітра вікна кольорів: спокійні, читабельні відтінки; «Другой…» - будь-який.
 PALETTE = ["#0F6E56", "#3EA96E", "#185FA5", "#1D4ED8", "#534AB7", "#9D174D", "#B42318", "#C2410C", "#8A3A05", "#0E7490", "#6B7280", "#374151"]

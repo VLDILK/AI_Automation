@@ -1104,6 +1104,8 @@ html, body {
   --jc-exchange-bg: #e3e1f7; --jc-exchange-fg: #534ab7;
   --jc-antiseptic-bg: #d9f0f4; --jc-antiseptic-fg: #0e7490;
   --jc-correction-bg: #dde6fb; --jc-correction-fg: #1d4ed8;
+  /* Відкат (2026-09-10): сірий - скасування операції, а не операція. */
+  --jc-rollback-bg: #e9ebee; --jc-rollback-fg: #4b5563;
 }
 
 .journal-chips {
@@ -1139,6 +1141,7 @@ html, body {
 .journal-chip-exchange.on { background: var(--jc-exchange-bg); color: var(--jc-exchange-fg); }
 .journal-chip-antiseptic.on { background: var(--jc-antiseptic-bg); color: var(--jc-antiseptic-fg); }
 .journal-chip-correction.on { background: var(--jc-correction-bg); color: var(--jc-correction-fg); }
+.journal-chip-rollback.on { background: var(--jc-rollback-bg); color: var(--jc-rollback-fg); }
 
 .journal-doc {
   background: var(--tg-secondary-bg);
@@ -1156,6 +1159,60 @@ html, body {
 .journal-doc-exchange { border-left-color: var(--jc-exchange-fg); }
 .journal-doc-antiseptic { border-left-color: var(--jc-antiseptic-fg); }
 .journal-doc-correction { border-left-color: var(--jc-correction-fg); }
+.journal-doc-rollback { border-left-color: var(--jc-rollback-fg); }
+
+/* Відкат (2026-09-10): кнопка на картці, рядок «откачена: …», коментар. */
+.journal-doc-act {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.journal-rollback-button {
+  border: 1px solid var(--tg-link, #2481cc);
+  color: var(--tg-link, #2481cc);
+  background: transparent;
+  border-radius: 7px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.journal-ref {
+  color: var(--tg-hint);
+  font-size: 12px;
+  margin: 1px 0 3px;
+}
+
+.journal-ref .journal-tag {
+  font-size: 11px;
+  padding: 0 5px;
+}
+
+.journal-comment {
+  font-size: 13px;
+  font-style: italic;
+  color: var(--tg-text);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+/* Коментаря немає - місце лишається порожнім (слова користувача). */
+.journal-comment-empty {
+  height: 16px;
+  margin-top: 3px;
+}
+
+.rollback-summary {
+  font-size: 13px;
+  color: var(--tg-hint);
+  margin: 6px 0 12px;
+}
+
+.rollback-summary div {
+  margin: 2px 0;
+}
 
 .journal-doc-head {
   display: flex;
@@ -1180,6 +1237,7 @@ html, body {
 .journal-tag-exchange { background: var(--jc-exchange-bg); color: var(--jc-exchange-fg); }
 .journal-tag-antiseptic { background: var(--jc-antiseptic-bg); color: var(--jc-antiseptic-fg); }
 .journal-tag-correction { background: var(--jc-correction-bg); color: var(--jc-correction-fg); }
+.journal-tag-rollback { background: var(--jc-rollback-bg); color: var(--jc-rollback-fg); }
 
 .journal-role {
   display: inline-block;
