@@ -2225,6 +2225,7 @@ class ExcelSqliteStore:
         self.last_measures_filled = 0
         self.last_stock_rows_normalized = 0
         self.last_sales_numbered = {"sheet_rows": 0, "movements": 0, "journal_only": 0}
+        self.last_writeoffs_numbered = {"sheet_rows": 0, "movements": 0, "journal_only": 0}
         self._apply_standard_menu_policy()
         self._drop_chat_calculator_once()
         self._number_existing_sales_once()
@@ -2558,24 +2559,33 @@ class ExcelSqliteStore:
     # «якщо у продажи був відкат - то номер не видаляється». Друге виконано
     # само собою: document_counters лише зростає й ніколи не переприсвоює.
     _SALES_NUMBERED_KEY = "sales_numbered_v1"
-    _SALE_DOCUMENT_PREFIX = "Продажа №"
+    _WRITEOFFS_NUMBERED_KEY = "writeoffs_numbered_v1"
 
     def _number_existing_sales_once(self):
-        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (self._SALES_NUMBERED_KEY,)).fetchone():
-            return
-        headers = self.get_headers(SALES_SHEET_NAME)
+        self.last_sales_numbered = self._number_existing_documents_once(
+            self._SALES_NUMBERED_KEY, SALES_SHEET_NAME, sales_columns, "sale", "Продажа №",
+        )
+        self.last_writeoffs_numbered = self._number_existing_documents_once(
+            self._WRITEOFFS_NUMBERED_KEY, WRITEOFF_SHEET_NAME, writeoff_columns, "writeoff", "Списание №",
+        )
+
+    def _number_existing_documents_once(self, marker, sheet_name, columns_of, movement_type, prefix):
+        empty = {"sheet_rows": 0, "movements": 0, "journal_only": 0}
+        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (marker,)).fetchone():
+            return empty
+        headers = self.get_headers(sheet_name)
         if not headers:
-            return
-        index = sales_columns(headers).get("document")
+            return empty
+        index = columns_of(headers).get("document")
         if index is None:
-            return
+            return empty
         sheet_rows = self.conn.execute(
             "SELECT id, values_json, updated_at FROM sheet_rows WHERE sheet_name = ? ORDER BY position, id",
-            (SALES_SHEET_NAME,),
+            (sheet_name,),
         ).fetchall()
         used = set()
         for _row_id, values_json, _stamp in sheet_rows:
-            number = _sale_document_number(row_value(_deserialize_row(values_json), index))
+            number = _document_number_from_text(row_value(_deserialize_row(values_json), index), prefix)
             if number is not None:
                 used.add(number)
         next_number = (max(used) + 1) if used else 1
@@ -2585,11 +2595,11 @@ class ExcelSqliteStore:
         with self.conn:
             for row_id, values_json, stamp in sheet_rows:
                 values = _deserialize_row(values_json)
-                number = _sale_document_number(row_value(values, index))
+                number = _document_number_from_text(row_value(values, index), prefix)
                 if number is None:
                     number = next_number
                     next_number += 1
-                    set_value(values, index, "%s%d" % (self._SALE_DOCUMENT_PREFIX, number))
+                    set_value(values, index, "%s%d" % (prefix, number))
                     # Пряме оновлення, а не update_row: updated_at має
                     # лишитись часом операції - за ним відкат знаходить
                     # рядки свого листа.
@@ -2603,8 +2613,8 @@ class ExcelSqliteStore:
             journal_only = 0
             movements = self.conn.execute(
                 "SELECT id, created_at, telegram_user_id FROM stock_movements"
-                " WHERE movement_type = 'sale' AND (document IS NULL OR document = '')"
-                " ORDER BY created_at, id"
+                " WHERE movement_type = ? AND (document IS NULL OR document = '')"
+                " ORDER BY created_at, id", (movement_type,),
             ).fetchall()
             fresh_by_group = {}
             for movement_id, created_at, user_id in movements:
@@ -2623,21 +2633,19 @@ class ExcelSqliteStore:
                     number = fresh_by_group[group]
                 self.conn.execute(
                     "UPDATE stock_movements SET document = ? WHERE id = ?",
-                    ("%s%d" % (self._SALE_DOCUMENT_PREFIX, number), movement_id),
+                    ("%s%d" % (prefix, number), movement_id),
                 )
                 numbered_movements += 1
 
             self.conn.execute(
                 "INSERT INTO document_counters (sheet_name, next_number) VALUES (?, ?)"
                 " ON CONFLICT(sheet_name) DO UPDATE SET next_number = MAX(next_number, excluded.next_number)",
-                (SALES_SHEET_NAME, next_number),
+                (sheet_name, next_number),
             )
             self.conn.execute(
-                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, '1')", (self._SALES_NUMBERED_KEY,),
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, '1')", (marker,),
             )
-        self.last_sales_numbered = {
-            "sheet_rows": numbered_rows, "movements": numbered_movements, "journal_only": journal_only,
-        }
+        return {"sheet_rows": numbered_rows, "movements": numbered_movements, "journal_only": journal_only}
 
     def _apply_standard_menu_policy(self):
         with self.conn:
@@ -7229,15 +7237,18 @@ def _income_positions(payload):
 # номер. current_count_fallback — лише для ПЕРШОГО виклику на ще не
 # засіяному лічильнику: продовжує з поточного рахунку рядків, БЕЗ
 # ретроактивної переномерації вже виданих номерів.
-def _sale_document_number(value):
-    """«Продажа №42» → 42; будь-що інше (порожньо, «Telegram продажа …»,
-    руками введений тип документа) → None."""
+def _document_number_from_text(value, prefix):
+    """«Продажа №42» + префікс «Продажа №» → 42; будь-що інше (порожньо,
+    «Telegram продажа …», руками введений тип документа) → None."""
     text = str(value or "").strip()
-    prefix = "Продажа №"
     if not text.startswith(prefix):
         return None
     tail = text[len(prefix):].strip()
     return int(tail) if tail.isdigit() else None
+
+
+def _sale_document_number(value):
+    return _document_number_from_text(value, "Продажа №")
 
 
 def _next_document_number(store, sheet_name, current_count_fallback):
@@ -7575,7 +7586,9 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
     # для групи (full_info=False: без підміни розміру й доходу по
     # перерахунку); яку слати в групу, вирішує перемикач клієнта.
     def build_lines(full_info):
-        lines = ["Продажа записана:"]
+        # Номер у заголовку (рішення користувача, 2026-09-10) - той самий,
+        # що в листі, русі й журналі: щоб продаж можна було звірити.
+        lines = ["<b>%s</b> записана:" % _esc(document_number)]
         index = 0
         grand_total = 0.0
         grand_total_goods = 0.0
@@ -8178,6 +8191,9 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
                 store.add_stock_movement(
                     {
                         "movement_type": "writeoff",
+                        # Номер списання в русі (рішення користувача,
+                        # 2026-09-10) - та сама діра, що була в продажу.
+                        "document": writeoff_document_number,
                         "source": "telegram",
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
