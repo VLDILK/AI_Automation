@@ -16,6 +16,16 @@ from pathlib import Path
 
 # Значення за замовчуванням для system/settings.json.
 DEFAULT_SETTINGS = {
+    # Звірка Excel при старті клієнта (2026-09-05): нагадувати про відсутні
+    # колонки при кожному запуску. Без реєстрації тут get() повертав "" -
+    # перемикач читався як вимкнений, хоч задум був "типово увімкнено".
+    "excel_check_remind_every_start": True,
+    # KD за номіналом (2026-09-05): чи бачить група дублювання звітів підміну
+    # розміру й дохід по перерахунку. Типово так; автор продажу бачить завжди.
+    "group_sees_size_recalc": True,
+    # Кольори операцій журналу (2026-09-06): {type: "#RRGGBB"} лише для
+    # змінених людиною; порожньо = типові (operation_colors.py).
+    "operation_colors": {},
     "telegram_token_file": "",
     "last_file_dialog_dir": "C:\\",
     "request_processing_mode": "no_ai",

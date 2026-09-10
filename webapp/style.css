@@ -109,109 +109,9 @@ html, body {
 
 /* Задача користувача (скріншот 2): "5 рядків із шаблонами" зверху форми -
    два стовпці (власні шаблони / 5 останніх), кожен рядок клікабельний. */
-.template-panel {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.template-column {
-  flex: 1;
-  min-width: 0;
-  background: var(--tg-secondary-bg);
-  border-radius: 12px;
-  padding: 8px;
-}
-
-.template-column-title {
-  font-size: 12px;
-  text-transform: uppercase;
-  color: var(--tg-hint);
-  margin-bottom: 6px;
-  padding: 0 4px;
-}
-
 /* Задача користувача: "не по 1 рядку, а по 2... і обгорнути це ніби в таку
    лагідну кнопочку" - кожен запис тепер власна м'яка пігулка (округлена,
    легка тінь, трохи світліший фон за панель, ЧІТКА рамка - за ескізом). */
-.template-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  padding: 8px 10px;
-  border-radius: 14px;
-  cursor: pointer;
-  background: var(--tg-bg);
-  border: 1px solid rgba(140, 140, 140, 0.3);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-
-.template-row-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.template-row-line-top {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.template-row-line-bottom {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  color: var(--tg-hint);
-}
-
-.template-row-delete {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  line-height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--tg-hint);
-  font-size: 15px;
-}
-
-.template-row-delete:active {
-  background: var(--tg-bg);
-  color: var(--tg-destructive, #e53935);
-}
-
-.template-row:active {
-  box-shadow: inset 0 0 0 100px rgba(0, 0, 0, 0.06);
-}
-
-.template-row + .template-row {
-  margin-top: 6px;
-}
-
-.template-row-empty {
-  color: var(--tg-hint);
-  cursor: default;
-}
-
-.save-template-button {
-  display: block;
-  width: 100%;
-  margin-top: 14px;
-  margin-bottom: 16px;
-  padding: 10px;
-  border-radius: 12px;
-  border: 1px solid var(--custom-g3-border, var(--field-border));
-  background: var(--custom-g3-fill, transparent);
-  color: var(--custom-g3-text, var(--tg-link));
-  font-size: 14px;
-}
 
 .row-block {
   background: var(--custom-entry-bg, var(--tg-secondary-bg));
@@ -409,6 +309,19 @@ html, body {
 .stock-balance-hint:active {
   background: var(--tg-button);
   color: var(--tg-button-text);
+}
+
+/* Рішення користувача (2026-09-06): у продажу й списанні, де залишок має
+   реально списатись, замість «Всего: 0 шт» - дрібним червоним «нет остатка»
+   (варіант 01). Не кнопка: без рамки й без реакції на натискання. */
+.stock-balance-hint.no-stock,
+.stock-balance-hint.no-stock:active {
+  border-color: transparent;
+  background: transparent;
+  color: var(--error);
+  font-size: 11px;
+  padding: 4px 0;
+  cursor: default;
 }
 
 /* Живий перерахунок "Количество" у м3/м2/мп ПРАВОРУЧ від самого поля
@@ -688,4 +601,986 @@ html, body {
 
 .cart-item-btn-remove {
   color: var(--error);
+}
+
+/* Обмін (ТЗ пункт 1, 2026-09-05) - варіант 01 із пʼяти: два блоки один під
+   одним, у кожного свій кошик і своя кнопка "Добавить". Лівий кант блоку
+   каже, що це за блок, ще до читання заголовка: червоний - віддаємо,
+   зелений - отримуємо. Самі поля, кошик і чипи - ті самі класи, що й у
+   решти форми, щоб обмін не вчив людину нового вигляду. */
+.exchange-block {
+  border-left: 4px solid var(--field-border);
+  border-radius: 12px;
+  background: var(--tg-secondary-bg);
+  padding: 10px 12px 4px;
+  margin-bottom: 14px;
+}
+
+.exchange-block-give {
+  border-left-color: #C0392B;
+}
+
+.exchange-block-take {
+  border-left-color: #2C7A57;
+}
+
+.exchange-block-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.exchange-block-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.exchange-block-give .exchange-block-title {
+  color: #C0392B;
+}
+
+.exchange-block-take .exchange-block-title {
+  color: #2C7A57;
+}
+
+.exchange-block-count {
+  font-size: 12px;
+  color: var(--tg-hint);
+  text-align: right;
+}
+
+/* Кошик усередині блоку вже стоїть на кольоровому тлі блоку - без
+   власного фону, щоб не було "картка в картці". */
+.exchange-block .cart-section {
+  background: transparent;
+  padding: 0 0 6px;
+  margin-bottom: 6px;
+}
+
+.exchange-block .add-position-button {
+  margin: 8px 0 10px;
+}
+
+/* "новая" - позиція, якої на складі ще немає (відповідь користувача 3:
+   такий розмір дозволений і створить новий рядок СКЛАД). */
+.cart-item-badge-new {
+  font-size: 11px;
+  font-weight: 600;
+  color: #2C7A57;
+  border: 1px solid #2C7A57;
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* Підсумок обміну на екрані перевірки: два списки під своїми заголовками. */
+.exchange-summary-title {
+  font-weight: 700;
+  margin: 8px 0 4px;
+}
+
+.exchange-summary-title.give {
+  color: #C0392B;
+}
+
+.exchange-summary-title.take {
+  color: #2C7A57;
+}
+
+/* Коментар на екрані перевірки обміну - окремий блок зі своїм заголовком
+   і відступом, щоб не зливався з "Получаем" (зауваження користувача
+   2026-09-05 із живого тесту). */
+.exchange-summary-title.comment {
+  color: var(--tg-hint);
+  margin-top: 12px;
+}
+
+.exchange-summary-comment {
+  padding: 6px 10px;
+  border-left: 3px solid var(--field-border);
+  color: var(--tg-text);
+}
+
+/* Згорнуті блоки обміну (варіант 01, 2026-09-05): поля вводу приховані,
+   доки не натиснуть "+ Добавить" саме в цьому блоці, і ховаються знову,
+   щойно позиція лягла в кошик. */
+.exchange-fields {
+  border-top: 1px dashed var(--field-border);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.exchange-fields-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.exchange-fields-btn {
+  flex: 1;
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 10px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  cursor: pointer;
+}
+
+.exchange-fields-btn.primary {
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  border-color: var(--tg-button);
+}
+
+
+/* KD за номіналом (ТЗ пункт 2): галочка "Продать как введённый размер" і
+   список "Списать со склада" під розміром позиції категорії KD. Поки
+   галочка стоїть - списку нема взагалі (display:none у JS).
+   Живий баг зі скріна (2026-09-05): обгортка має клас .field, а .field -
+   горизонтальний ряд без переносу з nowrap-підписами й полями 84px; усі
+   селектори нижче навмисно точніші за .field/.field label/.field select,
+   щоб блок був вертикальним і на всю ширину. */
+.field.stock-chooser {
+  display: block;
+  border-top: 1px dashed var(--field-border);
+  padding-top: 8px;
+}
+
+.field.stock-chooser label.stock-chooser-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--tg-text);
+  cursor: pointer;
+}
+
+.field.stock-chooser .stock-chooser-check input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  -webkit-appearance: checkbox;
+  appearance: checkbox;
+}
+
+.field.stock-chooser .stock-chooser-label {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--tg-hint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.field.stock-chooser select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin-top: 4px;
+  text-align: left;
+}
+
+.field.stock-chooser .stock-chooser-remain {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--tg-hint, #8ea0b3);
+}
+
+.field.stock-chooser .stock-chooser-remain.stock-chooser-short {
+  color: #e5484d;
+}
+
+.field.stock-chooser .stock-chooser-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--tg-hint);
+  white-space: normal;
+}
+
+
+/* «Адрес выгрузки» (2026-09-05): підпис над полем, одне поле зі стрілкою
+   справа (перемикач підказок), список збігів під полем. Селектори точніші
+   за .field/.field label/.field input, бо ті - горизонтальний ряд. */
+.field.suggest-field {
+  display: block;
+}
+
+.field.suggest-field label {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  margin-bottom: 6px;
+}
+
+.field.suggest-field .suggest-control {
+  display: flex;
+  align-items: stretch;
+  border: 1.5px solid var(--field-border);
+  border-radius: 10px;
+  background: var(--tg-bg);
+  overflow: hidden;
+  min-height: 42px;
+}
+
+.field.suggest-field .suggest-control:focus-within {
+  border-color: var(--tg-button);
+}
+
+.field.suggest-field .suggest-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 10px;
+  font-size: 17px;
+  color: var(--tg-text);
+  text-align: left;
+  min-height: 0;
+}
+
+.field.suggest-field .suggest-input:focus {
+  outline: none;
+  border: 0;
+}
+
+.field.suggest-field .suggest-arrow {
+  flex: 0 0 42px;
+  width: 42px;
+  border: 0;
+  border-left: 1.5px solid var(--field-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--tg-link, #5aa0f0);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.field.suggest-field .suggest-arrow.suggest-arrow-off {
+  color: var(--tg-hint);
+}
+
+.field.suggest-field .suggest-list {
+  margin-top: 6px;
+  border: 1px solid var(--field-border);
+  border-radius: 10px;
+  background: var(--tg-secondary-bg, var(--tg-bg));
+  overflow: hidden;
+}
+
+.field.suggest-field .suggest-item {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--field-border);
+  font-size: 15px;
+  color: var(--tg-text);
+  cursor: pointer;
+}
+
+.field.suggest-field .suggest-item:last-child {
+  border-bottom: 0;
+}
+
+.field.suggest-field .suggest-item:hover {
+  background: color-mix(in srgb, var(--tg-button) 18%, transparent);
+}
+
+/* Картка «хто/куди» зверху форми продажу (2026-09-05): лише фон, без ліній
+   і заголовків - варіант 01 «мʼяка картка». */
+.top-block {
+  background: var(--tg-secondary-bg, rgba(127, 127, 127, 0.12));
+  border-radius: 12px;
+  padding: 10px 12px 2px;
+  margin-bottom: 12px;
+}
+
+.top-block .field.suggest-field {
+  margin-bottom: 10px;
+}
+
+/* Згорнутий стан форми (2026-09-06): після «Сохранить и продолжить» видно
+   лише блок «Добавлено» і кнопку «Добавить позицию». */
+#form.collapsed > :not(.cart-section):not(.add-more-button) {
+  display: none !important;
+}
+
+#form:not(.collapsed) > .add-more-button {
+  display: none;
+}
+
+.add-more-button {
+  margin-top: 4px;
+}
+
+/* 2026-09-06: last field of a category block (Порода) has no bottom margin
+   (.field:last-child), so the next common field (Способ оплаты) touched it. */
+#identity-fields > .category-group {
+  margin-bottom: 12px;
+}
+
+/* Адмін-форма (2026-09-06): шапка з «‹ Назад» закріплена зверху, меню з двох
+   кнопок, стрічка журналу з фільтрами, розрахунок корекції. */
+.admin-top {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  background: var(--tg-bg);
+}
+
+.admin-back {
+  border: 0;
+  background: transparent;
+  color: var(--tg-link, #2481cc);
+  font-size: 16px;
+  padding: 4px 6px 4px 0;
+  cursor: pointer;
+}
+
+.admin-top-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--tg-text);
+}
+
+.admin-screen[hidden] {
+  display: none;
+}
+
+.admin-menu-button {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 10px 0;
+  padding: 16px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  font-size: 16px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-menu-hint {
+  color: var(--tg-hint);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.journal-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.journal-filters select,
+.journal-filters input {
+  flex: 1 1 45%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-size: 14px;
+}
+
+.journal-filters .journal-search {
+  flex: 1 1 100%;
+}
+
+.journal-periods {
+  margin-top: 2px;
+}
+
+.journal-period {
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--field-border);
+  background: transparent;
+  color: var(--tg-text);
+  cursor: pointer;
+}
+
+.journal-period.on {
+  background: var(--tg-button);
+  border-color: var(--tg-button);
+  color: var(--tg-button-text, #ffffff);
+}
+
+.journal-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+
+.journal-modal {
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  border-radius: 12px;
+  padding: 12px 14px 14px;
+  width: 100%;
+  max-width: 340px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+}
+
+.journal-modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.journal-modal-close {
+  font-size: 20px;
+  color: var(--tg-hint);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.journal-modal-label {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.journal-modal .journal-date {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-size: 14px;
+}
+
+.journal-modal-apply {
+  margin-top: 12px;
+}
+
+.journal-filters .journal-apply {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+/* Журнал (2026-09-06): кольори операцій - ті самі, що у вікнах програм;
+   змінні, щоб пізніше їх можна було задати з налаштувань клієнта. */
+:root {
+  --jc-income-bg: #ddf3ea; --jc-income-fg: #0f6e56;
+  --jc-sale-bg: #fde7d8; --jc-sale-fg: #8a3a05;
+  --jc-writeoff-bg: #fde8e6; --jc-writeoff-fg: #b42318;
+  --jc-exchange-bg: #e3e1f7; --jc-exchange-fg: #534ab7;
+  --jc-antiseptic-bg: #d9f0f4; --jc-antiseptic-fg: #0e7490;
+  --jc-correction-bg: #dde6fb; --jc-correction-fg: #1d4ed8;
+  /* Відкат (2026-09-10): сірий - скасування операції, а не операція. */
+  --jc-rollback-bg: #e9ebee; --jc-rollback-fg: #4b5563;
+}
+
+.journal-chips {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.journal-chip,
+.journal-mini {
+  border-radius: 12px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--field-border);
+  background: transparent;
+  color: var(--tg-hint);
+  cursor: pointer;
+}
+
+.journal-mini {
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.journal-chip.on { border-color: transparent; }
+.journal-chip-income.on { background: var(--jc-income-bg); color: var(--jc-income-fg); }
+.journal-chip-sale.on { background: var(--jc-sale-bg); color: var(--jc-sale-fg); }
+.journal-chip-writeoff.on { background: var(--jc-writeoff-bg); color: var(--jc-writeoff-fg); }
+.journal-chip-exchange.on { background: var(--jc-exchange-bg); color: var(--jc-exchange-fg); }
+.journal-chip-antiseptic.on { background: var(--jc-antiseptic-bg); color: var(--jc-antiseptic-fg); }
+.journal-chip-correction.on { background: var(--jc-correction-bg); color: var(--jc-correction-fg); }
+.journal-chip-rollback.on { background: var(--jc-rollback-bg); color: var(--jc-rollback-fg); }
+
+.journal-doc {
+  background: var(--tg-secondary-bg);
+  border-radius: 10px;
+  border-left: 4px solid var(--field-border);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--tg-text);
+}
+
+.journal-doc-income { border-left-color: var(--jc-income-fg); }
+.journal-doc-sale { border-left-color: var(--jc-sale-fg); }
+.journal-doc-writeoff { border-left-color: var(--jc-writeoff-fg); }
+.journal-doc-exchange { border-left-color: var(--jc-exchange-fg); }
+.journal-doc-antiseptic { border-left-color: var(--jc-antiseptic-fg); }
+.journal-doc-correction { border-left-color: var(--jc-correction-fg); }
+.journal-doc-rollback { border-left-color: var(--jc-rollback-fg); }
+
+/* Відкат (2026-09-10): кнопка на картці, рядок «откачена: …», коментар. */
+.journal-doc-act {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.journal-rollback-button {
+  border: 1px solid var(--tg-link, #2481cc);
+  color: var(--tg-link, #2481cc);
+  background: transparent;
+  border-radius: 7px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.journal-ref {
+  color: var(--tg-hint);
+  font-size: 12px;
+  margin: 1px 0 3px;
+}
+
+.journal-ref .journal-tag {
+  font-size: 11px;
+  padding: 0 5px;
+}
+
+.journal-comment {
+  font-size: 13px;
+  font-style: italic;
+  color: var(--tg-text);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+/* Коментаря немає - місце лишається порожнім (слова користувача). */
+.journal-comment-empty {
+  height: 16px;
+  margin-top: 3px;
+}
+
+.rollback-summary {
+  font-size: 13px;
+  color: var(--tg-hint);
+  margin: 6px 0 12px;
+}
+
+.rollback-summary div {
+  margin: 2px 0;
+}
+
+.journal-doc-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+  margin-bottom: 3px;
+}
+
+.journal-tag {
+  display: inline-block;
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--field-border);
+}
+
+.journal-tag-income { background: var(--jc-income-bg); color: var(--jc-income-fg); }
+.journal-tag-sale { background: var(--jc-sale-bg); color: var(--jc-sale-fg); }
+.journal-tag-writeoff { background: var(--jc-writeoff-bg); color: var(--jc-writeoff-fg); }
+.journal-tag-exchange { background: var(--jc-exchange-bg); color: var(--jc-exchange-fg); }
+.journal-tag-antiseptic { background: var(--jc-antiseptic-bg); color: var(--jc-antiseptic-fg); }
+.journal-tag-correction { background: var(--jc-correction-bg); color: var(--jc-correction-fg); }
+.journal-tag-rollback { background: var(--jc-rollback-bg); color: var(--jc-rollback-fg); }
+
+.journal-role {
+  display: inline-block;
+  min-width: 64px;
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.journal-doc-tail {
+  margin-top: 2px;
+}
+
+.journal-entry {
+  background: var(--tg-secondary-bg);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: var(--tg-text);
+}
+
+.journal-meta {
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.journal-line {
+  margin: 2px 0;
+}
+
+.journal-plus {
+  color: #2e9e5b;
+  font-weight: 600;
+}
+
+.journal-minus {
+  color: #d9534f;
+  font-weight: 600;
+}
+
+.journal-money {
+  margin-left: 8px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.correction-calc {
+  font-size: 13px;
+  color: var(--tg-hint);
+  margin: 2px 0 10px;
+}
+
+.correction-calc-missing {
+  color: #d9534f;
+}
+
+/* --- Калькулятор у формі (ТЗ п.6) --- */
+/* Реальний баг (2026-09-07): панель була ВИДИМА в кожній формі одразу.
+   Атрибут hidden ховає елемент лише правилом display:none з таблиці
+   браузера - а власне display:flex нижче його перебиває. Без цього рядка
+   калькулятор перекривав приход, продаж і списання. */
+.calc-overlay[hidden] {
+  display: none;
+}
+
+.calc-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px 12px;
+  overflow-y: auto;
+  z-index: 40;
+}
+
+.calc-panel {
+  background: var(--tg-bg);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 420px;
+  overflow: hidden;
+}
+
+.calc-head {
+  display: flex;
+  align-items: center;
+  padding: 11px 14px;
+  background: var(--tg-secondary-bg);
+}
+
+.calc-title {
+  font-weight: 600;
+}
+
+.calc-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--tg-hint);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.calc-body {
+  padding: 12px 14px 16px;
+}
+
+.calc-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+  padding-bottom: 2px;
+}
+
+.calc-tab {
+  border: 1px solid var(--tg-hint);
+  background: none;
+  color: var(--tg-hint);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.calc-tab.on {
+  background: var(--tg-button);
+  border-color: var(--tg-button);
+  color: var(--tg-button-text);
+  font-weight: 600;
+}
+
+.calc-field {
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.calc-field label {
+  display: block;
+  font-size: 12px;
+  color: var(--tg-hint);
+  margin-bottom: 4px;
+}
+
+.calc-input {
+  width: 100%;
+  border: 1px solid var(--tg-hint);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 15px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+}
+
+.calc-row3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 7px;
+}
+
+.calc-sep {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 13px 0 9px;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--tg-hint);
+}
+
+.calc-sep::before,
+.calc-sep::after {
+  content: "";
+  height: 1px;
+  background: var(--tg-hint);
+  opacity: .35;
+  flex: 1;
+}
+
+/* Рядок-селект: вибір зі списку, а не поле для набору (зауваження
+   користувача 2026-09-07). */
+.calc-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid var(--tg-hint);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 15px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.calc-select-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calc-select-empty {
+  color: var(--tg-hint);
+}
+
+.calc-select-caret {
+  margin-left: auto;
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.calc-search {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--tg-hint);
+  border-radius: 10px 10px 0 0;
+  padding: 9px 11px;
+  font-size: 14px;
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+  outline: none;
+}
+
+.calc-list-items {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.calc-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 3;
+  background: var(--tg-bg);
+  border: 1px solid var(--tg-button);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+
+.calc-group {
+  font-size: 11px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--tg-hint);
+  padding: 7px 11px 3px;
+  background: var(--tg-secondary-bg);
+}
+
+.calc-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 11px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.calc-item-tail {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.calc-result {
+  background: var(--tg-secondary-bg);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 6px;
+}
+
+.calc-result-empty {
+  color: var(--tg-hint);
+  font-size: 14px;
+}
+
+.calc-result-head {
+  font-size: 12px;
+  color: var(--tg-hint);
+}
+
+.calc-result-big {
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.calc-result-extra {
+  font-size: 13px;
+  color: var(--tg-hint);
+  background: none;
+  padding: 6px 2px 0;
+}
+
+.calc-plain {
+  margin-top: 14px;
+}
+
+.calc-plain-out {
+  font-size: 16px;
+  font-weight: 600;
+  margin-top: 6px;
+  min-height: 20px;
+}
+
+/* Калькулятор кнопкою бота: панель - сам екран, а не накладка над формою. */
+.calc-overlay.calc-standalone {
+  background: var(--tg-bg);
+  align-items: stretch;
+  padding: 0;
+}
+
+.calc-overlay.calc-standalone .calc-panel {
+  max-width: none;
+  border-radius: 0;
+}
+
+/* Картка збереженої заміни (обраний вигляд 2026-09-09): рядок на позицію,
+   знак замість слів «Отдаём»/«Получаем». Нічого не обрізається - довга
+   назва переноситься, а не ховається за «…». */
+.exchange-cart-line {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+
+.exchange-cart-sign {
+  flex: none;
+  font-weight: 700;
+  width: 10px;
+  text-align: center;
+}
+
+.exchange-cart-sign.give {
+  color: #C0392B;
+}
+
+.exchange-cart-sign.take {
+  color: #2C7A57;
 }

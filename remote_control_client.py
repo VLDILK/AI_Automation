@@ -15,7 +15,10 @@ OneDrive теку (людина мала вручну обрати теку і �
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
+
+import secure_http
 
 import paths
 
@@ -28,7 +31,7 @@ import paths
 # без потреби чіпати кожну функцію окремо. За замовчуванням - той самий
 # єдиний, зашитий у paths.py, сервер, що й завжди був (жодної зміни
 # поведінки для тих, хто ще не обирав інший).
-_BASE_URL = f"https://{paths.CLOUDFLARED_TUNNEL_HOSTNAME}"
+_BASE_URL = f"https://{paths.cloudflared_tunnel_hostname()}"
 # Cloudflare free-tier бот-захист блокує "generic" User-Agent (403) -
 # реальний браузер отримує 200, тож тут теж явно видаємо себе за нього.
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -55,10 +58,10 @@ def fetch_remote_status(timeout=10):
     успішно отриманий)."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/status",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -80,10 +83,10 @@ def fetch_remote_status(timeout=10):
 def fetch_remote_status_from(hostname, timeout=10):
     request = urllib.request.Request(
         f"https://{hostname}/control/status",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -99,10 +102,10 @@ def fetch_remote_personnel(timeout=10):
     вирішує, як показати відсутність даних, тут жодного UI."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/personnel",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -112,13 +115,91 @@ def fetch_remote_personnel(timeout=10):
     return users if isinstance(users, list) else None
 
 
+def fetch_remote_personnel_payload(timeout=10):
+    """Те саме, що fetch_remote_personnel, але разом зі списком ролей
+    (підписи/кольори бейджів беруться з клієнта, а не з permissions.py)."""
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/personnel",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
+    )
+    try:
+        with secure_http.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok") or not isinstance(data.get("users"), list):
+        return None
+    return {"users": data["users"], "roles": data.get("roles") if isinstance(data.get("roles"), list) else []}
+
+
+def fetch_remote_roles(timeout=10):
+    """{"roles", "buttons", "allowed", "saved_at"} або None, якщо не вдалось."""
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/roles",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
+    )
+    try:
+        with secure_http.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    return data
+
+
+def post_remote_roles_action(payload, timeout=10):
+    """Той самий exception-контракт, що й _post_custom_button_action: HTTPError
+    з JSON-тілом {"error": ...} - викликач читає текст сам."""
+    body = dict(payload)
+    body["token"] = paths.remote_control_token()
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/roles_action",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+        method="POST",
+    )
+    with secure_http.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_remote_journal(filters, timeout=15):
+    """Сторінка журналу операцій клієнта ({"entries","has_more","total",
+    "facets"?}) або None, якщо не вдалось."""
+    query = urllib.parse.urlencode({"filters": json.dumps(filters or {}, ensure_ascii=False)})
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/journal?{query}",
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
+    )
+    try:
+        with secure_http.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        return None
+    return data
+
+
+def delete_remote_journal_entry(movement_id, actor=None, timeout=10):
+    body = {"token": paths.remote_control_token(), "id": int(movement_id), "actor": actor or "домашняя программа"}
+    request = urllib.request.Request(
+        f"{_BASE_URL}/control/journal_delete",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+        method="POST",
+    )
+    with secure_http.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def fetch_remote_action_log(limit=50, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/action_log?limit={limit}",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -134,12 +215,12 @@ def send_home_heartbeat(timeout=10):
     критична помилка, яку gui.py має показувати користувачу."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/heartbeat",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token()}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
     try:
-        urllib.request.urlopen(request, timeout=timeout)
+        secure_http.urlopen(request, timeout=timeout)
     except (urllib.error.URLError, OSError):
         pass
 
@@ -163,10 +244,10 @@ def send_home_heartbeat(timeout=10):
 def fetch_remote_standard_menu_cloud_path(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/standard_menu_cloud_path",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -179,10 +260,10 @@ def fetch_remote_standard_menu_cloud_path(timeout=10):
 def fetch_remote_custom_buttons(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/custom_buttons",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -198,14 +279,14 @@ def fetch_remote_custom_buttons(timeout=10):
 # функції нижче лише формують payload під конкретну дію.
 def _post_custom_button_action(payload, timeout=10):
     body = dict(payload)
-    body["token"] = paths.REMOTE_CONTROL_TOKEN
+    body["token"] = paths.remote_control_token()
     request = urllib.request.Request(
         f"{_BASE_URL}/control/custom_button_action",
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -237,6 +318,12 @@ def update_remote_custom_button(
     )
 
 
+def set_remote_custom_button_enabled(node_id, enabled, timeout=10):
+    return _post_custom_button_action(
+        {"op": "set_enabled", "node_id": node_id, "enabled": bool(enabled)}, timeout=timeout,
+    )
+
+
 def delete_remote_custom_button(node_id, timeout=10):
     return _post_custom_button_action({"op": "delete", "node_id": node_id}, timeout=timeout)
 
@@ -247,10 +334,10 @@ def delete_remote_custom_button(node_id, timeout=10):
 def fetch_remote_payment_methods(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/payment_methods",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -262,14 +349,14 @@ def fetch_remote_payment_methods(timeout=10):
 
 def _post_payment_method_action(payload, timeout=10):
     body = dict(payload)
-    body["token"] = paths.REMOTE_CONTROL_TOKEN
+    body["token"] = paths.remote_control_token()
     request = urllib.request.Request(
         f"{_BASE_URL}/control/payment_method_action",
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -294,10 +381,10 @@ def delete_remote_payment_method(option_id, timeout=10):
 def fetch_remote_operations_tree(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/operations_tree",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -319,11 +406,11 @@ def fetch_remote_operations_tree(timeout=10):
 def save_standard_menu_to_cloud(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/save_standard_menu_to_cloud",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token()}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -337,10 +424,10 @@ def save_standard_menu_to_cloud(timeout=10):
 def fetch_remote_system_commands(timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/system_commands",
-        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.REMOTE_CONTROL_TOKEN},
+        headers={"User-Agent": _USER_AGENT, _TOKEN_HEADER: paths.remote_control_token()},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with secure_http.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, ValueError, OSError):
         return None
@@ -353,22 +440,22 @@ def fetch_remote_system_commands(timeout=10):
 def save_remote_system_commands(commands, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/system_commands_save",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "commands": commands}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token(), "commands": commands}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def set_remote_role(user_id, role, timeout=10):
     request = urllib.request.Request(
         f"{_BASE_URL}/control/set_role",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "user_id": user_id, "role": role}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token(), "user_id": user_id, "role": role}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -378,9 +465,46 @@ def send_remote_command(action, timeout=10):
     показати помилку користувачу, тут жодного UI."""
     request = urllib.request.Request(
         f"{_BASE_URL}/control/command",
-        data=json.dumps({"token": paths.REMOTE_CONTROL_TOKEN, "action": action}).encode("utf-8"),
+        data=json.dumps({"token": paths.remote_control_token(), "action": action}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with secure_http.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+# Задача користувача (2026-08-20): "хочу інформацію про тунель бачити в
+# домашці". Це - єдиний блок того вікна, що працює БЕЗ токена Cloudflare і
+# на будь-якій машині: програма просто питає адресу кілька разів поспіль і
+# дивиться, скільки РІЗНИХ машин відповіло.
+#
+# Навіщо взагалі опитувати повторно: коли до одного тунелю під'єднані дві
+# машини, Cloudflare роздає запити між ними по колу. Один запит покаже одну
+# з них і виглядатиме цілком нормально - саме тому підміна так довго й
+# лишалась непоміченою. Кілька запитів поспіль показують обидві.
+def probe_responders(hostname, attempts=12, timeout=6):
+    """[{"node", "version", "channel", "hits"}, ...] за спаданням влучань.
+
+    node="" означає "клієнт старіший за той реліз, де додали поле node" -
+    відповіла ІНША машина, але назватись вона ще не вміє. version="" - те
+    саме про поле version (ще старіша збірка). Обидва випадки НЕ є збоєм і
+    навмисно не зливаються з "нет связи", який рахується окремо."""
+    tally = {}
+    failures = 0
+    for _ in range(max(1, attempts)):
+        status = fetch_remote_status_from(hostname, timeout=timeout)
+        if status is None:
+            failures += 1
+            continue
+        key = (
+            (status.get("node") or "").strip(),
+            (status.get("version") or "").strip(),
+            (status.get("update_channel") or "").strip(),
+        )
+        tally[key] = tally.get(key, 0) + 1
+    responders = [
+        {"node": node, "version": version, "channel": channel, "hits": hits}
+        for (node, version, channel), hits in tally.items()
+    ]
+    responders.sort(key=lambda item: item["hits"], reverse=True)
+    return {"responders": responders, "failures": failures, "attempts": max(1, attempts)}

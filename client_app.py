@@ -29,6 +29,7 @@ import atexit
 import json
 import os
 import platform
+import getpass
 import re
 import shutil
 import sqlite3
@@ -42,6 +43,8 @@ import webbrowser
 from tkinter import ttk
 import urllib.error
 import urllib.request
+
+import secure_http
 from datetime import datetime
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox
@@ -61,7 +64,17 @@ import servers_registry
 import standard_menu_cloud
 import update_check
 from settings import SettingsStore
+from colors_window import open_colors_window
+from correction_window import open_correction_window
+from operation_colors import SETTING_KEY as OPERATION_COLORS_SETTING, normalize_colors, palette_for, palettes_for_form
+from journal_window import LocalJournalSource, open_journal_window
+from role_buttons_window import LocalRoleSource, open_role_buttons_window
 from warehouse_data import (
+    sync_sheet_to_excel,
+    row_value,
+    warehouse_rows,
+    apply_correction_operation,
+    GROUP_SEES_SIZE_RECALC_SETTING,
     ExcelSqliteStore,
     CUSTOM_BUTTON_ACTIONS,
     TABLE_FORMAT_COLOR_KEY,
@@ -75,7 +88,9 @@ from warehouse_data import (
     TABLE_FORMAT_HEADER_FONT_SIZE_KEY,
     TABLE_FORMAT_HEADER_ROW_HEIGHT_KEY,
     apply_standard_table_format,
-    ensure_workbook_has_required_sheets,
+    apply_workbook_repairs,
+    describe_workbook_plan,
+    plan_workbook_repairs,
     create_db_snapshot,
     create_excel_backup,
     list_db_snapshots,
@@ -84,6 +99,8 @@ from warehouse_data import (
 )
 import webapp_server
 from webapp_server import WebappServer
+import single_instance
+import button_editor
 
 # Задача користувача: "потрібно ще все інше доробити" (Журналы/Персонал -
 # після stub-заглушок) - короткі російські назви днів тижня для форматування
@@ -91,7 +108,15 @@ from webapp_server import WebappServer
 # замість імпорту з gui.py (важкий адмінський модуль).
 RU_WEEKDAYS = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
 
-__version__ = "0.3.0"
+__version__ = "0.3.60"
+
+# Задача користувача (2026-09-05): звірка Excel із шаблоном при старті.
+# remind_every_start - перемикач у Настройках ("Напоминать о недостающих
+# столбцах при каждом запуске", типово увімкнений); snoozed - що саме
+# людина відклала кнопкою "Позже" (підпис плану + коли), щоб при
+# вимкненому перемикачі не питати про те саме вдруге.
+EXCEL_CHECK_REMIND_EVERY_START_KEY = "excel_check_remind_every_start"
+EXCEL_CHECK_SNOOZED_KEY = "excel_check_snoozed"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 # Той самий перелік, що й READ_ONLY_SHEETS у gui.py (дубльований навмисно -
@@ -205,6 +230,51 @@ def _spinner_frame(step, size=14):
 
 
 
+# Редактор кнопок (варіант 01, 2026-09-05): спільна панель button_editor
+# показує "телефон" і властивості, а звідки беруться кнопки й куди йдуть
+# зміни - каже це джерело. У клієнта - власна база (store).
+class _LocalButtonSource(button_editor.ButtonSource):
+    def __init__(self, app):
+        self.app = app
+
+    @property
+    def store(self):
+        return self.app.store
+
+    def rows(self, parent_id):
+        return self.store.list_custom_buttons(parent_id, include_disabled=True)
+
+    def get(self, node_id):
+        return self.store.get_custom_button(node_id)
+
+    def actions(self):
+        return [(action["code"], action["label"]) for action in CUSTOM_BUTTON_ACTIONS]
+
+    def operations(self):
+        return self.app._operation_link_catalog()
+
+    def label_collides(self, label, exclude_id=None):
+        return self.store.custom_button_label_collides(label)
+
+    def add(self, parent_id, label, layout):
+        return self.store.add_custom_button(label, "", None, parent_id=parent_id, layout=layout, operation_id=None)
+
+    def update(self, node_id, label, message_text, action_code, layout, operation_id):
+        self.store.update_custom_button(
+            node_id, label, message_text, action_code, layout=layout, operation_id=operation_id,
+        )
+
+    def move(self, node_id, new_index):
+        self.store.set_custom_button_position(node_id, new_index)
+
+    def delete(self, node_id):
+        self.store.delete_custom_button(node_id)
+
+    def set_enabled(self, node_id, enabled):
+        self.store.set_custom_button_enabled(node_id, enabled)
+        self.app._mirror_root_button_visibility_to_cloud(node_id)
+
+
 class ClientApp(ctk.CTk):
     _STATUS_POLL_MS = 5000
     _STALE_THRESHOLD_SECONDS = 60
@@ -305,16 +375,25 @@ class ClientApp(ctk.CTk):
         # reconnect бота, только на явное "Выкл.").
         self.webapp_server = WebappServer(
             db_path=paths.DB_PATH,
+            get_onedrive_email=lambda: self._onedrive_shared_email(),
             get_token=lambda: self._read_telegram_token()[0],
-            get_fresh_context=lambda store, is_admin: (
-                self.telegram_worker._webapp_data_browser_context(store, is_admin)
+            get_fresh_context=lambda store, is_admin, telegram_id=None: (
+                self.telegram_worker._webapp_data_browser_context(
+                    store, is_admin, telegram_id=telegram_id
+                )
                 if self.telegram_worker else None
             ),
-            get_remote_control_token=lambda: paths.REMOTE_CONTROL_TOKEN,
+            get_journal_page=lambda store, filters: (
+                self.telegram_worker._admin_journal_page(store, filters)
+                if self.telegram_worker else {"entries": [], "has_more": False}
+            ),
+            get_journal_colors=lambda: palettes_for_form(self._operation_colors()),
+            get_remote_control_token=lambda: paths.remote_control_token(),
             get_remote_status=self._get_remote_status,
             handle_remote_command=self._handle_remote_command,
             handle_home_heartbeat=self._handle_home_heartbeat,
             handle_set_role=self._handle_set_role,
+            handle_roles_changed=self._handle_roles_changed,
             get_form_content_enabled=lambda: self._webapp_content_enabled,
         )
         self._webapp_content_enabled = True
@@ -379,7 +458,6 @@ class ClientApp(ctk.CTk):
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
 
         self.journals_window = None
-        self.journals_list_frame = None
         self._action_log_detail_windows = {}
         self.personnel_window = None
         self.personnel_list_frame = None
@@ -400,6 +478,7 @@ class ClientApp(ctk.CTk):
         self.auto_update_window = None
         self.update_channel_window = None
         self.onedrive_account_window = None
+        self.efactura_accountant_window = None
         self.rollback_window = None
         self.main_title_style_window = None
         self._last_registry_error = "ещё не пытался"
@@ -424,9 +503,20 @@ class ClientApp(ctk.CTk):
         self._backup_tab = "local"
         self._backup_restore_in_progress = False
         self.custom_buttons_selected_id = None
+        self.button_editor = None
 
         self.refresh_excel_button = None
         self._excel_refresh_in_progress = False
+        # Задача користувача (2026-09-05): звірка Excel із шаблоном при
+        # старті; відкладене тримає дзвіночок у шапці (_check_excel_on_start).
+        self._excel_pending_plan = None
+        self._excel_pending_lines = []
+        self._excel_pending_at = None
+        self.excel_pending_window = None
+        self._excel_pending_body = None
+        self.bell_button = None
+        self.bell_dot = None
+        self.after(2500, self._check_excel_on_start)
         self._update_download_in_progress = False
         self._update_check_in_progress = False
         # Задача користувача (2026-08-15): "давай вже працювати через
@@ -438,7 +528,6 @@ class ClientApp(ctk.CTk):
         self._update_ready_to_install = False
         self._update_install_in_progress = False
         self._downloaded_update_target = None
-        self._journals_fetch_limit = 50
 
         self._build_main_screen()
         self._refresh_webapp_status_text()
@@ -606,6 +695,20 @@ class ClientApp(ctk.CTk):
             command=self._on_theme_toggle,
         )
         self.theme_toggle_button.pack(side="right")
+
+        # Задача користувача (2026-09-05): "дзвіночок зверху справа в
+        # програмі, і якщо є якась проблема - то там типу червона цятка".
+        # Цятка - маленький Canvas поверх кута кнопки; фон береться з теми,
+        # тож на світлій і темній виглядає як частина шапки (_paint_bell).
+        self.bell_button = ctk.CTkButton(
+            header, text="\U0001F514", width=32, height=26, font=("Segoe UI Emoji", 13),
+            fg_color="transparent", border_width=1, border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_MUTED, hover_color=COLOR_HOVER,
+            command=self._open_excel_pending_window,
+        )
+        self.bell_button.pack(side="right", padx=(0, 8))
+        self.bell_dot = tk.Canvas(self.bell_button, width=10, height=10, highlightthickness=0, bd=0)
+        self._paint_bell()
 
     # Задача користувача (2026-08-19): "можливість змінювати напис на
     # головному екрані... положення по х вправо/вліво... розмір тексту...
@@ -1043,21 +1146,73 @@ class ClientApp(ctk.CTk):
     # ніколи не чіпав). Сам ID тунеля НЕ тут - paths.read_cloudflared_
     # tunnel_id() читає його напряму з credentials-файлу цієї машини (той
     # самий файл, що cloudflared і так вимагає).
+    # Спільний вигляд для всіх значень, які можна або вписати, або
+    # прикріпити файлом. Обидва шляхи ведуть в ОДИН файл у system/, тож
+    # питання "що з двох діє" не виникає. Порожнє поле видаляє файл -
+    # повертається значення, вшите в програму.
+    def _build_override_entry(self, parent, title, path, placeholder, note,
+                              secret=False, with_file_button=""):
+        ctk.CTkLabel(
+            parent, text=title, font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 2))
+        value_var = ctk.StringVar(value=paths.read_override_file(path))
+        state_var = ctk.StringVar(value=note)
+        entry = ctk.CTkEntry(
+            parent, textvariable=value_var, placeholder_text=placeholder,
+            show="•" if secret else "",
+        )
+        entry.pack(fill="x", padx=16, pady=(0, 4))
+
+        def save(*_args):
+            paths.write_override_file(path, value_var.get())
+            saved = paths.read_override_file(path)
+            state_var.set(
+                ("Сохранено: " + ("•" * len(saved) if secret else saved)) if saved else note
+            )
+
+        value_var.trace_add("write", save)
+
+        if with_file_button:
+            def attach_file():
+                selected_file = filedialog.askopenfilename(
+                    title=with_file_button,
+                    filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+                )
+                if not selected_file:
+                    return
+                try:
+                    lines = Path(selected_file).read_text(encoding="utf-8-sig").splitlines()
+                except (OSError, UnicodeDecodeError):
+                    state_var.set("Не удалось прочитать файл.")
+                    return
+                # Кладемо ВМІСТ, а не шлях: інакше значення залежало б від
+                # того, чи лежить той файл на місці, і чи його не змінили.
+                value_var.set(next((line.strip() for line in lines if line.strip()), ""))
+
+            ctk.CTkButton(parent, text=with_file_button, command=attach_file).pack(
+                fill="x", padx=16, pady=(0, 4)
+            )
+
+        ctk.CTkLabel(
+            parent, textvariable=state_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
     def _cloudflared_tunnel_hostname(self):
         hostname_file = self.settings.get("cloudflared_tunnel_hostname_file")
         if not hostname_file:
-            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            return paths.cloudflared_tunnel_hostname()
         hostname_path = Path(hostname_file)
         if not hostname_path.exists():
-            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            return paths.cloudflared_tunnel_hostname()
         try:
             lines = hostname_path.read_text(encoding="utf-8-sig").splitlines()
         except UnicodeDecodeError:
             lines = hostname_path.read_text(encoding="cp1251").splitlines()
         except OSError:
-            return paths.CLOUDFLARED_TUNNEL_HOSTNAME
+            return paths.cloudflared_tunnel_hostname()
         hostname = next((line.strip() for line in lines if line.strip()), "")
-        return hostname or paths.CLOUDFLARED_TUNNEL_HOSTNAME
+        return hostname or paths.cloudflared_tunnel_hostname()
 
     # Короткий підпис під кнопкою вибору файлу - показує, що реально
     # зараз обрано (чи "нічого", і тоді діє спільна адреса за замовчуванням).
@@ -1184,13 +1339,15 @@ class ClientApp(ctk.CTk):
             ("settings", "Настройки", self._open_settings_screen),
             ("journals", "Журналы", self._open_journals_window),
             ("personnel", "Персонал", self._open_personnel_window),
-            ("refresh", "Обновить эксели", self._on_refresh_excel_clicked),
+            ("document", "Коррекция остатков", self._open_correction_window),
             ("barchart", "Открыть данные в браузере", self._on_open_data_in_browser_clicked),
         ]
+        # Задача користувача (2026-09-06): кнопки «Обновить эксели» на
+        # головному екрані більше нема - таблицю звіряє й дописує сама
+        # перевірка Excel (колокольчик); self.refresh_excel_button лишається
+        # None, _on_excel_refresh_finished це враховує.
         for index, (icon, label, handler) in enumerate(items):
-            button = self._build_row_button(menu, icon, label, handler, first=(index == 0))
-            if label == "Обновить эксели":
-                self.refresh_excel_button = button
+            self._build_row_button(menu, icon, label, handler, first=(index == 0))
             if index < len(items) - 1:
                 ctk.CTkFrame(menu, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
         ctk.CTkFrame(menu, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
@@ -1221,28 +1378,44 @@ class ClientApp(ctk.CTk):
     # personnel_list_frame) - тепер і найпростіший спосіб пережити
     # майбутнє зростання цього екрану, а не фіксити конкретний недобір
     # пікселів щоразу заново.
+    # Правило користувача (2026-09-05, усі проєкти): "всі кнопки повернення
+    # у попередні меню мають бути закріплені у верху... якщо я відкрив
+    # налаштування і гортаю вниз - то кнопці "повернутись назад" байдуже -
+    # вона завжди у полі зору", і "має діяти кнопка Esc". Раніше шапка з "←"
+    # лежала всередині CTkScrollableFrame і їхала разом із вмістом - щоб
+    # повернутись, доводилось гортати на початок. Тепер шапка - звичайний
+    # кадр ПОЗА прокруткою, гортається лише вміст під нею.
     def _open_settings_screen(self):
         self.main_frame.pack_forget()
         if self.settings_frame is not None:
             self.settings_frame.destroy()
-        self.settings_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.settings_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.settings_frame.pack(fill="both", expand=True, padx=16, pady=16)
-        self._build_settings_screen(self.settings_frame)
-
-    def _close_settings_screen(self):
-        self.settings_frame.pack_forget()
-        self.main_frame.pack(fill="both", expand=True, padx=16, pady=16)
-
-    def _build_settings_screen(self, parent):
-        header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 16))
+        header = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 12))
         ctk.CTkButton(
             header, text="←", width=32, fg_color="transparent",
             text_color=COLOR_TEXT, hover_color=COLOR_HOVER,
             command=self._close_settings_screen,
         ).pack(side="left")
         ctk.CTkLabel(header, text="Настройки", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left", padx=(8, 0))
+        body = ctk.CTkScrollableFrame(self.settings_frame, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        self._build_settings_screen(body)
+        # Esc - той самий крок назад, що й "←". Привʼязка живе лише поки
+        # відкритий цей екран; вікна поверх (Toplevel) мають власний Esc.
+        self.bind("<Escape>", self._on_settings_escape)
 
+    def _on_settings_escape(self, _event=None):
+        if self.settings_frame is not None and self.settings_frame.winfo_ismapped():
+            self._close_settings_screen()
+
+    def _close_settings_screen(self):
+        self.unbind("<Escape>")
+        self.settings_frame.pack_forget()
+        self.main_frame.pack(fill="both", expand=True, padx=16, pady=16)
+
+    def _build_settings_screen(self, parent):
         self._build_autostart_settings_section(parent)
 
         self._build_auto_update_settings_section(parent)
@@ -1777,6 +1950,12 @@ class ClientApp(ctk.CTk):
         # find_account_folder) - надійніше, той самий механізм, яким цього
         # сеансу вручну діагностували плутанину акаунтів.
         self._build_row_button(card, "key", "Учётная запись OneDrive", self._open_onedrive_account_window)
+        # Задача клієнта (2026-08-21): якщо оплата - ЕФАКТУРА, у звіті
+        # про продаж треба звернутись до бухгалтера, щоб він її виписав.
+        # Кого саме звати - налаштовується тут.
+        self._build_row_button(
+            card, "personnel", "Бухгалтер для ЕФАКТУРА", self._open_efactura_accountant_window
+        )
         # Задача користувача (2026-08-20): "змога користувачеві самостійно
         # робити відкат программи... випадкова версія не туди потрапила,
         # або щось не те відбулось в самому оновленні" - той самий
@@ -1967,8 +2146,19 @@ class ClientApp(ctk.CTk):
         top.pack(fill="x", padx=16, pady=(16, 4))
         ctk.CTkLabel(top, text="Канал обновлений", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
 
+        # Вказівка користувача (2026-08-21): "туди додай скрол тільки.
+        # колесом та затисканням миші на повзунок". Вікно обросло полями
+        # (канал, пароль, токен, адреса тунеля, credentials, ключ
+        # управління) - нижні просто не вміщались у висоту вікна.
+        # CTkScrollableFrame - той самий контейнер, що вже прокручує
+        # "Автообновления"/"Резервные копии"/"Персонал": колесо працює над
+        # усією областю, смугу можна тягнути мишею. Заголовок лишається
+        # нерухомим, усередину переїжджає лише вміст.
+        scroll = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, pady=(4, 12))
+
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "«Тестовая» — устанавливает и тестовые, и обычные обновления "
                 "(всегда самое новое). «Стабильная» — только проверенные."
@@ -1976,7 +2166,7 @@ class ClientApp(ctk.CTk):
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 12))
 
-        body = ctk.CTkFrame(window, fg_color=COLOR_CARD, corner_radius=10)
+        body = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=10)
         body.pack(fill="x", padx=16)
 
         channel_var = ctk.StringVar(
@@ -2083,7 +2273,7 @@ class ClientApp(ctk.CTk):
         # токен, що й публікація в gui.py (той має право писати - роздавати
         # його на клієнтські машини небезпечно).
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "GitHub-токен для проверок (необязательно) — поднимает лимит "
                 "с 60 до 5000 запросов в час. Без прав записи."
@@ -2096,7 +2286,7 @@ class ClientApp(ctk.CTk):
         def on_token_changed(*_args):
             self.settings.set("github_read_token", token_var.get().strip())
 
-        token_entry = ctk.CTkEntry(window, textvariable=token_var, placeholder_text="ghp_...", show="•")
+        token_entry = ctk.CTkEntry(scroll, textvariable=token_var, placeholder_text="ghp_...", show="•")
         token_entry.pack(fill="x", padx=16, pady=(0, 16))
 
         # Задача користувача (2026-08-19, друга редакція): "туди нічого
@@ -2110,7 +2300,7 @@ class ClientApp(ctk.CTk):
         # одноразовий ручний крок. Немає файлу = стара поведінка, спільний
         # адрес за замовчуванням.
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "Адрес тунеля этого сервера (необязательно) — .txt-файл с одной строкой-адресом. "
                 "Без файла — общий адрес по умолчанию."
@@ -2130,13 +2320,25 @@ class ClientApp(ctk.CTk):
             self.settings.set("cloudflared_tunnel_hostname_file", selected_file)
             hostname_file_label_var.set(self._cloudflared_tunnel_hostname_file_display())
 
-        ctk.CTkButton(window, text="Выбрать файл с адресом", command=choose_hostname_file).pack(
+        ctk.CTkButton(scroll, text="Выбрать файл с адресом", command=choose_hostname_file).pack(
             fill="x", padx=16, pady=(0, 4)
         )
         ctk.CTkLabel(
-            window, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            scroll, textvariable=hostname_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
-        ).pack(fill="x", padx=16, pady=(0, 16))
+        ).pack(fill="x", padx=16, pady=(0, 6))
+
+        # Те саме значення, але вписане руками. Пишеться у system/
+        # tunnel_hostname.txt - той самий файл, що читає paths.
+        # cloudflared_tunnel_hostname(), тож "вписане" й "прикріплене" не
+        # можуть розійтись між собою.
+        self._build_override_entry(
+            scroll,
+            title="Или впишите адрес строкой",
+            path=paths.TUNNEL_HOSTNAME_FILE,
+            placeholder="bot.example.com",
+            note="Пусто — действует адрес из файла выше или общий по умолчанию.",
+        )
 
         # Задача користувача (2026-08-20): "зроби цю заміну оновленням
         # новим" - вшитий у збірку credentials.json НЕ можна безпечно
@@ -2145,7 +2347,7 @@ class ClientApp(ctk.CTk):
         # settings.json, сам файл (виданий окремо, поза оновленнями)
         # користувач кладе на диск один раз вручну.
         ctk.CTkLabel(
-            window,
+            scroll,
             text=(
                 "Credentials-файл этого сервера (необязательно) — свой "
                 "cloudflared_tunnel_credentials.json вместо общего из сборки. "
@@ -2166,13 +2368,35 @@ class ClientApp(ctk.CTk):
             self.settings.set("cloudflared_tunnel_credentials_file", selected_file)
             credentials_file_label_var.set(self._cloudflared_tunnel_credentials_file_display())
 
-        ctk.CTkButton(window, text="Выбрать файл credentials", command=choose_credentials_file).pack(
+        ctk.CTkButton(scroll, text="Выбрать файл credentials", command=choose_credentials_file).pack(
             fill="x", padx=16, pady=(0, 4)
         )
         ctk.CTkLabel(
-            window, textvariable=credentials_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
+            scroll, textvariable=credentials_file_label_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 16))
+
+        # Ключ, яким домашня програма доводить, що це саме вона. Раніше був
+        # вшитий у код обох програм - тобто однаковий у всіх копіях і
+        # незмінний без перезбірки.
+        ctk.CTkLabel(
+            scroll,
+            text=(
+                "Ключ управления (необязательно) — им домашняя программа подтверждает, "
+                "что это она. ВАЖНО: значение должно совпадать в обеих программах, "
+                "иначе они перестанут видеть друг друга."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
+        ).pack(fill="x", padx=16, pady=(0, 6))
+        self._build_override_entry(
+            scroll,
+            title="Ключ управления",
+            path=paths.REMOTE_CONTROL_TOKEN_FILE,
+            placeholder="вставьте ключ или прикрепите файл",
+            note="Пусто — действует ключ, вшитый в программу.",
+            secret=True,
+            with_file_button="Прикрепить файл с ключом",
+        )
 
         token_entry.bind("<FocusOut>", on_token_changed)
         token_entry.bind("<Return>", on_token_changed)
@@ -2184,6 +2408,234 @@ class ClientApp(ctk.CTk):
     # акаунт незалежно від нього - плутанина. Тепер ОДНЕ поле, ОДИН
     # спільний хелпер - усі виклики (реєстр, бекапи, стандартне меню)
     # використовують той самий обраний акаунт.
+    # Задача клієнта (2026-08-21): "Если форма оплаты содержит слово
+    # ЕФАКТУРА... бот должен добавить активный тег бухгалтера" - хто саме
+    # цей бухгалтер, налаштовується тут.
+    #
+    # Спосіб звернення рівно ОДИН з чотирьох (пряма вимога користувача:
+    # "тут має бути або або"), тому це перемикач, а не набір полів: обране
+    # активне, решта згасає. Інакше довелось би вигадувати прихований
+    # порядок пріоритетів між заповненими полями й пояснювати його людині.
+    def _open_efactura_accountant_window(self):
+        if self.efactura_accountant_window is not None and self.efactura_accountant_window.winfo_exists():
+            self.efactura_accountant_window.deiconify()
+            self.efactura_accountant_window.lift()
+            self.efactura_accountant_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title("Бухгалтер для ЕФАКТУРА")
+        window.geometry("420x640")
+        window.configure(bg=self._tk_color(COLOR_BG))
+        self.efactura_accountant_window = window
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(
+            top, text="Бухгалтер для ЕФАКТУРА", font=("", 16, "bold"), text_color=COLOR_TEXT
+        ).pack(side="left")
+
+        scroll = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, pady=(4, 8))
+
+        ctk.CTkLabel(
+            scroll,
+            text=(
+                "Если в форме оплаты есть слово ЕФАКТУРА, бот добавит обращение "
+                "к бухгалтеру в конце отчёта о продаже.\n\n"
+                "Обращение появляется только в том чате, куда дублируются отчёты. "
+                "Тому, кто оформляет продажу, приходит обычное сообщение."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=360,
+        ).pack(fill="x", padx=16, pady=(8, 12))
+
+        mode_var = ctk.StringVar(value=(self.settings.get("efactura_tag_mode") or ""))
+        id_var = ctk.StringVar(value=str(self.settings.get("efactura_tag_user_id") or ""))
+        username_var = ctk.StringVar(value=self.settings.get("efactura_tag_username") or "")
+        phone_var = ctk.StringVar(value=self.settings.get("efactura_tag_phone") or "")
+        label_var = ctk.StringVar(value=self.settings.get("efactura_tag_label") or "Бухгалтер")
+        text_var = ctk.StringVar(
+            value=self.settings.get("efactura_tag_text")
+            or "просьба принять информацию и выпустить ЕФАКТУРУ."
+        )
+
+        # Список тих, хто вже писав боту - найпростіший шлях: вибір одразу
+        # дає Telegram ID, а саме він переживає зміну @імені.
+        id_by_choice = {}
+        choices = []
+        try:
+            for _row_id, telegram_id, username, full_name, _role, _seen in self.store.list_users():
+                if not telegram_id:
+                    continue
+                name = (full_name or username or str(telegram_id)).strip()
+                choice = f"{name} (@{username})" if username else f"{name} (ID {telegram_id})"
+                if choice in id_by_choice:
+                    continue
+                id_by_choice[choice] = int(telegram_id)
+                choices.append(choice)
+        except Exception:
+            choices = []
+        if not choices:
+            choices = ["— никто ещё не писал боту —"]
+        saved_id = str(self.settings.get("efactura_tag_user_id") or "").strip()
+        preselected = choices[0]
+        for choice, telegram_id in id_by_choice.items():
+            if str(telegram_id) == saved_id:
+                preselected = choice
+                break
+        choice_var = ctk.StringVar(value=preselected)
+
+        def add_option(value, title, hint, builder):
+            row = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=10)
+            row.pack(fill="x", padx=16, pady=(0, 8))
+            ctk.CTkRadioButton(
+                row, text=title, variable=mode_var, value=value, command=lambda: refresh_state(),
+                font=("", 13), text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+            if hint:
+                ctk.CTkLabel(
+                    row, text=hint, font=("", 10), text_color=COLOR_TEXT_MUTED,
+                    justify="left", wraplength=320, anchor="w",
+                ).pack(fill="x", padx=34, pady=(0, 6))
+            widget = builder(row)
+            if widget is not None:
+                widget.pack(fill="x", padx=34, pady=(0, 12))
+            return widget
+
+        off_widget = add_option("", "Не отмечать никого", "Обращение не добавляется вовсе.", lambda row: None)
+        list_widget = add_option(
+            "list", "Из тех, кто писал боту", "Самый надёжный способ — сразу берётся Telegram ID.",
+            lambda row: ctk.CTkOptionMenu(row, values=choices, variable=choice_var),
+        )
+        id_widget = add_option(
+            "id", "Telegram ID вручную", "Если человек ещё ни разу не писал боту.",
+            lambda row: ctk.CTkEntry(row, textvariable=id_var, placeholder_text="123456789"),
+        )
+        username_widget = add_option(
+            "username", "Имя в чате (@username)",
+            "Перестанет отмечать, если человек сменит себе имя.",
+            lambda row: ctk.CTkEntry(row, textvariable=username_var, placeholder_text="@buhgalter"),
+        )
+        phone_widget = add_option(
+            "phone", "Телефон",
+            "Уведомление НЕ придёт: Telegram не умеет искать человека по номеру. "
+            "Обращение появится текстом, но без отметки.",
+            lambda row: ctk.CTkEntry(row, textvariable=phone_var, placeholder_text="+373 79 410 337"),
+        )
+
+        common = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=10)
+        common.pack(fill="x", padx=16, pady=(4, 8))
+        ctk.CTkLabel(
+            common, text="Имя в обращении", font=("", 12), text_color=COLOR_TEXT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkEntry(common, textvariable=label_var, placeholder_text="Бухгалтер").pack(
+            fill="x", padx=12, pady=(0, 10)
+        )
+        ctk.CTkLabel(
+            common, text="Текст уведомления", font=("", 12), text_color=COLOR_TEXT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkEntry(common, textvariable=text_var).pack(fill="x", padx=12, pady=(0, 12))
+
+        preview_var = ctk.StringVar(value="")
+        ctk.CTkLabel(
+            scroll, textvariable=preview_var, font=("", 11), text_color=COLOR_TEXT_MUTED,
+            justify="left", wraplength=360, anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 12))
+
+        def refresh_state():
+            mode = mode_var.get()
+            for value, widget in (
+                ("list", list_widget), ("id", id_widget),
+                ("username", username_widget), ("phone", phone_widget),
+            ):
+                if widget is None:
+                    continue
+                widget.configure(state="normal" if mode == value else "disabled")
+            preview_var.set(self._efactura_preview_text(mode, choice_var.get(), id_by_choice,
+                                                        id_var.get(), username_var.get(), phone_var.get()))
+
+        def save():
+            mode = mode_var.get()
+            values = {
+                "efactura_tag_mode": mode,
+                "efactura_tag_label": label_var.get().strip() or "Бухгалтер",
+                "efactura_tag_text": text_var.get().strip()
+                or "просьба принять информацию и выпустить ЕФАКТУРУ.",
+            }
+            # Порожнє значення при обраному способі - найімовірніша помилка
+            # людини, і мовчки зберегти його означало б, що бот просто
+            # нікого не покличе, а ніхто про це не дізнається.
+            if mode == "list":
+                telegram_id = id_by_choice.get(choice_var.get())
+                if not telegram_id:
+                    messagebox.showwarning("AI Automation", "Выберите человека из списка.")
+                    return
+                values["efactura_tag_user_id"] = telegram_id
+            elif mode == "id":
+                raw = id_var.get().strip()
+                if not raw.lstrip("-").isdigit() or int(raw) <= 0:
+                    messagebox.showwarning("AI Automation", "Telegram ID — это число, например 123456789.")
+                    return
+                values["efactura_tag_user_id"] = int(raw)
+            elif mode == "username":
+                username = username_var.get().strip().lstrip("@")
+                if not username:
+                    messagebox.showwarning("AI Automation", "Укажите имя в чате, например @buhgalter.")
+                    return
+                values["efactura_tag_username"] = username
+            elif mode == "phone":
+                phone = phone_var.get().strip()
+                if not phone:
+                    messagebox.showwarning("AI Automation", "Укажите номер телефона.")
+                    return
+                values["efactura_tag_phone"] = phone
+            for key, value in values.items():
+                self.settings.set(key, value)
+            if not mode:
+                messagebox.showinfo("AI Automation", "Сохранено. Бухгалтер не отмечается.")
+                return
+            messagebox.showinfo(
+                "AI Automation",
+                "Сохранено.\n\nПри оплате с ЕФАКТУРА бот добавит обращение:\n"
+                + self._efactura_preview_text(mode, choice_var.get(), id_by_choice,
+                                              id_var.get(), username_var.get(), phone_var.get()),
+            )
+
+        for var in (choice_var, id_var, username_var, phone_var):
+            var.trace_add("write", lambda *_args: refresh_state())
+
+        bottom = ctk.CTkFrame(window, fg_color="transparent")
+        bottom.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkButton(bottom, text="Сохранить", command=save).pack(fill="x")
+
+        refresh_state()
+        window.bind("<Escape>", lambda event: window.destroy())
+
+    # Один текст і для підказки під вибором, і для повідомлення про успіх -
+    # щоб людина бачила РІВНО те, що збережеться, ще до натискання кнопки.
+    def _efactura_preview_text(self, mode, choice, id_by_choice, raw_id, username, phone):
+        if not mode:
+            return "Обращение к бухгалтеру не добавляется."
+        if mode == "list":
+            telegram_id = id_by_choice.get(choice)
+            if not telegram_id:
+                return "Человек не выбран — обращения не будет."
+            return f"Отметит: {choice} — уведомление придёт."
+        if mode == "id":
+            raw = (raw_id or "").strip()
+            if not raw.isdigit():
+                return "Нужен числовой Telegram ID — обращения не будет."
+            return f"Отметит по ID {raw} — уведомление придёт."
+        if mode == "username":
+            name = (username or "").strip().lstrip("@")
+            if not name:
+                return "Имя не указано — обращения не будет."
+            return f"Отметит @{name} — уведомление придёт, пока имя не изменится."
+        if mode == "phone":
+            if not (phone or "").strip():
+                return "Номер не указан — обращения не будет."
+            return "Обращение появится текстом, но БЕЗ уведомления: по номеру Telegram человека не находит."
+        return ""
+
     def _onedrive_shared_email(self):
         return (self.settings.get("onedrive_shared_email") or "").strip() or None
 
@@ -2195,10 +2647,12 @@ class ClientApp(ctk.CTk):
     def _onedrive_account_status_text(self):
         email = self._onedrive_shared_email()
         if not email:
-            return "Email не указан — используется угадывание по названию папки."
+            return ("Email не указан — данные хранятся только на этом компьютере.\n"
+                    "В облако ничего не пишется: ни список серверов, ни копии.")
         resolved = servers_registry.find_account_folder(email)
         if resolved is None:
-            return f"Такой аккаунт OneDrive на этом компьютере не найден: {email}"
+            return (f"Такой аккаунт OneDrive на этом компьютере не найден: {email}\n"
+                    "Пока не найден — данные хранятся только локально.")
         return f"Найдено: {resolved}"
 
     def _open_onedrive_account_window(self):
@@ -2209,7 +2663,7 @@ class ClientApp(ctk.CTk):
             return
         window = tk.Toplevel(self)
         window.title("Учётная запись OneDrive")
-        window.geometry("380x420")
+        window.geometry("420x560")
         window.configure(bg=self._tk_color(COLOR_BG))
         self.onedrive_account_window = window
 
@@ -2219,28 +2673,74 @@ class ClientApp(ctk.CTk):
             side="left"
         )
 
+        # Зауваження користувача (2026-09-05): пошту не видно й вона не
+        # зберігалась, якщо натиснути "Закрыть" одразу після набору. Тепер
+        # акаунти OneDrive цього ПК читаються з Windows і обираються кліком -
+        # зберігається одразу; ручне поле - для адреси поза списком.
         ctk.CTkLabel(
             window,
             text=(
-                "Email аккаунта OneDrive для общих данных: реестр серверов, "
-                "резервные копии, стандартное меню. Пусто — угадывание по "
-                "названию папки, как раньше."
+                "Какой аккаунт OneDrive этого компьютера использовать для общих данных: "
+                "реестр клиентов, резервные копии, стандартное меню. Дома должен быть "
+                "указан тот же аккаунт."
             ),
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 8))
-
-        email_var = ctk.StringVar(value=self.settings.get("onedrive_shared_email") or "")
+        choices = ctk.CTkFrame(window, fg_color="transparent")
+        choices.pack(fill="x", padx=16)
+        choice_var = ctk.StringVar(value=(self.settings.get("onedrive_shared_email") or "").strip())
+        manual_var = ctk.StringVar(value="")
         status_var = ctk.StringVar(value=self._onedrive_account_status_text())
 
-        def on_email_changed(*_args):
-            self.settings.set("onedrive_shared_email", email_var.get().strip())
+        def current_email():
+            return (self.settings.get("onedrive_shared_email") or "").strip()
+
+        def save(value):
+            self.settings.set("onedrive_shared_email", (value or "").strip())
+            choice_var.set(current_email())
             status_var.set(self._onedrive_account_status_text())
+            render_choices()
 
-        email_entry = ctk.CTkEntry(window, textvariable=email_var, placeholder_text="you@company.com")
-        email_entry.pack(fill="x", padx=16, pady=(0, 6))
-        email_entry.bind("<FocusOut>", on_email_changed)
-        email_entry.bind("<Return>", on_email_changed)
+        def render_choices():
+            for child in choices.winfo_children():
+                child.destroy()
+            accounts = servers_registry.list_account_folders()
+            current = current_email().lower()
+            options = [(email, folder) for email, folder in accounts] + [("", None)]
+            for email, folder in options:
+                selected = (email.lower() == current) if email else (current == "")
+                text = email if email else "Не использовать облако (данные только на этом компьютере)"
+                ctk.CTkRadioButton(
+                    choices, text=("\u2713 " + text) if selected else text, variable=choice_var, value=email,
+                    font=("", 12, "bold" if selected else "normal"),
+                    text_color=("#2F7BD9" if selected else COLOR_TEXT), command=lambda e=email: save(e),
+                ).pack(anchor="w", pady=(0, 2))
+                if folder is not None:
+                    ctk.CTkLabel(
+                        choices, text=str(folder), font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w",
+                    ).pack(anchor="w", padx=(28, 0), pady=(0, 6))
+            if current and not any(email.lower() == current for email, _folder in accounts):
+                ctk.CTkLabel(
+                    choices, text=f"Указан {current_email()}, но такого аккаунта на этом компьютере нет.",
+                    font=("", 11), text_color=COLOR_STOP_TEXT, anchor="w", justify="left", wraplength=340,
+                ).pack(anchor="w", pady=(2, 0))
 
+        render_choices()
+
+        ctk.CTkLabel(
+            window, text="Другой адрес (если его нет в списке):", font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(8, 2))
+        manual_entry = ctk.CTkEntry(window, textvariable=manual_var, placeholder_text="you@company.com")
+        manual_entry.pack(fill="x", padx=16, pady=(0, 6))
+
+        def flush_manual(*_args):
+            value = manual_var.get().strip()
+            if value and value.lower() != current_email().lower():
+                save(value)
+                manual_var.set("")
+
+        manual_entry.bind("<Return>", flush_manual)
+        manual_entry.bind("<FocusOut>", flush_manual)
         ctk.CTkLabel(
             window, textvariable=status_var, font=("", 10), text_color=COLOR_TEXT_MUTED,
             anchor="w", justify="left", wraplength=340,
@@ -2259,7 +2759,13 @@ class ClientApp(ctk.CTk):
             font=("", 11), text_color=COLOR_TEXT_MUTED, justify="left", wraplength=340,
         ).pack(fill="x", padx=16, pady=(0, 16))
 
-        ctk.CTkButton(window, text="Закрыть", command=window.destroy).pack(fill="x", padx=16, pady=(0, 16))
+        def close_window():
+            flush_manual()
+            window.destroy()
+
+        ctk.CTkButton(window, text="Закрыть", command=close_window).pack(fill="x", padx=16, pady=(0, 16))
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.bind("<Escape>", lambda _event: close_window())
 
     # Той самий короткий підпис під реліз-нотатками, що вже й gui.py
     # "Історія" (навмисно продубльовано - client_app.py уникає імпорту
@@ -2289,6 +2795,115 @@ class ClientApp(ctk.CTk):
     # /XF settings.json app_data.sqlite3, click-install-restart), лише
     # джерело - ОБРАНИЙ реліз (github_releases.get_release_by_tag), не
     # обов'язково найновіший.
+    # ---------------- Коррекция остатков (2026-09-06) ----------------
+    # Рішення користувача: після інвентаризації нові цифри вносяться всім
+    # списком, одна інвентаризація - один документ; людина міняє лише штуки,
+    # одиниці виміру рахує програма (apply_correction_operation).
+    @staticmethod
+    def _correction_number(value):
+        try:
+            return float(str(value).replace(",", "."))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _correction_format(value):
+        number = ClientApp._correction_number(value)
+        return str(int(number)) if float(number).is_integer() else ("%g" % number)
+
+    @staticmethod
+    def _correction_signed(value):
+        number = round(ClientApp._correction_number(value), 4)
+        return ("-" if number < 0 else "+") + ClientApp._correction_format(abs(number))
+
+    def _correction_stock_rows(self, product_filter=None, needle=""):
+        """Рядки СКЛАД для вікна: (усі продукти, рядки під фільтром)."""
+        _headers, columns, rows = warehouse_rows(self.store)
+        needle = (needle or "").strip().lower().replace("×", "x")
+        products = []
+        result = []
+        for row_id, row in rows:
+            product = str(row_value(row, columns.get("product")) or "")
+            if not product:
+                continue
+            if product not in products:
+                products.append(product)
+            if product_filter and product_filter != "Все продукты" and product != product_filter:
+                continue
+            thickness, width, length = (row_value(row, columns.get(key)) for key in ("thickness", "width", "length"))
+            size = "x".join(self._correction_format(v) for v in (thickness, width, length) if v not in (None, ""))
+            breed = str(row_value(row, columns.get("breed")) or "")
+            condition = str(row_value(row, columns.get("condition")) or "")
+            haystack = (product + " " + breed + " " + condition + " " + size).lower()
+            if needle and needle not in haystack:
+                continue
+            result.append({
+                "row_id": row_id, "product": product, "breed": breed, "condition": condition,
+                "thickness": thickness, "width": width, "length": length, "size": size,
+                "now": self._correction_number(row_value(row, columns.get("balance_qty"))),
+            })
+        return sorted(products), result
+
+    def _apply_stock_corrections(self, rows_by_id, edits, reason):
+        """edits: {row_id: нове число штук}. Пише одним документом, повертає результат."""
+        positions = []
+        for row_id, new_quantity in edits.items():
+            info = rows_by_id.get(row_id)
+            if info is None or abs(new_quantity - info["now"]) < 1e-9:
+                continue
+            if info.get("new"):
+                # Нова позиція з вікна «Новый размер» (2026-09-07). Новий
+                # продукт: одиниця виміру в базу клієнта і три категорії у
+                # формах бота, щоб він підтягнувся скрізь.
+                if info.get("new_product"):
+                    kind = info.get("unit_kind")
+                    if kind:
+                        self.store.set_product_measure_kind(info["product"], kind)
+                    self.store.ensure_product_operations(info["product"], kind)
+                positions.append({
+                    "product": info["product"], "condition": info["condition"], "breed": info["breed"],
+                    "rows": [{
+                        "new_row": True, "thickness": info["thickness"], "width": info["width"],
+                        "length": info["length"], "new_quantity": new_quantity,
+                    }],
+                })
+                continue
+            positions.append({
+                "product": info["product"], "condition": info["condition"], "breed": info["breed"],
+                "rows": [{
+                    "row_id": row_id, "thickness": info["thickness"], "width": info["width"],
+                    "length": info["length"], "new_quantity": new_quantity,
+                }],
+            })
+        if not positions:
+            return {"ok": False, "message": "Ничего не изменилось: «Изменить на» совпадает с текущим остатком по всем позициям."}
+        payload = {
+            "operation_kind": "correction",
+            "source": "client",
+            "user": {"id": None, "username": None, "full_name": "Программа (%s)" % getpass.getuser()},
+            "positions": positions,
+        }
+        if reason:
+            payload["comment"] = reason
+        sync_mode = self.settings.get("excel_sync_mode") or "after_each_operation"
+        result = apply_correction_operation(self.store, payload, sync_mode, self.telegram_worker)
+        if result.get("ok") and self.telegram_worker is not None:
+            try:
+                self.telegram_worker._notify_report_broadcast({"full_name": payload["user"]["full_name"]}, result["message"])
+            except Exception:
+                pass
+        return result
+
+    def _open_correction_window(self):
+        # Вигляд і фільтри - correction_window.py (як журнал операцій);
+        # дані й запис - _correction_stock_rows / _apply_stock_corrections.
+        open_correction_window(
+            self, "correction_window", self,
+            load_rows=lambda: self._correction_stock_rows()[1],
+            apply_edits=self._apply_stock_corrections,
+            colors=self._journal_window_colors(),
+        )
+
     def _open_rollback_window(self):
         if self.rollback_window is not None and self.rollback_window.winfo_exists():
             self.rollback_window.deiconify()
@@ -2475,6 +3090,11 @@ class ClientApp(ctk.CTk):
                     destination = Path(paths.BASE_DIR) / "updates"
                     target = github_releases.download_and_extract_release(
                         release, destination, on_progress=report_progress,
+                        # Той самий токен, що вже й для перевірки релізів.
+                        # На публічному репозиторії не змінює нічого; коли
+                        # репозиторій стане приватним - це єдиний спосіб
+                        # узагалі забрати файл.
+                        token=self.settings.get("github_read_token") or None,
                     )
                 except Exception as exc:
                     error = str(exc)
@@ -2541,7 +3161,33 @@ class ClientApp(ctk.CTk):
             wraplength=260,
         ).pack(fill="x", padx=(14, 10), pady=(0, 6))
         ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
-        self._build_row_button(card, "power", self._bot_toggle_label(), self._on_bot_toggle_row_clicked)
+        # KD за номіналом (рішення користувача 2026-09-05): автор продажу
+        # бачить повний розрахунок завжди, а чи бачить його група - перемикач.
+        recalc_row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        recalc_row.pack(fill="x", padx=1, pady=(0, 1))
+        recalc_left = ctk.CTkFrame(recalc_row, fg_color="transparent")
+        recalc_left.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        ctk.CTkLabel(
+            recalc_left, text="Показывать группе расчёт при списании другого размера",
+            font=("", 13), text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            recalc_left,
+            text="В копии отчёта для группы: какой размер списан, сумма по факту и доход по пересчету. "
+                 "Автор продажи видит это всегда",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+        self._group_recalc_switch_var = ctk.IntVar(value=1 if self._group_sees_size_recalc() else 0)
+        ctk.CTkSwitch(
+            recalc_row, text="", variable=self._group_recalc_switch_var, onvalue=1, offvalue=0,
+            command=self._on_group_recalc_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+        # Задача користувача (2026-09-06): рядок «Вкл./Выкл. бот» у
+        # налаштуваннях прибрано як зайвий (бот керується з шапки).
+        # Замість нього - «Цвета операций»: окреме вікно з прев'ю
+        # (colors_window.py), кольори журналу в клієнті, формі й домашці.
+        ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
+        self._build_row_button(card, "settings", "Цвета операций", self._open_colors_window)
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
     # Задача користувача (2026-08-14, скріншот): "під таблицею щоб писало
@@ -2577,14 +3223,31 @@ class ClientApp(ctk.CTk):
         # (та сама, що й у "Таблица Excel" - обидві про таблицю).
         self._build_row_button(card, "document", "Формат таблицы", self._open_table_format_window)
         ctk.CTkFrame(card, height=1, fg_color=COLOR_DIVIDER).pack(fill="x")
-        # Задача користувача (2026-08-15): "додай туди кнопку оновити
-        # екселі" - той самий self._on_refresh_excel_clicked, що й у
-        # головному меню; self.refresh_excel_button і далі стежить лише
-        # за кнопкою з головного меню (текст "Обновление..."/блокування)
-        # - тут окремого відстеження нема, але спільний прапорець
-        # _excel_refresh_in_progress все одно захищає від подвійного
-        # запуску незалежно від того, яку з двох кнопок натиснули.
-        self._build_row_button(card, "refresh", "Обновить эксели", self._on_refresh_excel_clicked)
+        # Задача користувача (2026-09-05): "додай це в налаштування як ти
+        # відобразив на скріні" - перемикач для звірки Excel із шаблоном
+        # (_check_excel_on_start). Увімкнений, поки людина сама не вимкне:
+        # тоді після "Позже" програма мовчить, доки не зʼявиться щось нове,
+        # а відкладене тримає лише цятка на дзвіночку. Той самий стиль
+        # рядка з CTkSwitch, що й у секції "Автозапуск".
+        remind_row = ctk.CTkFrame(card, fg_color=COLOR_ROW, corner_radius=10)
+        remind_row.pack(fill="x", padx=1, pady=(0, 1))
+        remind_left = ctk.CTkFrame(remind_row, fg_color="transparent")
+        remind_left.pack(side="left", fill="x", expand=True, padx=(14, 8), pady=10)
+        ctk.CTkLabel(
+            remind_left, text="Напоминать о недостающих столбцах при каждом запуске",
+            font=("", 13), text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            remind_left, text="Выключено — после «Позже» напомнит только красная точка на колокольчике",
+            font=("", 10), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left", wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+        self._excel_remind_switch_var = ctk.IntVar(value=1 if self._excel_check_reminds_every_start() else 0)
+        ctk.CTkSwitch(
+            remind_row, text="", variable=self._excel_remind_switch_var, onvalue=1, offvalue=0,
+            command=self._on_excel_remind_toggle_clicked, width=36,
+        ).pack(side="right", padx=(0, 14))
+        # Задача користувача (2026-09-06): «Обновить эксели» з налаштувань
+        # прибрано - цю роботу виконує перевірка Excel сама.
         ctk.CTkFrame(card, height=1, fg_color="transparent").pack(fill="x", pady=(0, 1))
 
 
@@ -2592,8 +3255,8 @@ class ClientApp(ctk.CTk):
         confirmed = messagebox.askyesno(
             "Выровнять таблицу",
             "Ничего не будет удалено. Будут лишь сняты активные фильтры и "
-            "выровнены строки и столбцы 5 управляемых листов (СКЛАД, ПРИХОД, "
-            "ПРОДАЖА, СПИСАНИЕ, АНТИСЕПТИРОВАНИЕ) под единый стандарт. "
+            "выровнены строки и столбцы 6 управляемых листов (СКЛАД, ПРИХОД, "
+            "ПРОДАЖА, СПИСАНИЕ, АНТИСЕПТИРОВАНИЕ, ОБМЕН) под единый стандарт. "
             "Продолжить?",
         )
         if not confirmed:
@@ -3012,239 +3675,40 @@ class ClientApp(ctk.CTk):
     # реальний баг z-order (вікно миттю опинялось позаду головного). "Журнал
     # виконаних робіт" (dev work log) свідомо НЕ переносимо - це внутрішні
     # нотатки розробника, не потрібні бізнес-клієнту.
+    # Задача користувача (2026-09-06): «приведемо журнал в порядок для
+    # користувачів» - «Журналы» тепер відкриває журнал операцій (рухи
+    # складу: час, документ, хто, товар, ± шт/од., залишок, причина) з
+    # фільтром у кожному заголовку - journal_window.py, спільне з домашкою.
+    # Старий технічний журнал повідомлень боту з клієнта прибрано (рішення
+    # користувача: лишається лише в домашці, «Журнал дій»).
     def _open_journals_window(self):
-        if self.journals_window is not None and self.journals_window.winfo_exists():
-            self.journals_window.deiconify()
-            self.journals_window.lift()
-            self.journals_window.focus_force()
-            self._refresh_action_log()
-            return
-        window = tk.Toplevel(self)
-        window.title("Журнал действий")
-        window.geometry("820x560")
-        window.configure(bg=self._tk_color(COLOR_BG))
-        self.journals_window = window
-        self._build_journals_window(window)
+        open_journal_window(
+            self, "journals_window", self, LocalJournalSource(self.store), colors=self._journal_window_colors(),
+        )
 
-    def _build_journals_window(self, window):
-        top = ctk.CTkFrame(window, fg_color="transparent")
-        top.pack(fill="x", padx=16, pady=(16, 8))
-        ctk.CTkLabel(top, text="Журнал действий", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
-        ctk.CTkButton(
-            top, text="Очистить журнал", width=140, fg_color=COLOR_STOP, text_color=COLOR_STOP_TEXT,
-            hover_color=COLOR_HOVER, command=self._on_clear_action_log_clicked,
-        ).pack(side="right")
-        ctk.CTkButton(top, text="Обновить", width=100, command=self._refresh_action_log).pack(side="right", padx=(0, 8))
-
-        self.journals_list_frame = ctk.CTkScrollableFrame(window, fg_color="transparent")
-        self.journals_list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        self._refresh_action_log()
-
-    # Реальний баг (2026-08-13): "дуже лагає" - до 200 рядків по 5 CTk-
-    # віджетів (CTkFrame/CTkLabel/CTkButton) кожен - CustomTkinter суттєво
-    # важчий за звичайний tk (кожен заокруглений кут - окреме canvas-
-    # малювання), сотні таких віджетів синхронно на відкритті/оновленні
-    # відчутно "підвисають" інтерфейс. Рядки списку тепер звичайні tk-
-    # віджети (та сама логіка, що вже й у самому gui.py - там теж plain
-    # tk.Frame/tk.Label/tk.Button для journal/personnel рядків, не ttk чи
-    # CTk), а не 200 - ліміт 50 за раз, з кнопкою "Показать ещё".
-    def _refresh_action_log(self):
-        if self.journals_list_frame is None:
-            return
-        for child in self.journals_list_frame.winfo_children():
-            child.destroy()
-        rows = self.store.list_action_log(self._journals_fetch_limit)
-        if not rows:
-            tk.Label(
-                self.journals_list_frame, text="Журнал действий пока пуст.",
-                fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
-            ).pack(anchor="w", pady=8)
-            return
-        for log_id, action_type, details_json, created_at in rows:
-            self._build_action_log_row(log_id, action_type, details_json, created_at)
-        if len(rows) >= self._journals_fetch_limit:
-            tk.Button(
-                self.journals_list_frame, text="Показать ещё", command=self._on_show_more_logs_clicked,
-            ).pack(pady=8)
-
-    def _on_show_more_logs_clicked(self):
-        self._journals_fetch_limit += 50
-        self._refresh_action_log()
-
-    def _build_action_log_row(self, log_id, action_type, details_json, created_at):
-        details = self._parse_action_log_details(details_json)
-        summary = self._action_log_summary(action_type, details)
-        row_bg = self._tk_color(COLOR_ROW)
-        text_color = self._tk_color(COLOR_TEXT)
-        muted_color = self._tk_color(COLOR_TEXT_MUTED)
-
-        card = tk.Frame(self.journals_list_frame, bg=row_bg)
-        card.pack(fill="x", pady=(0, 6))
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_columnconfigure(1, weight=0)
-
-        headline = f"{self._format_log_time(created_at)} — {summary['user']} — {summary['status']}"
-        tk.Label(
-            card, text=headline, font=("Segoe UI", 10), fg=text_color, bg=row_bg, anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
-
-        buttons = tk.Frame(card, bg=row_bg)
-        buttons.grid(row=0, column=1, rowspan=2, sticky="e", padx=12, pady=8)
-        tk.Button(
-            buttons, text="Детально", width=9, command=lambda: self._open_action_log_details(log_id),
-        ).pack(side="left", padx=(0, 4))
-        tk.Button(
-            buttons, text="Удалить", width=9, fg="#B23B3B",
-            command=lambda: self._on_delete_action_log_clicked(log_id),
-        ).pack(side="left")
-
-        detail_text = f"{summary['action']}: {summary['text']}" if summary["text"] else summary["action"]
-        tk.Label(
-            card, text=self._short_text(detail_text, 90), font=("Segoe UI", 9), fg=muted_color, bg=row_bg, anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-
-    def _on_delete_action_log_clicked(self, log_id):
-        if not messagebox.askyesno("Журнал действий", f"Удалить запись журнала действий #{log_id}?", parent=self.journals_window):
-            return
-        self.store.delete_action_log(log_id)
-        self._refresh_action_log()
-
-    def _on_clear_action_log_clicked(self):
-        if not messagebox.askyesno(
-            "Журнал действий", "Удалить все записи журнала? Это действие нельзя отменить.", parent=self.journals_window,
-        ):
-            return
-        self.store.clear_action_log()
-        self._refresh_action_log()
-
-    def _open_action_log_details(self, log_id):
-        existing = self._action_log_detail_windows.get(log_id)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
-        row = self.store.get_action_log(log_id)
-        if not row:
-            messagebox.showinfo("Журнал действий", "Запись не найдена.")
-            return
-        _log_id, action_type, details_json, created_at = row
-        details = self._parse_action_log_details(details_json)
-
-        window = tk.Toplevel(self.journals_window)
-        window.title(f"Детали записи #{log_id}")
-        window.geometry("640x480")
-        self._action_log_detail_windows[log_id] = window
-
-        def close():
-            if self._action_log_detail_windows.get(log_id) is window:
-                del self._action_log_detail_windows[log_id]
-            window.destroy()
-
-        window.protocol("WM_DELETE_WINDOW", close)
-        window.bind("<Escape>", lambda event: close())
-
-        text_widget = tk.Text(window, wrap="word")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        text_widget.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
-        scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=12)
-        text_widget.insert("1.0", self._format_action_log_details_text(log_id, action_type, created_at, details))
-        text_widget.configure(state="disabled")
-
-    def _parse_action_log_details(self, details_json):
-        try:
-            data = json.loads(details_json) if details_json else {}
-        except json.JSONDecodeError:
-            data = {"raw": details_json}
-        return data if isinstance(data, dict) else {"raw": data}
-
-    def _action_log_summary(self, action_type, details):
-        telegram = details.get("telegram") or {}
-        text = details.get("incoming_text") or ""
-        if not text and isinstance(details.get("reply"), dict):
-            text = details["reply"].get("caption") or details["reply"].get("text") or ""
+    def _journal_window_colors(self):
         return {
-            "user": self._action_log_user_label(telegram),
-            "status": self._action_log_status_label(details.get("status", "")),
-            "action": self._action_log_action_label(details.get("recognized_command") or action_type),
-            "text": str(text).replace("\n", " "),
+            "bg": self._tk_color(COLOR_BG), "fg": self._tk_color(COLOR_TEXT), "muted": self._tk_color(COLOR_TEXT_MUTED),
+            "row": self._tk_color(COLOR_ROW), "zebra": self._tk_color(COLOR_CARD), "head": self._tk_color(COLOR_CARD),
+            "line": self._tk_color(COLOR_DIVIDER), "hover": self._tk_color(COLOR_HOVER), "dark": bool(self._dark_mode),
+            "types": palette_for(self._operation_colors(), bool(self._dark_mode)),
         }
 
-    def _action_log_user_label(self, telegram):
-        full_name = telegram.get("full_name") or ""
-        username = telegram.get("username") or ""
-        user_id = telegram.get("user_id") or ""
-        if full_name and username:
-            return f"{full_name} / @{username}"
-        if full_name:
-            return str(full_name)
-        if username:
-            return f"@{username}"
-        if user_id:
-            return str(user_id)
-        return "Неизвестно"
+    # ---------------- Цвета операций (2026-09-06) ----------------
+    def _operation_colors(self):
+        return normalize_colors(self.settings.get(OPERATION_COLORS_SETTING))
 
-    def _action_log_status_label(self, status):
-        labels = {
-            "success": "Выполнено", "waiting": "Ожидает ответа", "error": "Ошибка",
-            "cancelled": "Отменено", "unknown": "Не распознано",
-        }
-        return labels.get(str(status or ""), str(status or "Неизвестно"))
+    def _open_colors_window(self):
+        open_colors_window(
+            self, "colors_window", self, self._operation_colors(), on_save=self._save_operation_colors,
+            colors=self._journal_window_colors(),
+        )
 
-    def _action_log_action_label(self, action):
-        labels = {
-            "telegram_message": "Сообщение Telegram", "add_income": "Приход", "stock_balance": "Остаток",
-            "cancel_operation": "Отмена", "bot_selection": "Выбор бота", "bot_explanation": "Пояснение режимов",
-            "claude_key_saved": "Ключ Claude сохранен", "claude_key_rejected": "Ключ Claude не сохранен",
-            "claude_key_help": "Инструкция Claude API", "claude_chat": "Разговор с Claude",
-            "stock_income_history": "История прихода", "status": "Статус", "start": "Старт",
-            "help": "Помощь", "sheets": "Список листов", "first": "Первые строки", "unknown": "Не распознано",
-        }
-        return labels.get(str(action or ""), str(action or "Неизвестно"))
-
-    def _action_log_reply_label(self, reply):
-        if not isinstance(reply, dict):
-            return str(reply or "")
-        if reply.get("type") == "document":
-            path = reply.get("path", "")
-            caption = reply.get("caption", "")
-            return "\n".join(
-                part for part in [
-                    "Тип ответа: файл",
-                    f"Файл: {path}" if path else "",
-                    f"Подпись: {caption}" if caption else "",
-                ] if part
-            )
-        return str(reply.get("text", ""))
-
-    # Спрощена версія gui.py._format_action_log_details: без технічних
-    # деталей (pipeline_version/duration_ms/сирий JSON) - зайве для бізнес-
-    # клієнта, лишає лише те, що реально пояснює, що сталося.
-    def _format_action_log_details_text(self, log_id, action_type, created_at, details):
-        telegram = details.get("telegram") or {}
-        reply = details.get("reply") or {}
-        lines = [
-            f"Запись журнала: #{log_id}",
-            f"Время: {self._format_log_time(created_at)}",
-            f"Пользователь: {self._action_log_user_label(telegram)}",
-            "",
-            "Запрос пользователя:",
-            details.get("incoming_text") or "",
-            "",
-            f"Действие: {self._action_log_action_label(details.get('recognized_command') or action_type)}",
-            f"Статус: {self._action_log_status_label(details.get('status'))}",
-        ]
-        pending_before = details.get("pending_before")
-        pending_after = details.get("pending_after")
-        if pending_before:
-            lines.extend(["", "Операция до сообщения:", f"Тип: {pending_before.get('operation_type', '')}"])
-        if pending_after:
-            lines.extend(["", "Операция после сообщения:", f"Тип: {pending_after.get('operation_type', '')}"])
-        lines.extend(["", "Ответ пользователю:", self._action_log_reply_label(reply)])
-        if details.get("error"):
-            lines.extend(["", "Ошибка:", str(details.get("error"))])
-        return "\n".join(lines)
+    def _save_operation_colors(self, colors):
+        self.settings.set(OPERATION_COLORS_SETTING, dict(colors))
+        journal = getattr(self, "journals_window", None)
+        if journal is not None and journal.window.winfo_exists():
+            journal.set_type_overrides(palette_for(colors, bool(self._dark_mode)))
 
     def _format_log_time(self, created_at):
         try:
@@ -3309,6 +3773,10 @@ class ClientApp(ctk.CTk):
         # через set_role, або сам бот через реєстрацію нового Гостя) може
         # змінити персонал, поки це вікно вже відкрите.
         ctk.CTkButton(top, text="Обновить", width=100, command=self._refresh_personnel).pack(side="right", padx=(0, 8))
+        # Задача користувача (2026-09-06): «додай змогу в персоналі вибирати
+        # кнопки, якими може користуватися та чи інша роль» - окреме вікно
+        # (role_buttons_window.py), спільне з домашкою.
+        ctk.CTkButton(top, text="Кнопки ролей", width=120, command=self._open_role_buttons_window).pack(side="right", padx=(0, 8))
 
         self.personnel_list_frame = ctk.CTkScrollableFrame(window, fg_color="transparent")
         self.personnel_list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
@@ -3360,8 +3828,8 @@ class ClientApp(ctk.CTk):
             display_name = full_name or username or str(telegram_id)
             username_text = f" @{username}" if username else ""
             normalized_role = perm.normalize_role(role)
-            role_label = perm.ROLE_LABELS_RU.get(normalized_role, role)
-            role_bg, role_fg = perm.ROLE_CHIP_COLORS.get(normalized_role, perm.ROLE_CHIP_COLORS[perm.GUEST])
+            role_label = self.store.role_label(role)
+            role_bg, role_fg = self.store.role_colors(role)
 
             headline = f"{index}. {display_name}{username_text} — ID: {telegram_id}"
             tk.Label(
@@ -3375,7 +3843,7 @@ class ClientApp(ctk.CTk):
             chip = tk.Label(
                 self.personnel_list_frame, text=f"{role_label} ▾", font=("Segoe UI", 9, "bold"),
                 bg=role_bg, fg=role_fg, padx=8, pady=3, cursor="hand2",
-                width=ROLE_CHIP_WIDTH, anchor="center",
+                width=self._role_chip_width(), anchor="center",
             )
             chip.grid(row=index, column=1, padx=8)
             chip.bind(
@@ -3412,13 +3880,13 @@ class ClientApp(ctk.CTk):
         name_header.bind("<Button-1>", lambda event: self._toggle_personnel_sort("name"))
 
         if self._personnel_role_filter:
-            role_header_text = f"Роль: {perm.ROLE_LABELS_RU.get(self._personnel_role_filter, self._personnel_role_filter)} ▾"
+            role_header_text = f"Роль: {self.store.role_label(self._personnel_role_filter)} ▾"
         else:
             role_header_text = "Роль ▾"
         role_header = tk.Label(
             self.personnel_list_frame, text=role_header_text,
             font=("Segoe UI", 8, "bold"), fg=muted_color, bg=header_bg,
-            cursor="hand2", anchor="center", width=ROLE_CHIP_WIDTH,
+            cursor="hand2", anchor="center", width=self._role_chip_width(),
         )
         role_header.grid(row=0, column=1, padx=8, pady=(0, 6))
         role_header.bind("<Button-1>", lambda event, w=role_header: self._open_personnel_role_filter_menu(w))
@@ -3451,10 +3919,10 @@ class ClientApp(ctk.CTk):
             label="Все", variable=filter_var, value="",
             command=lambda: self._set_personnel_role_filter(None),
         )
-        for role in perm.ROLES:
+        for role in self.store.list_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS_RU[role], variable=filter_var, value=role,
-                command=lambda r=role: self._set_personnel_role_filter(r),
+                label=role["label"], variable=filter_var, value=role["key"],
+                command=lambda r=role["key"]: self._set_personnel_role_filter(r),
             )
         x = header_widget.winfo_rootx()
         y = header_widget.winfo_rooty() + header_widget.winfo_height()
@@ -3488,10 +3956,10 @@ class ClientApp(ctk.CTk):
             selectcolor=self._tk_color(COLOR_TEXT), bd=0,
         )
         role_var = tk.StringVar(value=current_role)
-        for role in perm.ROLES:
+        for role in self.store.list_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS_RU[role], variable=role_var, value=role,
-                command=lambda r=role: self._on_role_menu_selected(user_id, telegram_id, current_role, r),
+                label=role["label"], variable=role_var, value=role["key"],
+                command=lambda r=role["key"]: self._on_role_menu_selected(user_id, telegram_id, current_role, r),
             )
         x = chip_widget.winfo_rootx()
         y = chip_widget.winfo_rooty() + chip_widget.winfo_height()
@@ -3516,17 +3984,45 @@ class ClientApp(ctk.CTk):
         self._refresh_personnel()
 
     def _user_role_options(self):
-        return [perm.ROLE_LABELS_RU[role] for role in perm.ROLES]
+        return [role["label"] for role in self.store.list_roles()]
 
     def _user_role_to_label(self, role):
-        normalized = perm.normalize_role(role) if role else perm.GUEST
-        return perm.ROLE_LABELS_RU.get(normalized, perm.ROLE_LABELS_RU[perm.GUEST])
+        return self.store.role_label(role or perm.GUEST)
 
     def _user_role_label_to_code(self, label):
-        for role in perm.ROLES:
-            if perm.ROLE_LABELS_RU[role] == label:
-                return role
+        for role in self.store.list_roles():
+            if role["label"] == label:
+                return role["key"]
         return None
+
+    # Ширина бейджа ролі - під найдовшу назву з поточного списку ролей (свої
+    # ролі можуть бути довшими за вбудовані), не менша за стару константу.
+    def _role_chip_width(self):
+        longest = max((len(role["label"]) + 2 for role in self.store.list_roles()), default=0)
+        return max(ROLE_CHIP_WIDTH, longest)
+
+    def _role_window_colors(self):
+        return {
+            "bg": self._tk_color(COLOR_BG), "fg": self._tk_color(COLOR_TEXT), "muted": self._tk_color(COLOR_TEXT_MUTED),
+            "row": self._tk_color(COLOR_ROW), "line": self._tk_color(COLOR_HOVER),
+        }
+
+    def _open_role_buttons_window(self):
+        open_role_buttons_window(
+            self, "role_buttons_window", self, LocalRoleSource(self.store, on_changed=self._refresh_personnel),
+            colors=self._role_window_colors(), on_change=self._refresh_personnel,
+        )
+
+    # Домашка змінила ролі/кнопки через тунель (webapp_server
+    # handle_roles_changed, фоновий потік сервера) - оновити «Персонал» і
+    # відкрите вікно «Кнопки ролей» на головному потоці.
+    def _handle_roles_changed(self):
+        def refresh():
+            self._refresh_personnel()
+            window = getattr(self, "role_buttons_window", None)
+            if window is not None and window.window.winfo_exists():
+                window.reload()
+        self._run_on_main_thread(refresh)
 
     # Одне спливаюче вікно і для додавання, і для редагування (той самий
     # каркас, що й gui.py._ask_user_form) - СПРАВЖНЯ модальність тут
@@ -3628,8 +4124,8 @@ class ClientApp(ctk.CTk):
         self._refresh_personnel()
 
     def _notify_role_change(self, telegram_id, old_role, new_role):
-        old_label = perm.ROLE_LABELS_RU.get(old_role, old_role)
-        new_label = perm.ROLE_LABELS_RU.get(new_role, new_role)
+        old_label = self.store.role_label(old_role)
+        new_label = self.store.role_label(new_role)
         text = f"Ваша роль изменена: {old_label} → {new_label}."
 
         def worker():
@@ -3680,425 +4176,64 @@ class ClientApp(ctk.CTk):
             return
         window = tk.Toplevel(self)
         window.title("Редактор кнопок")
-        window.geometry("760x560")
+        window.geometry("780x600")
+        window.minsize(700, 520)
         window.configure(bg=self._tk_color(COLOR_BG))
         self.custom_buttons_window = window
         self._build_custom_buttons_window(window)
 
+    # Задача користувача (2026-09-05): "потрібно переробити налаштовування
+    # кнопок... виглядає досить криво та нелогічно як для користувача
+    # середнього класу знань ПК" - обраний варіант 01 із пʼяти: телефон
+    # ліворуч (меню як у Telegram), властивості праворуч, ↑↓ замість номера
+    # позиції, жодних модальних вікон. Сама панель - button_editor.py
+    # (спільна з домашкою), тут - лише вікно, кольори й джерело даних.
     def _build_custom_buttons_window(self, window):
         top = ctk.CTkFrame(window, fg_color="transparent")
         top.pack(fill="x", padx=16, pady=(16, 8))
         ctk.CTkLabel(top, text="Редактор кнопок", font=("", 16, "bold"), text_color=COLOR_TEXT).pack(side="left")
-
-        note = tk.Label(
-            window,
-            text="Кнопки, которые вы добавите здесь, появятся в главном меню бота в Telegram.",
-            fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
-            wraplength=720, justify="left",
-        )
-        note.pack(anchor="w", padx=16, pady=(0, 8))
-
-        ctk.CTkButton(
-            window, text="+ Добавить корневую кнопку", width=220,
-            command=lambda: self.add_custom_button_dialog(None),
-        ).pack(anchor="w", padx=16, pady=(0, 8))
-
-        content = tk.Frame(window, bg=self._tk_color(COLOR_BG))
-        content.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-
-        list_side = ctk.CTkScrollableFrame(content, fg_color="transparent")
-        list_side.pack(side="left", fill="both", expand=True, padx=(0, 12))
-        self.custom_buttons_list_frame = list_side
-
-        preview_side = tk.Frame(content, width=240, bg=self._tk_color(COLOR_CARD), relief="groove", borderwidth=1)
-        preview_side.pack(side="right", fill="y")
-        preview_side.pack_propagate(False)
-        tk.Label(
-            preview_side, text="Превью", font=("Segoe UI", 11, "bold"),
-            fg=self._tk_color(COLOR_TEXT), bg=self._tk_color(COLOR_CARD),
-        ).pack(anchor="w", padx=12, pady=(12, 4))
-        self.custom_button_preview_frame = tk.Frame(preview_side, bg=self._tk_color(COLOR_CARD))
-        self.custom_button_preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
+        body = tk.Frame(window, bg=self._tk_color(COLOR_BG))
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        colors = {
+            "bg": self._tk_color(COLOR_BG),
+            "card": self._tk_color(COLOR_CARD),
+            "entry": self._tk_color(COLOR_ROW),
+            "fg": self._tk_color(COLOR_TEXT),
+            "muted": self._tk_color(COLOR_TEXT_MUTED),
+            "border": self._tk_color(COLOR_BORDER),
+            "accent": "#2F7BD9",
+        }
+        self.button_editor = button_editor.ButtonEditorPanel(body, _LocalButtonSource(self), colors)
+        window.bind("<Escape>", lambda _event: window.destroy())
         window.protocol("WM_DELETE_WINDOW", window.destroy)
-        self._refresh_custom_buttons()
 
     def _refresh_custom_buttons(self):
-        for child in self.custom_buttons_list_frame.winfo_children():
-            child.destroy()
-        roots = self.store.list_custom_buttons(None, include_disabled=True)
-        if not roots:
-            tk.Label(
-                self.custom_buttons_list_frame, text="Кнопок пока нет.",
-                fg=self._tk_color(COLOR_TEXT_MUTED), bg=self._tk_color(COLOR_BG),
-            ).pack(anchor="w", pady=4)
-        else:
-            root_sides = self._half_pair_sides(roots)
-            for row in roots:
-                self._render_custom_button_row(row, depth=0, side=root_sides.get(row[0]))
-        self._refresh_custom_button_preview()
-
-    def _half_pair_sides(self, rows):
-        sides = {}
-        pending_id = None
-        for row in rows:
-            node_id, enabled, layout = row[0], row[5], row[6]
-            if not enabled:
-                continue
-            if layout == "half":
-                if pending_id is not None:
-                    sides[pending_id] = "лево"
-                    sides[node_id] = "право"
-                    pending_id = None
-                else:
-                    pending_id = node_id
-            else:
-                pending_id = None
-        return sides
-
-    def _render_custom_button_row(self, row, depth, side=None):
-        node_id, label, message_text, action_code, section, enabled, layout, operation_id = row
-        is_selected = node_id == self.custom_buttons_selected_id
-        row_bg = self._tk_color(("#D0E8FF", "#2A4A66")) if is_selected else self._tk_color(COLOR_ROW)
-
-        row_frame = tk.Frame(self.custom_buttons_list_frame, bg=row_bg)
-        row_frame.pack(fill="x", pady=1, padx=(depth * 24, 0))
-
-        display_label = label + (f" ({side})" if side else "") + ("" if enabled else " (скрыта)")
-        tk.Button(
-            row_frame, text=display_label, anchor="w", bg=row_bg, fg=self._tk_color(COLOR_TEXT),
-            font=("Segoe UI", 9), width=28,
-            command=lambda nid=node_id: self.select_custom_button(nid),
-        ).pack(side="left", fill="x", expand=True)
-
-        tk.Button(
-            row_frame, text="x", width=3, fg="#D1242F",
-            command=lambda nid=node_id, lbl=label: self.delete_custom_button_confirm(nid, lbl),
-        ).pack(side="right")
-        tk.Button(
-            row_frame, text="ред", width=5,
-            command=lambda nid=node_id: self.edit_custom_button_dialog(nid),
-        ).pack(side="right")
-        tk.Button(
-            row_frame, text="+", width=3, fg="#1A7F37",
-            command=lambda nid=node_id: self.add_custom_button_dialog(nid),
-        ).pack(side="right")
-
-        child_rows = self.store.list_custom_buttons(node_id, include_disabled=True)
-        child_sides = self._half_pair_sides(child_rows)
-        for child_row in child_rows:
-            self._render_custom_button_row(child_row, depth=depth + 1, side=child_sides.get(child_row[0]))
-
-    def select_custom_button(self, node_id):
-        self.custom_buttons_selected_id = node_id
-        self._refresh_custom_buttons()
-
-    def _custom_button_position_options(self, parent_id, exclude_node_id=None):
-        siblings = self.store.list_custom_buttons(parent_id, include_disabled=True)
-        ids_in_order = [row[0] for row in siblings]
-        if exclude_node_id in ids_in_order:
-            ids_in_order.remove(exclude_node_id)
-        return [str(i) for i in range(1, len(ids_in_order) + 2)]
-
-    def _refresh_custom_button_preview(self):
-        for child in self.custom_button_preview_frame.winfo_children():
-            child.destroy()
-        node_id = self.custom_buttons_selected_id
-        row = self.store.get_custom_button(node_id) if node_id else None
-        text_color = self._tk_color(COLOR_TEXT)
-        muted_color = self._tk_color(COLOR_TEXT_MUTED)
-        card_bg = self._tk_color(COLOR_CARD)
-        if not row:
-            tk.Label(
-                self.custom_button_preview_frame, text="Выберите кнопку слева.",
-                fg=muted_color, bg=card_bg, wraplength=210, justify="left",
-            ).pack(anchor="w")
+        editor = getattr(self, "button_editor", None)
+        window = self.custom_buttons_window
+        if editor is None or window is None or not window.winfo_exists():
             return
+        editor.refresh()
 
-        _id, _parent_id, label, message_text, action_code, section, enabled, layout, operation_id = row
-        tk.Label(
-            self.custom_button_preview_frame, text=label, font=("Segoe UI", 10, "bold"),
-            fg=text_color, bg=card_bg, wraplength=210, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-        tk.Label(
-            self.custom_button_preview_frame, text=self._CUSTOM_BUTTON_LAYOUT_LABELS.get(layout, layout),
-            fg=text_color, bg=card_bg, wraplength=210, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-        tk.Label(
-            self.custom_button_preview_frame, text=message_text or "(без сообщения)",
-            fg=text_color, bg=card_bg, wraplength=210, justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-
-        tk.Label(
-            self.custom_button_preview_frame, text="Далее:", font=("Segoe UI", 9, "bold"),
-            fg=text_color, bg=card_bg,
-        ).pack(anchor="w")
-        children = self.store.list_custom_buttons(_id, include_disabled=True)
-        if children:
-            for _child_id, child_label, *_rest in children:
-                tk.Label(
-                    self.custom_button_preview_frame, text=f"• {child_label}",
-                    fg=text_color, bg=card_bg, wraplength=210, justify="left",
-                ).pack(anchor="w")
-        elif operation_id is not None:
-            tk.Label(
-                self.custom_button_preview_frame,
-                text=f"Прямая ссылка: {self._operation_link_id_to_label(operation_id)}",
-                fg=text_color, bg=card_bg, wraplength=210, justify="left",
-            ).pack(anchor="w")
-        elif action_code:
-            action_label = next(
-                (action["label"] for action in CUSTOM_BUTTON_ACTIONS if action["code"] == action_code),
-                action_code,
-            )
-            tk.Label(
-                self.custom_button_preview_frame, text=f"Действие: {action_label}",
-                fg=text_color, bg=card_bg, wraplength=210, justify="left",
-            ).pack(anchor="w")
-        else:
-            tk.Label(self.custom_button_preview_frame, text="(нет действия)", fg=text_color, bg=card_bg).pack(anchor="w")
-
-    def _custom_button_action_options(self):
-        return [self._NO_ACTION_LABEL] + [action["label"] for action in CUSTOM_BUTTON_ACTIONS]
-
-    def _custom_button_action_code_to_label(self, action_code):
-        for action in CUSTOM_BUTTON_ACTIONS:
-            if action["code"] == action_code:
-                return action["label"]
-        return self._NO_ACTION_LABEL
-
-    def _custom_button_action_label_to_code(self, label):
-        for action in CUSTOM_BUTTON_ACTIONS:
-            if action["label"] == label:
-                return action["code"]
-        return None
+    # Видимість КОРЕНЕВИХ вбудованих кнопок дзеркалиться в хмару стандартного
+    # меню (локальне -> хмара, ніколи навпаки - рішення користувача 2026-09-05).
+    def _mirror_root_button_visibility_to_cloud(self, node_id):
+        state = self.store.standard_menu_state_if_root_builtin(node_id)
+        if state is None:
+            return
+        try:
+            standard_menu_cloud.write_local_cache(state)
+            standard_menu_cloud.write_cloud_state(state, self._onedrive_shared_email())
+        except OSError:
+            pass
 
     def _operation_link_catalog(self):
         catalog = []
         for operation in self.store.list_operations():
             operation_id, _code, _kind, _requires_identity, op_label, parent_action_code, *_rest = operation
             section_label = self._OPERATION_LINK_SECTION_LABELS.get(parent_action_code, parent_action_code)
-            catalog.append((operation_id, f"{op_label} — {section_label}"))
+            catalog.append((operation_id, f"{op_label} \u2014 {section_label}"))
         return catalog
 
-    def _operation_link_options(self):
-        return [self._NO_OPERATION_LINK_LABEL] + [display for _id, display in self._operation_link_catalog()]
-
-    def _operation_link_id_to_label(self, operation_id):
-        if operation_id is not None:
-            for op_id, display in self._operation_link_catalog():
-                if op_id == operation_id:
-                    return display
-        return self._NO_OPERATION_LINK_LABEL
-
-    def _operation_link_label_to_id(self, label):
-        for op_id, display in self._operation_link_catalog():
-            if display == label:
-                return op_id
-        return None
-
-    def _ask_custom_button_form(
-        self, title, position_options=None, initial_position=None,
-        initial_label="", initial_message="", initial_action_code=None, initial_layout="full",
-        initial_operation_id=None,
-    ):
-        if position_options is None:
-            position_options = ["1"]
-        if initial_position is None:
-            initial_position = position_options[0]
-        result = {"value": None}
-        window = tk.Toplevel(self.custom_buttons_window)
-        window.title(title)
-        window.resizable(False, False)
-        window.configure(bg=self._tk_color(COLOR_BG))
-
-        form = tk.Frame(window, bg=self._tk_color(COLOR_BG))
-        form.pack(padx=16, pady=16, fill="both", expand=True)
-        label_color = self._tk_color(COLOR_TEXT)
-        bg = self._tk_color(COLOR_BG)
-
-        tk.Label(form, text="Название кнопки:", fg=label_color, bg=bg).pack(anchor="w")
-        label_entry = tk.Entry(form, width=44)
-        label_entry.insert(0, initial_label)
-        label_entry.pack(anchor="w", pady=(2, 12))
-        label_entry.focus_set()
-
-        tk.Label(form, text="Что бот отвечает при нажатии:", fg=label_color, bg=bg).pack(anchor="w")
-        message_text_widget = tk.Text(form, width=44, height=5, wrap="word")
-        message_text_widget.insert("1.0", initial_message or "")
-        message_text_widget.pack(anchor="w", pady=(2, 4))
-        tk.Label(
-            form,
-            text=(
-                "Для стандартных действий (Приход, Реализация, Склад, Продажи,\n"
-                "Калькулятор, Справка) этот текст игнорируется."
-            ),
-            justify="left", fg=self._tk_color(COLOR_TEXT_MUTED), bg=bg, font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(0, 12))
-
-        assignment_var = tk.StringVar(value="operation" if initial_operation_id is not None else "action")
-
-        tk.Label(form, text="Назначение кнопки:", fg=label_color, bg=bg).pack(anchor="w")
-        tk.Radiobutton(
-            form, text="Стандартное действие:", variable=assignment_var, value="action",
-            bg=bg, fg=label_color, selectcolor=bg, command=lambda: update_combo_states(),
-        ).pack(anchor="w")
-        action_var = tk.StringVar(value=self._custom_button_action_code_to_label(initial_action_code))
-        action_combo = ttk.Combobox(
-            form, textvariable=action_var, values=self._custom_button_action_options(), state="readonly", width=38,
-        )
-        action_combo.pack(anchor="w", padx=(20, 0), pady=(2, 10))
-
-        tk.Radiobutton(
-            form, text="Прямая ссылка на действие из «Действий»:", variable=assignment_var, value="operation",
-            bg=bg, fg=label_color, selectcolor=bg, command=lambda: update_combo_states(),
-        ).pack(anchor="w")
-        operation_var = tk.StringVar(value=self._operation_link_id_to_label(initial_operation_id))
-        operation_combo = ttk.Combobox(
-            form, textvariable=operation_var, values=self._operation_link_options(), state="readonly", width=38,
-        )
-        operation_combo.pack(anchor="w", padx=(20, 0), pady=(2, 16))
-
-        def update_combo_states():
-            mode = assignment_var.get()
-            action_combo.configure(state="readonly" if mode == "action" else "disabled")
-            operation_combo.configure(state="readonly" if mode == "operation" else "disabled")
-
-        update_combo_states()
-
-        tk.Label(form, text="Позиция (номер среди соседних кнопок):", fg=label_color, bg=bg).pack(anchor="w")
-        position_var = tk.StringVar(value=initial_position)
-        ttk.Combobox(
-            form, textvariable=position_var, values=position_options, state="readonly", width=10,
-        ).pack(anchor="w", pady=(2, 16))
-
-        tk.Label(form, text="Размер кнопки:", fg=label_color, bg=bg).pack(anchor="w")
-        layout_var = tk.StringVar(value=initial_layout or "full")
-        tk.Radiobutton(
-            form, text="Одна сплошная (на всю строку)", variable=layout_var, value="full",
-            bg=bg, fg=label_color, selectcolor=bg,
-        ).pack(anchor="w")
-        tk.Radiobutton(
-            form, text="Вдвое меньше (парится с соседней по позиции)", variable=layout_var, value="half",
-            bg=bg, fg=label_color, selectcolor=bg,
-        ).pack(anchor="w", pady=(0, 16))
-
-        button_row = tk.Frame(form, bg=bg)
-        button_row.pack(anchor="e", fill="x")
-
-        def save():
-            label = label_entry.get().strip()
-            if not label:
-                messagebox.showerror(title, "Название кнопки не может быть пустым.", parent=window)
-                return
-            mode = assignment_var.get()
-            result["value"] = {
-                "label": label,
-                "message_text": message_text_widget.get("1.0", "end").strip(),
-                "action_code": self._custom_button_action_label_to_code(action_var.get()) if mode == "action" else None,
-                "operation_id": self._operation_link_label_to_id(operation_var.get()) if mode == "operation" else None,
-                "layout": layout_var.get(),
-                "position_index": int(position_var.get()) - 1,
-            }
-            window.destroy()
-
-        def cancel():
-            window.destroy()
-
-        tk.Button(button_row, text="Отменить", width=14, command=cancel).pack(side="right", padx=(8, 0))
-        tk.Button(button_row, text="Сохранить изменения", width=18, command=save).pack(side="right")
-
-        window.bind("<Escape>", lambda event: cancel())
-        window.protocol("WM_DELETE_WINDOW", cancel)
-        window.update_idletasks()
-        width, height = 420, 640
-        x = self.custom_buttons_window.winfo_rootx() + (self.custom_buttons_window.winfo_width() - width) // 2
-        y = self.custom_buttons_window.winfo_rooty() + (self.custom_buttons_window.winfo_height() - height) // 2
-        window.geometry(f"{width}x{height}+{max(x, 0)}+{max(y, 0)}")
-        window.transient(self.custom_buttons_window)
-        window.grab_set()
-        self.custom_buttons_window.wait_window(window)
-        return result["value"]
-
-    def add_custom_button_dialog(self, parent_id=None):
-        position_options = self._custom_button_position_options(parent_id)
-        form = self._ask_custom_button_form(
-            "Новая кнопка", position_options=position_options, initial_position=position_options[-1],
-        )
-        if not form:
-            return
-        if self.store.custom_button_label_collides(form["label"]):
-            messagebox.showerror(
-                "Редактор кнопок",
-                f'Название "{form["label"]}" совпадает с уже существующей командой бота. Выберите другое название.',
-                parent=self.custom_buttons_window,
-            )
-            return
-        new_id = self.store.add_custom_button(
-            form["label"], form["message_text"], form["action_code"], parent_id=parent_id, layout=form["layout"],
-            operation_id=form["operation_id"],
-        )
-        self.store.set_custom_button_position(new_id, form["position_index"])
-        self._refresh_custom_buttons()
-
-    def edit_custom_button_dialog(self, node_id):
-        row = self.store.get_custom_button(node_id)
-        if not row:
-            return
-        _id, parent_id, label, message_text, action_code, section, enabled, layout, operation_id = row
-
-        siblings = self.store.list_custom_buttons(parent_id, include_disabled=True)
-        ids_in_order = [sibling_row[0] for sibling_row in siblings]
-        current_index = ids_in_order.index(node_id) if node_id in ids_in_order else len(ids_in_order) - 1
-        position_options = self._custom_button_position_options(parent_id, exclude_node_id=node_id)
-
-        form = self._ask_custom_button_form(
-            "Редактировать кнопку",
-            position_options=position_options,
-            initial_position=str(current_index + 1),
-            initial_label=label,
-            initial_message=message_text or "",
-            initial_action_code=action_code,
-            initial_layout=layout,
-            initial_operation_id=operation_id,
-        )
-        if not form:
-            return
-        if form["label"].lower() != label.lower() and self.store.custom_button_label_collides(form["label"]):
-            messagebox.showerror(
-                "Редактор кнопок",
-                f'Название "{form["label"]}" совпадает с уже существующей командой бота. Выберите другое название.',
-                parent=self.custom_buttons_window,
-            )
-            return
-        self.store.update_custom_button(
-            node_id, form["label"], form["message_text"], form["action_code"], layout=form["layout"],
-            operation_id=form["operation_id"],
-        )
-        self.store.set_custom_button_position(node_id, form["position_index"])
-        self._refresh_custom_buttons()
-
-    def delete_custom_button_confirm(self, node_id, label):
-        descendant_count = self.store.count_custom_button_descendants(node_id)
-        if descendant_count > 0:
-            confirmed = messagebox.askyesno(
-                "Удалить кнопку",
-                f'Кнопка "{label}" имеет дочерние кнопки — вместе с ней удалятся ещё {descendant_count} '
-                "дочерних кнопок (вся ветка). Продолжить?",
-                parent=self.custom_buttons_window,
-            )
-        else:
-            confirmed = messagebox.askyesno(
-                "Удалить кнопку", f'Удалить кнопку "{label}"?', parent=self.custom_buttons_window,
-            )
-        if not confirmed:
-            return
-        self.store.delete_custom_button(node_id)
-        if self.custom_buttons_selected_id is not None and not self.store.get_custom_button(self.custom_buttons_selected_id):
-            self.custom_buttons_selected_id = None
-        self._refresh_custom_buttons()
-
-    # ---------- керування Telegram-ботом ----------
     def _read_telegram_token(self):
         token_file = self.settings.get("telegram_token_file")
         if not token_file:
@@ -4467,6 +4602,16 @@ class ClientApp(ctk.CTk):
             # що доступні" - попап "Сервери" (gui.py) показує версію й канал
             # оновлень КОЖНОГО сервера, не лише того єдиного, що був раніше.
             "version": __version__,
+            # Реальний баг (2026-08-20, скріншот "Сервери"): версія в списку
+            # спершу показувалась чужа, потім "виправлялась" сама. Причина -
+            # ДВІ різні машини під ОДНІЄЮ адресою тунелю (робочий клієнт і
+            # тестовий обидва тримали bot.botaiautomationeu.trade), а
+            # Cloudflare щоразу обирає бекенд наново. Зі статусу було
+            # неможливо зрозуміти, ХТО саме відповів - тепер кожна відповідь
+            # підписана іменем машини, те саме platform.node(), яким сервер
+            # вписує себе в реєстр (_register_this_server_tick), тож gui.py
+            # порівнює одне з одним без здогадок.
+            "node": platform.node() or "",
             "update_channel": "test" if self.settings.get("update_channel") == "test" else "stable",
             # Задача користувача (2026-08-19, живий продакшн): "0.2.88 давно
             # чекає, а в Сервери порожньо" - діагностика _register_this_
@@ -4630,7 +4775,7 @@ class ClientApp(ctk.CTk):
             self._webapp_last_probe_error = "нет активного адреса"
             return False
         try:
-            with urllib.request.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
+            with secure_http.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
                 ok = 200 <= response.status < 400
                 if not ok:
                     self._webapp_last_probe_error = f"HTTP {response.status}"
@@ -5082,6 +5227,7 @@ class ClientApp(ctk.CTk):
             try:
                 target = github_releases.download_and_extract_release(
                     entry["release"], destination, on_progress=report_progress,
+                    token=self.settings.get("github_read_token") or None,
                 )
             except (RuntimeError, OSError) as exc:
                 # Той самий фікс, що й у gui.py: download_and_extract_release()
@@ -5301,43 +5447,346 @@ class ClientApp(ctk.CTk):
     # кнопка натискається ПОВЕРХ уже робочого інтерфейсу - обов'язково
     # фоновий потік, з видимим "Обновление..." і заблокованою кнопкою на
     # час роботи (той самий принцип, що вже діє для старту/стопу бота).
+    # Задача користувача (2026-09-05): "при початку роботи клієнта, якщо
+    # чогось не вистачає в екселі (вкладка\стовбець\інше), програма має
+    # відразу запитати, чи додати нові стовпці. якщо так - додається відразу
+    # по нашому шаблону і має також бути синхронізовано із налаштуваннями
+    # висоти\ширини... якщо відхилити запит - має десь це показувати".
+    # Обраний варіант 01 із пʼяти: список і дві кнопки "Позже"/"Добавить";
+    # відкладене - дзвіночок у шапці з червоною цяткою і вікно "Отложено".
+    #
+    # Той самий шлях - для кнопки "Обновить эксели" (раніше вона дописувала
+    # листи й колонки мовчки) і для "Проверить снова" в дзвіночку. Джерело
+    # (source) вирішує лише, що робити ДАЛІ: після "Обновить" таблиця
+    # перечитується в базу в будь-якому разі, після старту чи дзвіночка -
+    # лише якщо щось додали.
+    #
+    # Сам запис - байтами архіву (warehouse_data.apply_workbook_repairs),
+    # не через openpyxl: інакше кешовані значення формул зникли б, і бот
+    # бачив би нулі замість залишків.
+    def _check_excel_on_start(self):
+        self._start_excel_plan("start")
+
     def _on_refresh_excel_clicked(self):
         if self._excel_refresh_in_progress:
             return
         self._excel_refresh_in_progress = True
         if self.refresh_excel_button is not None:
-            self.refresh_excel_button.configure(text="\U0001F504  Обновление...", state="disabled")
+            self.refresh_excel_button.configure(text="\U0001F504  Проверка...", state="disabled")
+        self._start_excel_plan("refresh")
+
+    def _start_excel_plan(self, source):
+        # Читання великої книги - секунди, тож у фоні; рішення (вікно чи
+        # дзвіночок) - на головному потоці.
+        def worker():
+            plan = None
+            error = None
+            try:
+                plan = plan_workbook_repairs()
+            except Exception as exc:
+                error = exc
+            self._run_on_main_thread(lambda: self._on_excel_plan_ready(plan, error, source))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_excel_plan_ready(self, plan, error, source):
+        if error is not None:
+            # При старті файл може бути ще не обраний - це не привід для
+            # вікна з помилкою. "Обновить эксели" покаже ту саму помилку
+            # сама, читаючи книгу для імпорту.
+            if source == "refresh":
+                self._run_excel_refresh(None)
+            elif source in ("bell", "bell_add"):
+                messagebox.showerror("Таблица Excel", f"Не удалось прочитать таблицу: {error}")
+            return
+        if not plan:
+            self._set_excel_pending(None)
+            if source == "refresh":
+                self._run_excel_refresh(None)
+            elif source in ("bell", "bell_add"):
+                messagebox.showinfo("Таблица Excel", "Всё на месте — таблица соответствует шаблону.")
+            return
+        if source == "bell_add":
+            # "Добавить сейчас" з дзвіночка: план щойно перечитано з файлу,
+            # тож дописується саме те, чого бракує ЗАРАЗ, а не те, що було
+            # відкладено годину тому.
+            self._run_excel_refresh(plan)
+            return
+        lines, signature = describe_workbook_plan(plan)
+        if source == "start" and not self._excel_check_reminds_every_start():
+            snoozed = self.settings.get(EXCEL_CHECK_SNOOZED_KEY) or {}
+            if snoozed.get("signature") == signature:
+                self._set_excel_pending(plan, lines, snoozed.get("at"))
+                return
+        self._ask_excel_repairs(plan, lines, signature, source)
+
+    def _excel_check_reminds_every_start(self):
+        value = self.settings.get(EXCEL_CHECK_REMIND_EVERY_START_KEY)
+        return True if value is None else bool(value)
+
+    def _on_excel_remind_toggle_clicked(self):
+        self.settings.set(EXCEL_CHECK_REMIND_EVERY_START_KEY, bool(self._excel_remind_switch_var.get()))
+
+    def _group_sees_size_recalc(self):
+        value = self.settings.get(GROUP_SEES_SIZE_RECALC_SETTING)
+        return True if value is None else bool(value)
+
+    def _on_group_recalc_toggle_clicked(self):
+        self.settings.set(GROUP_SEES_SIZE_RECALC_SETTING, bool(self._group_recalc_switch_var.get()))
+
+    def _ask_excel_repairs(self, plan, lines, signature, source):
+        window = ctk.CTkToplevel(self)
+        window.title("Таблица Excel")
+        window.resizable(False, False)
+        window.transient(self)
+        body = ctk.CTkFrame(window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=18)
+        ctk.CTkLabel(
+            body, text="В таблице не хватает:", font=("", 13, "bold"), text_color=COLOR_TEXT, anchor="w",
+        ).pack(anchor="w")
+        for line in lines:
+            ctk.CTkLabel(
+                body, text="\u2022  " + line, font=("", 12), text_color=COLOR_TEXT,
+                anchor="w", justify="left", wraplength=400,
+            ).pack(anchor="w", pady=(4, 0))
+        ctk.CTkLabel(
+            body,
+            text=(
+                "Добавлю по шаблону и выровняю ширину и высоту как в настройках.\n"
+                "Перед этим сделаю резервную копию."
+            ),
+            font=("", 11), text_color=COLOR_TEXT_MUTED, anchor="w", justify="left",
+        ).pack(anchor="w", pady=(12, 16))
+        buttons = ctk.CTkFrame(body, fg_color="transparent")
+        buttons.pack(anchor="e")
+
+        def later():
+            window.destroy()
+            self._snooze_excel_repairs(plan, lines, signature)
+            if source == "refresh":
+                self._run_excel_refresh(None)
+
+        def add_now():
+            window.destroy()
+            self._run_excel_refresh(plan)
+
+        ctk.CTkButton(
+            buttons, text="Позже", width=100, fg_color="transparent", border_width=1,
+            border_color=COLOR_BORDER, text_color=COLOR_TEXT, hover_color=COLOR_HOVER, command=later,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="Добавить", width=120, command=add_now).pack(side="left")
+        window.protocol("WM_DELETE_WINDOW", later)
+        window.bind("<Escape>", lambda _event: later())
+        window.bind("<Return>", lambda _event: add_now())
+        self._place_over_main_window(window)
+        window.after(120, window.lift)
+        window.grab_set()
+        window.focus_force()
+
+    def _place_over_main_window(self, window):
+        window.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - window.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - window.winfo_height()) // 3
+        window.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+
+    def _snooze_excel_repairs(self, plan, lines, signature):
+        at = time.strftime("%d.%m.%Y в %H:%M")
+        self.settings.set(EXCEL_CHECK_SNOOZED_KEY, {"signature": signature, "at": at})
+        self._set_excel_pending(plan, lines, at)
+
+    def _set_excel_pending(self, plan, lines=None, at=None):
+        self._excel_pending_plan = plan
+        self._excel_pending_lines = list(lines or []) if plan else []
+        self._excel_pending_at = at if plan else None
+        self._paint_bell()
+        if self.excel_pending_window is not None and self.excel_pending_window.winfo_exists():
+            self._fill_excel_pending_window()
+
+    def _paint_bell(self):
+        if self.bell_button is None or self.bell_dot is None or not self.bell_button.winfo_exists():
+            return
+        pending = bool(self._excel_pending_lines)
+        self.bell_button.configure(text_color=COLOR_STOP_TEXT if pending else COLOR_TEXT_MUTED)
+        if not pending:
+            self.bell_dot.place_forget()
+            return
+        self.bell_dot.configure(bg=self._tk_color(COLOR_BG))
+        self.bell_dot.delete("all")
+        self.bell_dot.create_oval(1, 1, 9, 9, fill="#D23B3B", outline="")
+        self.bell_dot.place(relx=1.0, rely=0.0, x=-2, y=2, anchor="ne")
+
+    # Вікно за дзвіночком: що відкладено і кнопка "Добавить сейчас". Окреме
+    # вікно (не панель), тягається й розтягується як будь-яке вікно Windows.
+    def _open_excel_pending_window(self):
+        if self.excel_pending_window is not None and self.excel_pending_window.winfo_exists():
+            self.excel_pending_window.deiconify()
+            self.excel_pending_window.lift()
+            self.excel_pending_window.focus_force()
+            self._fill_excel_pending_window()
+            return
+        window = ctk.CTkToplevel(self)
+        window.title("Отложено")
+        window.geometry("440x280")
+        window.minsize(340, 220)
+        self.excel_pending_window = window
+        self._excel_pending_body = ctk.CTkFrame(window, fg_color="transparent")
+        self._excel_pending_body.pack(fill="both", expand=True, padx=20, pady=16)
+        self._fill_excel_pending_window()
+        self._place_over_main_window(window)
+        window.after(120, window.lift)
+
+    def _fill_excel_pending_window(self):
+        body = self._excel_pending_body
+        if body is None or not body.winfo_exists():
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        if self._excel_pending_lines:
+            ctk.CTkLabel(
+                body, text="Отложено, но в таблицу ещё не добавлено:", font=("", 13, "bold"),
+                text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=380,
+            ).pack(anchor="w")
+            for line in self._excel_pending_lines:
+                ctk.CTkLabel(
+                    body, text="\u2022  " + line, font=("", 12), text_color=COLOR_TEXT,
+                    anchor="w", justify="left", wraplength=380,
+                ).pack(anchor="w", pady=(4, 0))
+            if self._excel_pending_at:
+                ctk.CTkLabel(
+                    body, text="Отложено " + self._excel_pending_at, font=("", 10),
+                    text_color=COLOR_TEXT_MUTED, anchor="w",
+                ).pack(anchor="w", pady=(10, 0))
+            ctk.CTkButton(
+                body, text="Добавить сейчас", width=160,
+                command=lambda: (self.excel_pending_window.destroy(), self._start_excel_plan("bell_add")),
+            ).pack(anchor="e", pady=(16, 0))
+        else:
+            ctk.CTkLabel(
+                body, text="Всё на месте — таблица соответствует шаблону.", font=("", 12),
+                text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=380,
+            ).pack(anchor="w")
+            ctk.CTkButton(
+                body, text="Проверить снова", width=160, command=lambda: self._start_excel_plan("bell"),
+            ).pack(anchor="e", pady=(16, 0))
+
+    # Перечитування Excel у SQLite (openpyxl, data_only=True) - як і раніше
+    # у фоні, з окремим зʼєднанням потоку. apply_plan - що дописати в файл
+    # ПЕРЕД читанням (None - нічого): інакше база прочитала б ще старий лист.
+    def _run_excel_refresh(self, apply_plan):
+        if not self._excel_refresh_in_progress:
+            self._excel_refresh_in_progress = True
+            if self.refresh_excel_button is not None:
+                self.refresh_excel_button.configure(text="\U0001F504  Обновление...", state="disabled")
 
         def worker():
             # Реальний баг (2026-08-13): "SQLite objects created in a thread
             # can only be used in that same thread" - self.store.conn
-            # створений на головному потоці в __init__, тож фоновий потік не
-            # може ним користуватись напряму. Той самий прийом, що вже й у
-            # webapp_server.py - окреме, власне з'єднання ЦЬОГО потоку.
+            # створений на головному потоці, тож у фоновому потоці - окреме
+            # власне з'єднання (той самий прийом, що й у webapp_server.py).
             error = None
+            report = None
+            repair_error = None
             try:
-                ensure_workbook_has_required_sheets()
+                if apply_plan is not None:
+                    # Реальний випадок (2026-08-21): "[WinError 5] Access is
+                    # denied" - файл тримав відкритим Excel, і невдалий ЗАПИС
+                    # не має скасовувати цілком справне ЧИТАННЯ нижче.
+                    try:
+                        report = apply_workbook_repairs(apply_plan, self.settings)
+                    except Exception as exc:
+                        repair_error = exc
                 workbook = excel_source.open_workbook(data_only=True)
                 try:
                     thread_store = ExcelSqliteStore(paths.DB_PATH)
                     try:
                         thread_store.import_workbook(workbook, READ_ONLY_SHEETS)
+                        # Рейка (2026-09-06): позначені рядки одразу пишуться
+                        # назад у таблицю; зайнятий файл - та сама причина й
+                        # той самий текст, що й для дописування колонок.
+                        lath_marked = thread_store.last_lath_rows_marked
+                        measures_filled = thread_store.last_measures_filled
+                        if thread_store.last_stock_rows_normalized:
+                            try:
+                                sync_sheet_to_excel(thread_store, "СКЛАД")
+                            except Exception as exc:
+                                repair_error = repair_error or exc
+                            else:
+                                report = dict(report or {"sheets": [], "columns": [], "writeoff_time_column": False, "warehouse": None})
+                                report["lath_marked"] = lath_marked
+                                report["measures_filled"] = measures_filled
                     finally:
                         thread_store.close()
                 finally:
                     workbook.close()
             except Exception as exc:
                 error = str(exc)
-            self._run_on_main_thread(lambda: self._on_excel_refresh_finished(error))
+            self._run_on_main_thread(
+                lambda: self._on_excel_refresh_finished(error, report, repair_error, apply_plan)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_excel_refresh_finished(self, error):
+    @staticmethod
+    def _excel_report_lines(report):
+        if not report:
+            return []
+        lines = ["лист " + name for name in report["sheets"]]
+        lines += ["в листе %s — столбец «%s»" % (sheet, header) for sheet, header in report["columns"]]
+        if report["writeoff_time_column"]:
+            lines.append("в листе СПИСАНИЕ — столбец «Точное время»")
+        warehouse = report.get("warehouse")
+        if warehouse:
+            lines.append(
+                "в листе СКЛАД — столбцы: %s (заполнено значений: %s)"
+                % (", ".join(warehouse["headers"]), warehouse["filled_cells"])
+            )
+        if report.get("lath_marked"):
+            lines.append(
+                "в листе СКЛАД — строк рейки помечено: %d («(рейка)» в продукте, ед. изм. «мп»)"
+                % report["lath_marked"]
+            )
+        if report.get("measures_filled"):
+            lines.append("в листе СКЛАД — досчитано единиц измерения из количества штук: %d" % report["measures_filled"])
+        return lines
+
+    def _on_excel_refresh_finished(self, error, report=None, repair_error=None, apply_plan=None):
         self._excel_refresh_in_progress = False
         if self.refresh_excel_button is not None:
             self.refresh_excel_button.configure(text="\U0001F504  Обновить эксели", state="normal")
         if error:
             messagebox.showerror("AI Automation", f"Не удалось обновить: {error}")
+            return
+        if repair_error is not None:
+            # Заблокований файл - найчастіша причина, і вона має чітку дію:
+            # закрити таблицю в Excel. Сирий WinError людині нічого не каже.
+            if isinstance(repair_error, PermissionError):
+                reason = (
+                    "Файл занят другой программой — скорее всего он открыт в Excel.\n"
+                    "Закройте его и нажмите «Добавить сейчас» в колокольчике вверху справа."
+                )
+            else:
+                reason = str(repair_error)
+            if apply_plan:
+                lines, _signature = describe_workbook_plan(apply_plan)
+                self._set_excel_pending(apply_plan, lines, time.strftime("%d.%m.%Y в %H:%M"))
+            messagebox.showwarning(
+                "AI Automation",
+                "Таблица Excel прочитана, но добавить недостающее не удалось.\n\n" + reason,
+            )
+            return
+        added = self._excel_report_lines(report)
+        if added:
+            # Про правку самої таблиці мовчати не можна - програма змінила
+            # файл користувача. Відкладене більше не висить.
+            self._set_excel_pending(None)
+            self.settings.set(EXCEL_CHECK_SNOOZED_KEY, None)
+            messagebox.showinfo(
+                "AI Automation",
+                "Таблица Excel обновлена.\n\nДобавлено по шаблону:\n"
+                + "\n".join("\u2022 " + line for line in added)
+                + "\n\nШирина столбцов и высота шапки — как в настройках.\n"
+                "Перед изменением сделана резервная копия таблицы.",
+            )
             return
         messagebox.showinfo("AI Automation", "Таблица Excel обновлена.")
 
@@ -5391,6 +5840,7 @@ class ClientApp(ctk.CTk):
         ctk.set_appearance_mode("dark" if self._dark_mode else "light")
         self.theme_toggle_button.configure(text="Светлая" if self._dark_mode else "Тёмная")
         self.settings.set("client_dark_mode", self._dark_mode)
+        self._paint_bell()
 
     # ---------- вихід ----------
     # Задача користувача (2026-08-18, живий продакшн - "не працює кнопка
@@ -5469,16 +5919,19 @@ class ClientApp(ctk.CTk):
 # значеннями - потраплять у хмару, коли адміністратор наступного разу явно
 # натисне кнопку.
 def _reconcile_standard_menu_with_cloud(store, email=None):
-    cloud_state = standard_menu_cloud.read_cloud_state(email)
+    """Локальний стан видимості кнопок - єдине джерело правди; хмара - дзеркало.
+
+    Рішення користувача (2026-09-05): "розклад і видимість кнопок у боті
+    беруться з клієнта налаштувань (локально)... я тоді ще злився що знову
+    зʼявились старі кнопки. тому краще це локально тримати". Раніше хмара
+    (2026-08-18) перемагала локальний стан при кожному старті - саме так
+    старі кнопки й поверталися на новому клієнті. Тепер напрям один:
+    локальне -> кеш -> хмара (best-effort, без пошти OneDrive тихо
+    пропускається). Домашка читає хмару лише як довідку.
+    """
     local_state = store.get_standard_menu_state()
-    if cloud_state is None:
-        standard_menu_cloud.write_local_cache(local_state)
-        return
-    merged_state = dict(local_state)
-    merged_state.update({key: value for key, value in cloud_state.items() if key in local_state})
-    if merged_state != local_state:
-        store.apply_standard_menu_state(merged_state)
-    standard_menu_cloud.write_local_cache(merged_state)
+    standard_menu_cloud.write_local_cache(local_state)
+    standard_menu_cloud.write_cloud_state(local_state, email)
 
 
 # Задача користувача (2026-08-17): "якщо програма закриється - то щоб
@@ -5510,12 +5963,25 @@ def _run_watchdog_check():
         # перевірка коректно перезапустить.
         marker.unlink(missing_ok=True)
         return
-    subprocess.Popen([str(exe_path)])
+    # --from-watchdog: якщо tasklist вище копію все ж пропустив (вузьке
+    # вікно між двома перевірками), нова копія впреться в замок
+    # single_instance і має вийти МОВЧКИ - вікно "уже запущена" посеред
+    # екрана без жодного кліку людини було б несподіванкою, а не поясненням.
+    subprocess.Popen([str(exe_path), "--from-watchdog"])
 
 
 if __name__ == "__main__":
     if "--watchdog-check" in sys.argv:
         _run_watchdog_check()
     else:
+        # Задача користувача (2026-09-05): "заборонити програмі повторний
+        # запуск копії, якщо вже на даному ПК є запущена ця програма" - ДО
+        # будь-якого вікна, тунелю й бази: друга копія каже про себе,
+        # піднімає вікно першої й виходить (single_instance.py). Перевірка
+        # сторожа (--watchdog-check вище) замок НЕ бере - інакше щохвилини
+        # вважала б програму запущеною сама через себе.
+        if not single_instance.is_free(single_instance.CLIENT_LOCK_NAME):
+            single_instance.report_second_copy(silent="--from-watchdog" in sys.argv)
+            raise SystemExit(0)
         app = ClientApp()
         app.mainloop()

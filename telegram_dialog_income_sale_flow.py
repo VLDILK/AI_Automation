@@ -6,11 +6,17 @@ import sqlite3
 
 import permissions as perm
 from utils import (
+    lath_product_name,
+    piece_measure,
     _display_bot_number,
     _normalize_phrase,
     _number_value,
+    price_line_text,
 )
 from warehouse_data import (
+    shortage_line,
+    signed_bot_number,
+    sale_recalc_income,
     BOT_MESSAGE_DEFAULTS,
     INCOME_QUANTITY_TOLERANCE,
     INCOME_VOLUME_TOLERANCE,
@@ -386,11 +392,7 @@ class IncomeSaleFlowDialogMixin:
             return denied
         web_app = self._income_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Приход одной формой сейчас недоступен (форма не подключена). "
-                "Используйте обычный «ПРИХОД».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "ПРИХОД (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "add_income", "income_all_in_one", {},
         )
@@ -418,11 +420,7 @@ class IncomeSaleFlowDialogMixin:
             return denied
         web_app = self._sale_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Продажа одной формой сейчас недоступна (форма не подключена). "
-                "Используйте обычную «РЕАЛИЗАЦИЯ».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "РЕАЛИЗАЦИЯ (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "stock_sale", "sale_all_in_one", {},
         )
@@ -850,19 +848,6 @@ class IncomeSaleFlowDialogMixin:
     # відповідь користувача (тут була знайдена й виправлена пастка з "Нет"
     # у меню підозрілої кількості — див. код нижче по файлу).
     def _handle_pending_operation(self, text, store, context, pending):
-        if pending["operation_type"] == "calculator":
-            if pending["status"] == "wait_calculation":
-                escape_reply = self._calculator_menu_escape_reply(text, store, context)
-                if escape_reply is not None:
-                    return escape_reply
-                reply = self._calculator_reply(text)
-                if self._is_calculator_retry_reply(reply):
-                    return reply
-                store.delete_pending_operation(context["chat_id"], context["user_id"])
-                return reply
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._with_main_menu("Предыдущая операция сброшена. Отправьте запрос заново.", store)
-
         if pending["operation_type"] == "stock_report":
             return self._continue_stock_report(text, store, context, pending)
 
@@ -889,6 +874,12 @@ class IncomeSaleFlowDialogMixin:
 
         if pending["operation_type"] == "stock_writeoff":
             return self._continue_writeoff_operation(text, store, context, pending)
+        if pending["operation_type"] == "stock_exchange":
+            return self._continue_exchange_operation(text, store, context, pending)
+        if pending["operation_type"] == "stock_correction":
+            return self._continue_correction_operation(text, store, context, pending)
+        if pending["operation_type"] == "stock_rollback":
+            return self._continue_rollback_operation(text, store, context, pending)
 
         if pending["operation_type"] not in {"add_income", "stock_sale"}:
             store.delete_pending_operation(context["chat_id"], context["user_id"])
@@ -1846,10 +1837,21 @@ class IncomeSaleFlowDialogMixin:
             if antiseptic_write_errors:
                 result = dict(result)
                 result["message"] = result["message"] + "\n\n" + "\n\n".join(antiseptic_write_errors)
+                if result.get("group_message"):
+                    result["group_message"] = result["group_message"] + "\n\n" + "\n\n".join(antiseptic_write_errors)
             # Задача користувача (2026-08-17): дубль звіту в окрему групу -
             # покриває і продаж, і прихід (обидва проходять через цю саму
             # гілку), разом з будь-яким дописаним вище "antiseptic"-хвостом.
-            self._notify_report_broadcast(context, result["message"])
+            # Тег бухгалтера - ТІЛЬКИ на продажу (рішення користувача:
+            # "бугалтера тільки на продаж, антисептирование не потрібно").
+            # Ця сама гілка обслуговує й прихід, тому перевірка обов'язкова.
+            self._notify_report_broadcast(
+                context, self._report_text_for_group(result),
+                accountant_tail=(
+                    self._efactura_accountant_tail(write_payload.get("payment_method"))
+                    if operation_type == "stock_sale" else ""
+                ),
+            )
             # Реальний баг зі скріна: форма → успіх → бот ЗАВЖДИ повертав у
             # СТАРИЙ покроковий вибір категорії (нижче) - людина, що більше
             # ніколи не торкалась чату вручну, раптом опинялась у чужому
@@ -3473,6 +3475,9 @@ class IncomeSaleFlowDialogMixin:
                 _number_value(item.get("thickness")),
                 _number_value(item.get("width")),
                 _number_value(item.get("length")),
+                _number_value(item.get("stock_thickness")),
+                _number_value(item.get("stock_width")),
+                _number_value(item.get("stock_length")),
             )
             existing_index = index_by_key.get(key)
             if existing_index is None:
@@ -3531,7 +3536,30 @@ class IncomeSaleFlowDialogMixin:
             item["create_new"] = True
         return None
 
+    # KD за номіналом (ТЗ пункт 2): фактичний складський розмір із форми
+    # (stock_thickness/width/length) отримує свій вимір тим самим правилом,
+    # що й введений, - саме він списується зі СКЛАД. Ціна й лист ПРОДАЖА
+    # лишаються за введеним (номінальним) розміром. Збіг із введеним -
+    # ключі прибираються, поведінка звичайна.
+    def _apply_stock_size_overrides(self, payload):
+        for item in payload.get("rows") or []:
+            if any(item.get(key) is None for key in ("stock_thickness", "stock_width", "stock_length")):
+                continue
+            same = all(
+                self._number_equal(item.get(key), item.get("stock_" + key)) for key in ("thickness", "width", "length")
+            )
+            if same:
+                for key in ("stock_thickness", "stock_width", "stock_length", "stock_volume", "stock_area", "stock_linear"):
+                    item.pop(key, None)
+                continue
+            measure_key = self._row_measure_kind(payload, item)
+            if measure_key is None:
+                continue
+            piece = piece_measure(item["stock_thickness"], item["stock_width"], item["stock_length"], measure_key)
+            item["stock_" + measure_key] = round(piece * _number_value(item.get("quantity")), 6)
+
     def _resolve_sale_rows(self, store, payload):
+        self._apply_stock_size_overrides(payload)
         # Той самий фікс, що й _resolve_income_rows вище — продаж не
         # створює нових рядків складу, але кілька позицій з ОДНАКОВИМ
         # розміром у ОДНІЙ продажі й без об'єднання незалежно перевіряли б
@@ -3737,7 +3765,10 @@ class IncomeSaleFlowDialogMixin:
             # dimension_combos - реальна колонка "Состояние", а не лише
             # текстовий суфікс - і None (не ""), коли й вона порожня.
             row_condition = row_value(row, columns.get("condition")) or product_suffix_type or None
-            if payload.get("product") and self._text_equal(row_product, payload.get("product")):
+            if payload.get("product") and self._product_matches_row(
+                payload.get("product"), row_product,
+                row_value(row, columns.get("thickness")), row_value(row, columns.get("width")),
+            ):
                 score += 3
             if payload.get("breed") and self._text_equal(row_value(row, columns["breed"]), payload.get("breed")):
                 score += 2
@@ -3784,7 +3815,28 @@ class IncomeSaleFlowDialogMixin:
             row_value(row, columns["product"]),
             self._existing_product_type_values([(None, row)], columns["product"]),
         )
-        if not self._text_equal(row_product, payload.get("product")):
+        # Рейка за перерізом (рішення користувача 2026-09-07, рівень А):
+        # «Доска AD» + 30×50 - це та сама рейка, тож назву з форми зводимо до
+        # рейкової перед порівнянням. Інакше рядок «Рейка» не знаходився б, а
+        # прихід створював би другий такий самий.
+        wanted_product = lath_product_name(
+            payload.get("product"),
+            item.get("stock_thickness", item.get("thickness")),
+            item.get("stock_width", item.get("width")),
+        )
+        # Живий випадок (2026-09-09): зведення до рейки було в ОДИН бік -
+        # категорія «ДОСКА AD» 30×50 ставала рейкою, а рядок складу зі
+        # старою назвою «Доска AD» лишався дошкою. Переглядач малював його
+        # «Рейкою» (там переріз уже вирішував), а продаж не знаходив:
+        # «Не найдено на складе: Рейка / Сосна / 50x50x4000» при наявному
+        # залишку. Рішення користувача: зводити в ОБИДВА боки, щоб пошук не
+        # залежав від того, що написано в клітинці.
+        row_product = lath_product_name(
+            row_product,
+            row_value(row, columns.get("thickness")),
+            row_value(row, columns.get("width")),
+        ) or row_product
+        if not self._text_equal(row_product, wanted_product):
             return False
         # Реальний баг (живий продакшн, 2026-08-17): "Не найдено на складе"
         # для Вагонки/ОСБ навіть на щойно відкритій формі - _existing_
@@ -3800,10 +3852,12 @@ class IncomeSaleFlowDialogMixin:
             row_condition = row_value(row, columns.get("condition")) or product_suffix_type
             if not self._text_equal(row_condition, payload.get("condition")):
                 return False
+        # KD за номіналом (ТЗ пункт 2): на складі шукається ФАКТИЧНИЙ розмір,
+        # якщо людина обрала його у формі; інакше - введений.
         return (
-            self._number_equal(row_value(row, columns["thickness"]), item["thickness"])
-            and self._number_equal(row_value(row, columns["width"]), item["width"])
-            and self._number_equal(row_value(row, columns["length"]), item["length"])
+            self._number_equal(row_value(row, columns["thickness"]), item.get("stock_thickness", item["thickness"]))
+            and self._number_equal(row_value(row, columns["width"]), item.get("stock_width", item["width"]))
+            and self._number_equal(row_value(row, columns["length"]), item.get("stock_length", item["length"]))
         )
 
     # Задача користувача (2026-08-14): "щоб міг продовжувати приход і
@@ -3825,7 +3879,7 @@ class IncomeSaleFlowDialogMixin:
         index = 0
         lines.append("")
         for position in completed_positions:
-            lines.append(f"Позиция: {display_product_name(position)} / {position.get('breed')}")
+            lines.append(f"Позиция: {self._position_title(position)}")
             for item in position.get("rows") or []:
                 index += 1
                 marker = " новая позиция" if item.get("create_new") else ""
@@ -3845,13 +3899,20 @@ class IncomeSaleFlowDialogMixin:
                 )
             lines.append("")
         if multi_position:
-            lines.append(f"Позиция: {display_product_name(payload)} / {payload.get('breed')}")
+            # Порожній рядок тут раніше стояв для ОБОХ гілок - і заголовок
+            # другої позиції відбивався від своїх рядків, на відміну від
+            # першої (помічено користувачем 2026-09-09).
+            lines.append(f"Позиция: {self._position_title(payload)}")
         else:
             lines.extend([
                 f"Продукт: {display_product_name(payload)}",
                 f"Порода: {payload['breed']}",
             ])
-        lines.append("")
+            # Одна позиція - заголовка «Продукт / Порода / Тип» немає, тож
+            # тип пишеться окремим рядком (рішення користувача 2026-09-09).
+            if str(payload.get("condition") or "").strip():
+                lines.append(f"Тип: {payload['condition']}")
+            lines.append("")
         for item in payload["rows"]:
             index += 1
             marker = " новая позиция" if item.get("create_new") else ""
@@ -3892,7 +3953,7 @@ class IncomeSaleFlowDialogMixin:
     # збережене при архівації), і для живого payload (де total_amount ще
     # не існує).
     def _sale_position_lines(self, index, position):
-        lines = [f"{index}. {display_product_name(position)} / {position.get('breed')}"]
+        lines = [f"{index}. {self._position_title(position)}"]
         for item in position.get("rows") or []:
             measure_key = self._row_measure_kind(position, item)
             if measure_key is None:
@@ -3905,9 +3966,18 @@ class IncomeSaleFlowDialogMixin:
                 f"{_display_bot_number(item['quantity'])} шт — "
                 f"{_display_bot_number(measure_value)} {measure_unit}"
             )
+        # Ціна за одиницю - те, що назвав клієнт. Досі в повідомленні
+        # була лише сума, і перевірити ціну очима було ніде.
+        price_line = price_line_text(position.get("price_per_unit"), self._price_measure_kinds(position))
+        if price_line:
+            lines.append(f"   {price_line}")
         position_total = self._sale_total_amount(position)
         if position_total:
             lines.append(f"   Сумма: {_display_bot_number(position_total)} MDL")
+        # KD за номіналом: різниця між сумою за введений і за списаний розмір.
+        recalc_income = sale_recalc_income(position)
+        if recalc_income:
+            lines.append(f"   Доход по пересчету: {signed_bot_number(recalc_income)} MDL")
         position_antiseptic_sum = 0
         position_antiseptic = position.get("antiseptic")
         if isinstance(position_antiseptic, dict) and position_antiseptic.get("volume") and position_antiseptic.get("price_per_unit"):
@@ -3984,6 +4054,11 @@ class IncomeSaleFlowDialogMixin:
             totals_lines = []
             if total_antiseptic_sum:
                 totals_lines.append(f"Сумма за Антисептирование: {_display_bot_number(round(total_antiseptic_sum, 2))} MDL")
+            # KD за номіналом: при кількох позиціях - ще й загалом у підсумку.
+            total_recalc = round(sum(sale_recalc_income(item) for item in completed_positions + [payload]), 2)
+            if total_recalc:
+                totals_lines.append(f"Сумма по факту: {_display_bot_number(round(total_goods_sum - total_recalc, 2))} MDL")
+                totals_lines.append(f"Доход по пересчету: {signed_bot_number(total_recalc)} MDL")
             totals_lines.append(f"Сумма за товар: {_display_bot_number(round(total_goods_sum, 2))} MDL")
             totals_lines.append(f"Итого: {_display_bot_number(grand_total)} MDL")
             sections.append(totals_lines)
@@ -4025,6 +4100,8 @@ class IncomeSaleFlowDialogMixin:
                 measure_unit = None
                 balance_measure = None
             else:
+                # Вимір лише для тексту «Доступно: N шт / M мп»; звіряються
+                # тільки штуки (рішення користувача 2026-09-06: правда - штуки).
                 measure_unit = self._MEASURE_KIND_UNIT[measure_key]
                 measure_column = self._MEASURE_KIND_BALANCE_COLUMN[measure_key]
                 balance_measure = _number_value(row_value(row_values, columns.get(measure_column)))
@@ -4034,16 +4111,6 @@ class IncomeSaleFlowDialogMixin:
                     "row_index": row_index,
                     "requested": _number_value(item.get("quantity")),
                     "requested_unit": "шт",
-                    "balance_qty": balance_qty,
-                    "balance_measure": balance_measure,
-                    "measure_unit": measure_unit,
-                }
-            if measure_key is not None and _number_value(item.get(measure_key)) > balance_measure + INCOME_VOLUME_TOLERANCE:
-                return {
-                    "kind": measure_key,
-                    "row_index": row_index,
-                    "requested": _number_value(item.get(measure_key)),
-                    "requested_unit": measure_unit,
                     "balance_qty": balance_qty,
                     "balance_measure": balance_measure,
                     "measure_unit": measure_unit,
@@ -4075,6 +4142,15 @@ class IncomeSaleFlowDialogMixin:
         if issue["kind"] != "quantity" or issue.get("balance_measure") not in (None, 0):
             available_parts.append(f"{_display_bot_number(issue['balance_measure'])} {issue['measure_unit']}")
         lines.append(f"Доступно: {' / '.join(available_parts)}")
+        # ТЗ п.10: показати не лише скільки треба й скільки є, а й скільки
+        # саме не вистачає.
+        shortage = shortage_line(
+            issue["requested"],
+            issue["balance_qty"] if issue["kind"] == "quantity" else issue["balance_measure"],
+            issue["requested_unit"],
+        )
+        if shortage:
+            lines.append(shortage)
         return "\n".join(lines)
 
     def _sale_stock_issue_reply(self, store, context, payload, issue):

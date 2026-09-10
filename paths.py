@@ -56,6 +56,11 @@ BACKUP_PASSWORD_PATH = SYSTEM_DIR / "backup_password.txt"
 # у хмару разом із рештою налаштувань. Той самий принцип - окремий файл,
 # НЕ в списку _INCLUDE_FILES config_backup.py (як і backup_password.txt).
 GITHUB_TOKEN_PATH = SYSTEM_DIR / "github_token.txt"
+# Токен Cloudflare для вікна "Тунель" (gui.py) - той самий принцип, що й
+# у GITHUB_TOKEN_PATH вище: окремий файл у SYSTEM_DIR, який уже в
+# .gitignore, а не константа в коді. Потрібні права мінімальні:
+# Zone:DNS:Edit на робочу зону та Account:Cloudflare Tunnel:Read.
+CLOUDFLARE_TOKEN_PATH = SYSTEM_DIR / "cloudflare_token.txt"
 # Задача користувача (2026-08-17): "якщо програма закриється - то щоб
 # запустилась знову... якщо так можна" - watchdog_task.py's періодична
 # перевірка (client_app.py --watchdog-check) відрізняє свідоме "Выход"
@@ -161,6 +166,105 @@ def read_cloudflared_tunnel_id(credentials_path=None):
 # ЛИШЕ для хостингу файлів оновлень (не вихідного коду - жодних секретів
 # туди не потрапляє) - публічна інформація, безпечно хардкодити тут, той
 # самий рівень, що й CLOUDFLARED_TUNNEL_HOSTNAME вище.
+# ===========================================================================
+# ІНВЕНТАРИЗАЦІЯ ВШИТИХ ЗНАЧЕНЬ
+# ===========================================================================
+# Що тут зібрано і чому саме так (2026-08-21):
+#
+#   REMOTE_CONTROL_TOKEN        - спільний ключ gui.py <-> client_app.py.
+#   CLOUDFLARED_TUNNEL_HOSTNAME - адреса, за якою слухає ця машина.
+#   CLOUDFLARED_TUNNEL_ID       - лише запасне значення; справжній ID
+#                                 читається з credentials-файлу (нижче).
+#   CLOUDFLARED_TUNNEL_CREDENTIALS_PATH - секрет самого тунелю.
+#
+# Кожне з них тепер має РІВНО ОДИН спосіб підміни - текстовий файл у
+# system/. Не два, не три: поле вводу в інтерфейсі писатиме в той самий
+# файл, що й кнопка "прикріпити файл", тож розбіжності між "що ввели" і
+# "що діє" не буває в принципі.
+#
+# Константи нижче лишаються ЗАПАСНИМ значенням: немає файлу - працює як
+# завжди. Тому цей крок безпечний: він нічого не змінює, поки людина сама
+# нічого не вписала.
+#
+# system/ уже в .gitignore і вже перевіряється перед публікацією, тож
+# підміна секрету ніколи не поїде ні в репозиторій, ні в реліз.
+REMOTE_CONTROL_TOKEN_FILE = SYSTEM_DIR / "remote_control_token.txt"
+TUNNEL_HOSTNAME_FILE = SYSTEM_DIR / "tunnel_hostname.txt"
+
+# Перечитуємо файл лише коли він реально змінився: ці значення читаються на
+# КОЖЕН мережевий виклик (заголовок з ключем), а це кілька разів на хвилину.
+_override_cache = {}
+
+
+def read_override_file(path):
+    """Перший непорожній рядок файлу, або "" якщо файлу немає чи він порожній."""
+    try:
+        stat = path.stat()
+    except OSError:
+        _override_cache.pop(str(path), None)
+        return ""
+    cached = _override_cache.get(str(path))
+    if cached is not None and cached[0] == stat.st_mtime_ns:
+        return cached[1]
+    # Той самий набір кодувань, що вже й у читанні файлу адреси в
+    # client_app.py: Блокнот зберігає з BOM, а старі файли трапляються в
+    # cp1251 - людина не має про це думати.
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            lines = path.read_text(encoding=encoding).splitlines()
+            break
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return ""
+    else:
+        return ""
+    value = next((line.strip() for line in lines if line.strip()), "")
+    _override_cache[str(path)] = (stat.st_mtime_ns, value)
+    return value
+
+
+def write_override_file(path, value):
+    """Порожнє значення ВИДАЛЯЄ файл - тобто повертає вшите за замовчуванням.
+    Запис через .tmp + replace: обрив посеред збереження не лишає
+    напівзаписаного ключа, з яким нічого потім не працює."""
+    value = (value or "").strip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _override_cache.pop(str(path), None)
+    if not value:
+        path.unlink(missing_ok=True)
+        return
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(value + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def remote_control_token():
+    return read_override_file(REMOTE_CONTROL_TOKEN_FILE) or REMOTE_CONTROL_TOKEN
+
+
+def cloudflared_tunnel_hostname():
+    return read_override_file(TUNNEL_HOSTNAME_FILE) or CLOUDFLARED_TUNNEL_HOSTNAME
+
+
+def describe_overrides():
+    """[(назва, значення, звідки)] - для інтерфейсу й для діагностики: одразу
+    видно, що зараз діє і чи це вшите значення, чи підмінене."""
+    rows = []
+    for title, file_path, builtin in (
+        ("Ключ керування", REMOTE_CONTROL_TOKEN_FILE, REMOTE_CONTROL_TOKEN),
+        ("Адреса тунелю", TUNNEL_HOSTNAME_FILE, CLOUDFLARED_TUNNEL_HOSTNAME),
+    ):
+        value = read_override_file(file_path)
+        rows.append((title, value or builtin, str(file_path) if value else "вшите в програму"))
+    credentials = CLOUDFLARED_TUNNEL_CREDENTIALS_PATH
+    rows.append((
+        "Тунель (ID)", read_cloudflared_tunnel_id(),
+        str(credentials) if credentials.exists() else "вшите в програму",
+    ))
+    return rows
+
+
 GITHUB_RELEASES_OWNER = "VLDILK"
 GITHUB_RELEASES_REPO = "AI_Automation"
 

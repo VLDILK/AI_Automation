@@ -5,6 +5,8 @@ import json
 import re
 import urllib.error
 import urllib.request
+
+import secure_http
 from datetime import datetime
 
 import permissions as perm
@@ -420,7 +422,6 @@ class BotModeDialogMixin:
         operation_titles = {
             "add_income": "приход",
             "stock_sale": "продажу",
-            "calculator": "расчет",
         }
         operation = operation_titles.get((pending or {}).get("operation_type"), "операцию")
         return (
@@ -509,8 +510,6 @@ class BotModeDialogMixin:
             return self._start_income_operation(text, store, context)
         if request["command"] == "stock_sale":
             return self._start_sale_operation(text, store, context)
-        if request["command"] == "calculator":
-            return self._calculator_reply(text)
         if request["command"] == "help":
             return self._claude_or_local_chat_reply(text, store, context, user_preference, local_reply=self._online_ai_help_reply(store))
         if request["command"] == "chat":
@@ -620,7 +619,7 @@ class BotModeDialogMixin:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with secure_http.urlopen(request, timeout=30) as response:
                 response_payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raise self._claude_http_error(exc) from exc
@@ -723,9 +722,6 @@ class BotModeDialogMixin:
         if self._is_online_ai_chat_request(normalized) and not filters:
             return {"command": "chat", "filters": filters}
 
-        if self._is_calculator_request(text, normalized, store):
-            return {"command": "calculator", "filters": filters}
-
         if (words & history_words) and (period or words & history_question_words):
             request = {
                 "command": "stock_income_history",
@@ -745,23 +741,6 @@ class BotModeDialogMixin:
 
         if words & write_words:
             return {"command": "write_denied", "filters": filters}
-
-        # Аудит коду: бот сам підказує "Можно написать: 25x50x6000 140 шт"
-        # (_calculator_reply), але в режимі "Онлайн ШІ" це геть без слова
-        # "калькулятор" падало в stock_balance нижче (той самий regex
-        # розміру спрацьовував і там) — реальна відповідь була порожнім/
-        # незрозумілим звітом по залишках цього розміру замість розрахунку.
-        # Умова дослівно повторює власну гейт-перевірку _wood_calculator_
-        # reply — тому "так, це калькулятор" звідси гарантовано дає реальну
-        # відповідь. Явний "остаток"/"склад" (read_stock_words) і далі йде
-        # в звіт складу, як і очікує користувач, що прямо про це попросив.
-        if not (words & read_stock_words):
-            size = self._parse_calculator_size(text)
-            if size and (
-                self._parse_income_quantity(text) is not None
-                or self._parse_income_volume(text) is not None
-            ):
-                return {"command": "calculator", "filters": filters}
 
         if (
             words & read_stock_words
@@ -841,182 +820,6 @@ class BotModeDialogMixin:
             "Понял. Что интересует?"
         )
 
-    def _is_calculator_request(self, text, normalized, store=None):
-        if store and store.find_command_code_in_text(text) == "calculator":
-            return True
-        return False
-
-    def _start_calculator_operation(self, text, store, context):
-        if store.find_command_code_by_phrase(text) == "calculator":
-            store.save_pending_operation(
-                context["chat_id"],
-                context["user_id"],
-                "calculator",
-                "wait_calculation",
-                {"started_at": datetime.now().isoformat(timespec="seconds")},
-            )
-            return store.get_message_template("start_calculator", BOT_MESSAGE_DEFAULTS["start_calculator"])
-
-        expression_text = self._calculator_input_text(text)
-        reply = self._calculator_reply(expression_text)
-        if self._is_calculator_retry_reply(reply):
-            store.save_pending_operation(
-                context["chat_id"],
-                context["user_id"],
-                "calculator",
-                "wait_calculation",
-                {"started_at": datetime.now().isoformat(timespec="seconds")},
-            )
-        return reply
-
-    def _calculator_input_text(self, text):
-        value = str(text or "").strip()
-        aliases = []
-        for command in BUILTIN_BOT_COMMANDS:
-            if command["code"] != "calculator":
-                continue
-            aliases = command["aliases"] + [command["title"], command["code"]]
-            break
-        for alias in sorted(aliases, key=len, reverse=True):
-            pattern = rf"^\s*{re.escape(alias)}(?:\s+|[:=,\-—–]\s*)"
-            value = re.sub(pattern, "", value, count=1, flags=re.IGNORECASE).strip()
-        value = re.sub(r"^\s*(?:сколько\s+будет|скільки\s+буде|что\s+будет)\s+", "", value, flags=re.IGNORECASE)
-        return value
-
-    def _calculator_reply(self, text):
-        text = self._calculator_input_text(text)
-        if not text:
-            return "Что посчитать?"
-
-        wood_reply = self._wood_calculator_reply(text)
-        if wood_reply:
-            return wood_reply
-
-        math_reply = self._math_calculator_reply(text)
-        if math_reply:
-            return math_reply
-
-        return (
-            "Не смог посчитать.\n"
-            "Можно написать: 25x50x6000 140 шт, 25x50x6000 1,05 м3 или 25 умнож на 64."
-        )
-
-    def _is_calculator_retry_reply(self, reply):
-        text = str(reply or "")
-        return text.startswith("Что посчитать?") or text.startswith("Не смог посчитать")
-
-    def _parse_calculator_size(self, text):
-        patterns = [
-            re.compile(
-                r"(?P<thickness>\d+(?:[.,]\d+)?)\s*[xхХ*]\s*"
-                r"(?P<width>\d+(?:[.,]\d+)?)\s*[xхХ*]\s*"
-                r"(?P<length>\d+(?:[.,]\d+)?)(?:\s*(?P<length_unit>мм|mm|м|m|к|k)\b)?",
-                re.IGNORECASE,
-            ),
-            re.compile(
-                r"(?<![\d.,])(?P<thickness>\d+(?:[.,]\d+)?)\s*(?:[-—–]|\s+)\s*"
-                r"(?P<width>\d+(?:[.,]\d+)?)\s*(?:[-—–]|\s+)\s*"
-                r"(?P<length>\d+(?:[.,]\d+)?)(?:\s*(?P<length_unit>мм|mm|м|m|к|k)\b)?"
-                r"(?![\d.,])",
-                re.IGNORECASE,
-            ),
-            re.compile(
-                r"(?<![\d.,])(?P<thickness>\d+)\s*,\s*(?P<width>\d+)\s*,\s*"
-                r"(?P<length>\d+)(?:\s*(?P<length_unit>мм|mm|м|m|к|k)\b)?"
-                r"(?![\d.,])",
-                re.IGNORECASE,
-            ),
-        ]
-        for pattern in patterns:
-            match = pattern.search(text)
-            if not match:
-                continue
-            length_text = "".join(
-                part
-                for part in [match.group("length") or "", match.group("length_unit") or ""]
-                if part
-            )
-            return {
-                "thickness": self._parse_number_with_thousands_separator(match.group("thickness")),
-                "width": self._parse_number_with_thousands_separator(match.group("width")),
-                "length": self._parse_income_length_value(length_text),
-            }
-        return None
-
-    def _wood_calculator_reply(self, text):
-        size = self._parse_calculator_size(text)
-        if not size:
-            return None
-
-        thickness = size["thickness"]
-        width = size["width"]
-        length = size["length"]
-        quantity = self._parse_income_quantity(text)
-        volume = self._parse_income_volume(text)
-        one_piece_volume = thickness / 1000 * width / 1000 * length / 1000
-        if one_piece_volume <= 0:
-            return "Не смог посчитать: проверьте размер."
-
-        size_text = (
-            f"{_display_bot_number(thickness)}x"
-            f"{_display_bot_number(width)}x"
-            f"{_display_bot_number(length)}"
-        )
-        one_piece_text = _display_bot_number(round(one_piece_volume, 6))
-        if quantity is not None:
-            total_volume = round(one_piece_volume * quantity, 6)
-            return (
-                "Расчет кубатуры:\n"
-                f"Размер: {size_text}\n"
-                f"Количество: {_display_bot_number(quantity)} шт\n"
-                f"1 шт: {one_piece_text} м3\n"
-                f"Итого: {_display_bot_number(total_volume)} м3"
-            )
-        if volume is not None:
-            quantity_float = volume / one_piece_volume
-            quantity_rounded = round(quantity_float)
-            if abs(quantity_float - quantity_rounded) <= INCOME_QUANTITY_TOLERANCE:
-                return (
-                    "Расчет количества:\n"
-                    f"Размер: {size_text}\n"
-                    f"Объем: {_display_bot_number(volume)} м3\n"
-                    f"1 шт: {one_piece_text} м3\n"
-                    f"Итого: {quantity_rounded} шт"
-                )
-            lower = max(1, int(quantity_float))
-            upper = lower + 1
-            return (
-                "Расчет количества:\n"
-                f"Размер: {size_text}\n"
-                f"Объем: {_display_bot_number(volume)} м3\n"
-                f"Получается примерно {_display_bot_number(round(quantity_float, 3))} шт.\n"
-                "Штуки должны быть целым числом.\n"
-                "Ближайшие варианты:\n"
-                f"1. {lower} шт = {_display_bot_number(round(one_piece_volume * lower, 6))} м3\n"
-                f"2. {upper} шт = {_display_bot_number(round(one_piece_volume * upper, 6))} м3"
-            )
-        return (
-            f"Для {size_text}: 1 шт = {one_piece_text} м3.\n"
-            "Напишите количество штук или объем, и я досчитаю."
-        )
-
-    def _math_calculator_reply(self, text):
-        expression = self._math_expression_from_text(text)
-        if not expression:
-            return None
-        try:
-            result = self._safe_eval_math_expression(expression)
-        # Аудит коду: незакрита дужка/два знаки поспіль/зайва кома дають
-        # SyntaxError від ast.parse — раніше не ловилось тут, вилітало до
-        # зовнішнього except Exception (main.py) і показувало загальне
-        # "Произошла внутренняя ошибка" замість власного дружнього тексту.
-        except (ValueError, ZeroDivisionError, SyntaxError):
-            return "Не смог посчитать: проверьте математический пример."
-        return (
-            "Расчет:\n"
-            f"{self._format_math_expression(expression)} = {_display_bot_number(round(result, 8))}"
-        )
-
     def _math_expression_from_text(self, text):
         source = self._calculator_input_text(text).casefold().replace("ё", "е")
         replacements = [
@@ -1091,44 +894,3 @@ class BotModeDialogMixin:
             f"Доступная вкладка: СКЛАД.\nПоля: {available}.\n\n"
             "Если нужно изменить режим, напишите: изменить бота."
         )
-
-    # Калькулятор не тримає жодних введених користувачем даних (на відміну від
-    # приходу/продажі), тож очікування розрахунку не повинно "заводити в
-    # ступор" того, хто натиснув сюди випадково: якщо текст насправді
-    # розпізнається як команда головного меню, одразу скасовуємо очікування й
-    # переходимо туди, а не намагаємось порахувати ці слова як вираз.
-    def _calculator_menu_escape_reply(self, text, store, context):
-        if self._is_data_menu_request(text):
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._enter_data_menu_node(store, context, re_entering=True)
-        if self._is_stock_data_menu_request(text):
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._stock_data_menu_reply(store, context)
-        placeholder = self._warehouse_placeholder_command(text)
-        if placeholder == "Фильтры":
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._start_stock_browse_filters(store, context)
-        if placeholder:
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._in_development_reply(placeholder, store)
-
-        command_code = store.find_command_code_in_text(text)
-        if command_code == "help":
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._help_reply(store)
-        if command_code == "stock_balance":
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            denied = self._require_permission(store, context, perm.WAREHOUSE_VIEW)
-            if denied:
-                return denied
-            return self._stock_balance_reply(store, context)
-        if command_code == "add_income":
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._start_income_operation(text, store, context)
-        if command_code == "stock_sale":
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._start_sale_operation(text, store, context)
-        if command_code == "calculator":
-            store.delete_pending_operation(context["chat_id"], context["user_id"])
-            return self._start_calculator_operation(text, store, context)
-        return None

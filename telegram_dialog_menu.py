@@ -10,6 +10,8 @@ from warehouse_data import (
     BOT_MESSAGE_DEFAULTS,
 )
 
+from utils import LATH_PRODUCT_NAME
+
 class MenuDialogMixin:
 
     # Усі 5 колишніх пунктів головного меню (ПРИХОД/РЕАЛИЗАЦИЯ/ДАННЫЕ/
@@ -20,15 +22,38 @@ class MenuDialogMixin:
     # BUTTONS/_seed_builtin_migrated_custom_buttons, warehouse_data.py) —
     # тож store=None (гіпотетичний виклик без доступу до БД) лишає меню
     # ПОРОЖНІМ (жодного пункту).
-    def _main_command_keyboard(self, store=None):
+    def _main_command_keyboard(self, store=None, context=None):
         rows = []
         if store is not None:
-            rows.extend(self._pack_custom_button_rows(store.list_custom_buttons(None), store))
+            rows.extend(self._pack_custom_button_rows(self._visible_custom_buttons(store, None, context), store))
         return {
             "keyboard": rows,
             "resize_keyboard": True,
             "one_time_keyboard": False,
         }
+
+    # Роль людини, для якої зараз будується меню: явний context, інакше -
+    # контекст поточної відповіді (_build_reply_pipeline), інакше - адмін
+    # (внутрішній виклик без справжнього користувача).
+    def _menu_role(self, store, context=None):
+        context = context or getattr(self, "_reply_context", None)
+        if not context:
+            return perm.ADMIN
+        return self._current_user_role(store, context)
+
+    # Кнопки вузла, які бачить роль («Кнопки ролей» у Персоналі): адмін -
+    # усі; батько - коли дозволена хоч одна дитина; решта - за списком.
+    def _visible_custom_buttons(self, store, parent_id, context=None):
+        rows = store.list_custom_buttons(parent_id)
+        role = self._menu_role(store, context)
+        if role == perm.ADMIN or store.is_role_admin(role):
+            return rows
+        return [row for row in rows if store.is_button_allowed(role, row[0])]
+
+    def _custom_button_denied_reply(self, node, store):
+        return self._with_main_menu(
+            "У вас нет доступа к кнопке «%s». Обратитесь к администратору." % node["label"], store
+        )
 
     def _custom_button_row_to_node(self, row):
         node_id, label, message_text, action_code, section, enabled, layout, operation_id = row
@@ -161,8 +186,12 @@ class MenuDialogMixin:
             return self._start_writeoff_operation(store, context)
         if action_code == "start_writeoff_form":
             return self._start_writeoff_all_in_one_reply(store, context)
-        if action_code == "start_calculator":
-            return self._start_calculator_operation("калькулятор", store, context)
+        if action_code == "start_exchange_form":
+            return self._start_exchange_all_in_one_reply(store, context)
+        if action_code == "start_admin_form":
+            return self._start_admin_form_reply(store, context)
+        if action_code == "start_calculator_form":
+            return self._start_calculator_form_reply(store, context)
         if action_code == "show_help":
             return self._show_help_reply(store)
         return None
@@ -193,8 +222,11 @@ class MenuDialogMixin:
         # лишається власним, окремим і показується як і раніше: такий вузол
         # це навмисний ярлик/сценарій адміна ("Запускаем продажу." перед
         # запуском start_sale), а не дублювання того самого тексту.
+        role = self._menu_role(store, context)
+        if not (role == perm.ADMIN or store.is_role_admin(role)) and not store.is_button_allowed(role, node["id"]):
+            return self._custom_button_denied_reply(node, store)
         own_text = node["message_text"] if not store.is_custom_button_migrated(node["id"]) else None
-        children_rows = store.list_custom_buttons(node["id"])
+        children_rows = self._visible_custom_buttons(store, node["id"], context)
         if children_rows:
             store.save_pending_operation(
                 context["chat_id"], context["user_id"], "custom_menu", "at_node", {"node_id": node["id"]},
@@ -291,7 +323,7 @@ class MenuDialogMixin:
     # _category_from_text для категорій складу.
     def _continue_custom_menu(self, text, store, context, pending):
         node_id = pending["payload"]["node_id"]
-        children_rows = store.list_custom_buttons(node_id)
+        children_rows = self._visible_custom_buttons(store, node_id, context)
         normalized = _normalize_phrase(text)
         for row in children_rows:
             child_node = self._custom_button_row_to_node(row)
@@ -337,6 +369,7 @@ class MenuDialogMixin:
             "keyboard": [
                 [{"text": "ДОСКА AD"}, {"text": "ДОСКА KD"}],
                 [{"text": "ОСБ"}, {"text": "ВАГОНКА"}],
+                [{"text": "РЕЙКА"}],
                 [{"text": "ВСЕ ТОВАРЫ"}],
                 [{"text": "Фильтры"}],
                 [{"text": "Назад"}, {"text": "Главное меню"}],
@@ -374,6 +407,10 @@ class MenuDialogMixin:
             "доска ad": "Доска AD",
             "доска kd": "Доска KD",
             "вагонка": "Вагонка",
+            # Рейка - окрема категорія (рішення користувача 2026-09-07):
+            # у клітинці «Продукт» стоїть просто «Рейка», сухість AD/KD - у
+            # своїй колонці, тож одна кнопка показує і те, і те.
+            "рейка": LATH_PRODUCT_NAME,
         }
         return mapping.get(normalized)
 

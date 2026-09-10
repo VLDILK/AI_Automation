@@ -8,6 +8,7 @@ from utils import (
     _display_bot_number,
     _normalize_phrase,
     _number_value,
+    price_line_text,
 )
 from warehouse_data import (
     BOT_MESSAGE_DEFAULTS,
@@ -176,8 +177,13 @@ class AntisepticDialogMixin:
             lines.append(f"Объём всего: {_display_bot_number(volume)} м3")
         else:
             lines.append(f"Объем: {_display_bot_number(volume)} м3")
-            if price_per_unit:
-                lines.append(f"Цена: {_display_bot_number(price_per_unit)} MDL/м3")
+        # Ціна показувалась ЛИШЕ в гілці однієї позиції: щойно позицій
+        # ставало кілька, вона зникала з екрана підтвердження зовсім.
+        # Антисептирование завжди коштує за куб, незалежно від того, як
+        # продається сам товар.
+        price_line = price_line_text(price_per_unit, ["volume"])
+        if price_line:
+            lines.append(price_line)
         lines.append(f"Оплата: {payload.get('payment_method')}")
         if payload.get("comment"):
             lines.append(f"Комментарий: {payload['comment']}")
@@ -659,7 +665,6 @@ class AntisepticDialogMixin:
             "categories": categories,
             "common_fields": common_ctx["fields"],
             **self._webapp_style_ctx(),
-            **self._webapp_templates_ctx(store, "antiseptic"),
         }
         # Задача користувача (скріншот "нащо ти кнопку прибрав"): та сама
         # логіка відновлення, що вже має продаж - "поточна" (ще не
@@ -725,11 +730,7 @@ class AntisepticDialogMixin:
             return denied
         web_app = self._antiseptic_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Антисептирование одной формой сейчас недоступно (форма не подключена "
-                "или нет категорий товара). Используйте обычное «Антисептирование».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "АНТИСЕПТИРОВАНИЕ (форма)")
         # antiseptic_all_in_one - той самий статус-маркер, що sale_all_in_one/
         # writeoff_all_in_one/income_all_in_one вже мають (_continue_operation_
         # with_webapp_payload, telegram_dialog_core.py) - страховка на випадок,

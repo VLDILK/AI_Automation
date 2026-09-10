@@ -150,6 +150,33 @@ def backup_workbook_bytes():
     return _local_path(settings).read_bytes()
 
 
+def write_workbook_bytes(data):
+    """Зворотний бік backup_workbook_bytes — записати ГОТОВІ байти файлу.
+
+    Потрібен там, де книгу не можна перезаписувати через openpyxl. Реальна
+    причина (виміряно 2026-08-21 на таблиці користувача): openpyxl.save()
+    викидає КЕШОВАНІ значення формул - "Остаток, шт" = 1033 після
+    збереження читається як None. А програма читає Excel саме з
+    data_only=True, тобто бачить лише кеш. У файлі користувача ~14 000
+    формул у 12 листах, тож одне таке збереження зробило б програму сліпою
+    до наступного відкриття файлу в Excel. Правка байтами лишає всі
+    формули з їхніми значеннями недоторканими.
+
+    Атомарність та сама, що й у save_workbook: спершу .tmp у тій самій
+    теці, потім os.replace.
+    """
+    settings = _settings()
+    if settings.get("excel_source_mode") == "online":
+        token = _require_online_access_token()
+        drive_id, item_id = _require_online_selection(settings)
+        onedrive_sync.upload_workbook_bytes(token, drive_id, item_id, data)
+        return
+    target_path = _local_path(settings)
+    tmp_path = target_path.with_name(target_path.name + ".tmp")
+    tmp_path.write_bytes(data)
+    os.replace(tmp_path, target_path)
+
+
 def backup_file_name_parts():
     settings = _settings()
     if settings.get("excel_source_mode") == "online":

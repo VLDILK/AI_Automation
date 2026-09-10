@@ -28,10 +28,14 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.filters import AutoFilter
 
 import excel_source
+import xlsx_columns
 import permissions
+from utils import is_lath_row, is_piece_priced_product, lath_product_name, plain_product_name, set_product_measure_kinds
 from paths import BACKUP_DIR, BACKUP_PASSWORD_PATH, DB_BACKUP_DIR, SETTINGS_PATH
 from settings import SettingsStore
 from utils import (
+    piece_measure,
+    row_measure_kind,
     _deserialize_row,
     _display_bot_number,
     _display_value,
@@ -42,6 +46,7 @@ from utils import (
     _sanitize_excel_value,
     _serialize_row,
     piece_measure as _shared_piece_measure,
+    price_line_text,
     row_measure_kind as _shared_row_measure_kind,
 )
 
@@ -110,22 +115,6 @@ BUILTIN_BOT_COMMANDS = [
         ],
     },
     {
-        "code": "calculator",
-        "title": "Калькулятор",
-        "description": "Посчитать числа, кубатуру по размерам или количество штук по м3.",
-        "aliases": [
-            "калькулятор",
-            "посчитай",
-            "порахуй",
-            "рахуй",
-            "считай",
-            "рассчитай",
-            "сколько кубов",
-            "сколько штук",
-            "порахувати",
-        ],
-    },
-    {
         "code": "help",
         "title": "Помощь",
         "description": "Показать список доступных команд.",
@@ -159,12 +148,14 @@ CUSTOM_BUTTON_ACTIONS = [
     {"code": "start_low_stock_report", "section": "данные", "label": "Показать отчёт по низкому остатку"},
     {"code": "start_writeoff", "section": "списание", "label": "Начать списание товара"},
     {"code": "start_writeoff_form", "section": "списание", "label": "Начать списание одной формой"},
+    {"code": "start_exchange_form", "section": "обмен", "label": "Начать обмен одной формой"},
     {"code": "start_data_browser_form", "section": "данные", "label": "Показать данные одной формой"},
-    {"code": "start_calculator", "section": "прочее", "label": "Открыть калькулятор"},
+    {"code": "start_admin_form", "section": "админ", "label": "Админ: журнал операций и коррекция остатков"},
+    {"code": "start_calculator_form", "section": "прочее", "label": "Открыть калькулятор (форма)"},
     {"code": "show_help", "section": "прочее", "label": "Показать справку"},
 ]
 
-CUSTOM_BUTTON_SECTIONS = ["приход", "реализация", "данные", "списание", "прочее"]
+CUSTOM_BUTTON_SECTIONS = ["приход", "реализация", "данные", "списание", "обмен", "прочее"]
 
 # Мітки, які кастомна кнопка НЕ може перевикористати (колізія з уже
 # захардкодженими кнопками головного меню бота). Жодна з 5 колишніх
@@ -213,14 +204,26 @@ BUILTIN_MIGRATED_CUSTOM_BUTTONS = [
     {"migration_key": "antiseptic_form", "label": "АНТИСЕПТИРОВАНИЕ (форма)", "action_code": "start_antiseptic_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "writeoff", "label": "СПИСАНИЕ", "action_code": "start_writeoff", "layout": "full", "parent_migration_key": None},
     {"migration_key": "writeoff_form", "label": "СПИСАНИЕ (форма)", "action_code": "start_writeoff_form", "layout": "full", "parent_migration_key": None},
+    # Задача користувача (2026-09-05, ТЗ пункт 1): "ОБМЕН" - лише формою,
+    # чатового близнюка без форми немає ("стару систему... ніколи не
+    # будемо"). Сіється в кінець меню, якщо кнопки ще нема; розкладення
+    # решти кнопок не чіпається - переставити можна в редакторі.
+    {"migration_key": "exchange_form", "label": "ОБМЕН (форма)", "action_code": "start_exchange_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "data_browser_form", "label": "ДАННЫЕ (форма)", "action_code": "start_data_browser_form", "layout": "full", "parent_migration_key": None},
+    # Адмін-форма (2026-09-06): журнал операцій і корекція залишків, лише роль
+    # адміністратора (бот перевіряє при натисканні).
+    {"migration_key": "admin_form", "label": "Админ (форма)", "action_code": "start_admin_form", "layout": "full", "parent_migration_key": None},
     {"migration_key": "data_menu", "label": "ДАННЫЕ", "action_code": None, "layout": "full", "parent_migration_key": None},
     {"migration_key": "stock_report_section", "label": "СКЛАД", "action_code": "start_stock_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "sales_report_section", "label": "ПРОДАЖИ", "action_code": "start_sales_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "antiseptic_report_section", "label": "АНТИСЕПТИРОВАНИЕ", "action_code": "start_antiseptic_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "sales_by_client_report_section", "label": "Клиенты", "action_code": "start_sales_by_client_report", "layout": "full", "parent_migration_key": "data_menu"},
     {"migration_key": "low_stock_report_section", "label": "Низкий остаток", "action_code": "start_low_stock_report", "layout": "full", "parent_migration_key": "data_menu"},
-    {"migration_key": "calculator", "label": "Калькулятор", "action_code": "start_calculator", "layout": "half", "parent_migration_key": None},
+    # Рішення користувача (2026-09-07): «додай кнопку до бота теж».
+    # Окремий ключ, а не воскресіння схованої «Калькулятор» вище: ту
+    # сховали на пряме прохання (2026-08-18), і вона веде в текстовий
+    # діалог, а ця - у форму зі списком розмірів складу.
+    {"migration_key": "calculator_form", "label": "КАЛЬКУЛЯТОР (форма)", "action_code": "start_calculator_form", "layout": "half", "parent_migration_key": None},
     {"migration_key": "help", "label": "Помощь", "action_code": "show_help", "layout": "half", "parent_migration_key": None},
 ]
 
@@ -277,8 +280,13 @@ BOT_MESSAGE_DEFAULTS = {
         "Списание одной формой. Нажмите кнопку ниже и заполните всё сразу — "
         "категория и размеры."
     ),
+    "start_exchange_form": (
+        "Обмен одной формой. Нажмите кнопку ниже и заполните два блока — "
+        "что отдаём и что получаем взамен."
+    ),
     "start_data_browser_form": "Данные склада одной формой.",
-    "start_calculator": "Что посчитать?",
+    "start_admin_form": "Админ-форма: журнал операций и коррекция остатков. Нажмите кнопку ниже.",
+    "start_calculator_form": "Калькулятор. Откройте форму:",
     "show_help": (
         "Доступные команды:\n"
         "Приход - принять товар на склад\n"
@@ -325,6 +333,27 @@ BUILTIN_OPERATIONS = [
      "label": "ОСБ", "prefill": {"product": "ОСБ"}, "condition_identity": False},
     {"builtin_key": "writeoff_vagonka", "kind": "writeoff", "parent_action_code": "start_writeoff",
      "label": "ВАГОНКА", "prefill": {"product": "Вагонка"}, "condition_identity": False},
+    # Рейка (рішення користувача 2026-09-07): окрема назва продукту, сухість
+    # лишається окремою категорією - «зараз є поки Рейка АД, але в
+    # майбутньому буде і КД». Одиниця - погонні метри.
+    {"builtin_key": "income_reika_ad", "kind": "income", "parent_action_code": "start_income",
+     "label": "РЕЙКА AD", "prefill": {"product": "Рейка", "condition": "AD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "income_reika_kd", "kind": "income", "parent_action_code": "start_income",
+     "label": "РЕЙКА KD", "prefill": {"product": "Рейка", "condition": "KD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "sale_reika_ad", "kind": "sale", "parent_action_code": "start_sale",
+     "label": "РЕЙКА AD", "prefill": {"product": "Рейка", "condition": "AD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "sale_reika_kd", "kind": "sale", "parent_action_code": "start_sale",
+     "label": "РЕЙКА KD", "prefill": {"product": "Рейка", "condition": "KD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "writeoff_reika_ad", "kind": "writeoff", "parent_action_code": "start_writeoff",
+     "label": "РЕЙКА AD", "prefill": {"product": "Рейка", "condition": "AD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
+    {"builtin_key": "writeoff_reika_kd", "kind": "writeoff", "parent_action_code": "start_writeoff",
+     "label": "РЕЙКА KD", "prefill": {"product": "Рейка", "condition": "KD"}, "condition_identity": True,
+     "measure_label": "Количество, мп"},
 ]
 
 # АНТИСЕПТИРОВАНИЕ — окрема "service"-дія (requires_row_identity=0: не
@@ -562,60 +591,510 @@ def _find_header_row(worksheet, sheet_name, fallback=1):
     return fallback
 
 
-def ensure_workbook_has_required_sheets():
-    workbook = excel_source.open_workbook()
-    changed = False
-    try:
-        # Задача користувача: "якщо приєднати порожній ексель, то має
-        # створитись программою красивенька табличка з відповідними
-        # вкладками" - кожен із 5 відомих листів, якого взагалі немає у
-        # файлі, створюється з нуля з повним набором заголовків.
-        for sheet_name, full_headers in _REQUIRED_SHEETS_FULL:
-            if sheet_name in workbook.sheetnames:
+# --- Самозцілення СКЛАД: відсутні колонки виміру + порожні значення ---
+# Реальний випадок (2026-08-21): бот відмовив у продажу 36 мп - "на складе
+# недостаточно погонных метров... Доступно: 1033 шт / 0 мп" - при повному
+# складі. Причина не в логіці підрахунку: у таблиці користувача лист СКЛАД
+# закінчувався на "Комментарий" (21 колонка), і ЧОТИРЬОХ колонок мп у ньому
+# не було ніколи. Погонні метри не загубились - їх не було де зберігати,
+# тож перевірка наявності чесно бачила нуль. Звірка залишків теж мовчала
+# "розбіжностей немає": рядок без колонки виміру вона просто пропускала.
+#
+# Вказівка користувача: "хай дописує автоматом колонки в таблиці, щоб під
+# формат було. і хай автоматом перераховує відразу".
+#
+# Порядок усередині кожної четвірки збігається з _WAREHOUSE_QTY_HEADERS:
+# i-та колонка виміру рахується з i-тої колонки штук того самого рядка,
+# тому "Остаток, мп" завжди походить саме з "Остаток, шт", а не з приходу.
+_WAREHOUSE_QTY_HEADERS = (
+    "Начальный остаток, шт",
+    "Приход, шт",
+    "Продано, шт",
+    "Остаток, шт",
+)
+_WAREHOUSE_MEASURE_HEADERS = {
+    "volume": (
+        "Начальный остаток, м3",
+        "Приход, м3",
+        "Продано, м3",
+        "Остаток, м3",
+    ),
+    "area": (
+        "Начальный остаток, м2",
+        "Приход, м2",
+        "Продано, м2",
+        "Остаток, м2",
+    ),
+    "linear": (
+        "Начальный остаток, мп",
+        "Приход, мп",
+        "Продано, мп",
+        "Остаток, мп",
+    ),
+}
+
+
+def _normalized_header_columns(worksheet, header_row=1):
+    # Заголовки порівнюємо через _normalize_phrase, а не дослівно: у живому
+    # файлі трапляється зайвий пробіл чи інший регістр, і дослівне
+    # порівняння вирішило б, що колонки немає, - програма дописала б другу
+    # таку саму поруч.
+    columns = {}
+    for column in range(1, worksheet.max_column + 1):
+        value = worksheet.cell(row=header_row, column=column).value
+        if value in (None, ""):
+            continue
+        key = _normalize_phrase(value)
+        if key and key not in columns:
+            columns[key] = column
+    return columns
+
+
+def missing_warehouse_headers(workbook):
+    # Окремо від самого дописування - щоб викликач устиг зробити бекап ДО
+    # першої зміни книги (той самий порядок, що й у решті самозцілення).
+    if "СКЛАД" not in workbook.sheetnames:
+        return []
+    worksheet = workbook["СКЛАД"]
+    header_row = _find_header_row(worksheet, "СКЛАД")
+    existing = _normalized_header_columns(worksheet, header_row)
+    return [
+        header for header in _WAREHOUSE_SHEET_HEADERS
+        if _normalize_phrase(header) not in existing
+    ]
+
+
+def _style_twin_column(header, existing_columns):
+    # "щоб під формат було": нова колонка успадковує оформлення своєї
+    # двійнички з тієї самої четвірки - "Остаток, мп" бере вигляд у
+    # "Остаток, м3". Так дописане не виглядає голим серед оформленої
+    # таблиці, і числовий формат теж успадковується.
+    for kind, headers in _WAREHOUSE_MEASURE_HEADERS.items():
+        if header not in headers:
+            continue
+        position = headers.index(header)
+        for twin_kind in ("volume", "area", "linear"):
+            if twin_kind == kind:
                 continue
-            if not changed:
-                create_excel_backup()
-            worksheet = workbook.create_sheet(sheet_name)
-            for column_index, header in enumerate(full_headers, start=1):
-                worksheet.cell(row=1, column=column_index, value=header)
-            changed = True
+            twin_header = _WAREHOUSE_MEASURE_HEADERS[twin_kind][position]
+            column = existing_columns.get(_normalize_phrase(twin_header))
+            if column is not None:
+                return column
+        return existing_columns.get(_normalize_phrase(_WAREHOUSE_QTY_HEADERS[position]))
+    return None
 
-        # Той самий принцип самозцілення, тепер для колонки, доданої в лист,
-        # що вже існує у реальному файлі (_WRITEOFF_TIME_HEADER) - без цього
-        # користувачам зі старим файлом довелось би дописувати колонку
-        # вручну.
-        if WRITEOFF_SHEET_NAME in workbook.sheetnames:
-            worksheet = workbook[WRITEOFF_SHEET_NAME]
-            existing_headers = [
-                worksheet.cell(row=1, column=column).value
-                for column in range(1, worksheet.max_column + 1)
-            ]
-            if _WRITEOFF_TIME_HEADER not in existing_headers:
-                if not changed:
-                    create_excel_backup()
-                worksheet.insert_cols(1)
-                worksheet.cell(row=1, column=1, value=_WRITEOFF_TIME_HEADER)
-                changed = True
 
+def plan_warehouse_columns(workbook, values_workbook=None):
+    """Що саме треба дописати в СКЛАД, щоб таблиця стала еталонною.
+
+    Нічого не змінює - лише читає. Повертає None, коли дописувати нічого.
+    Значення рахуються одразу тут ("хай автоматом перераховує відразу"):
+    мп = шт × довжина/1000 через ту саму piece_measure, якою рахує бот, а
+    не через другу копію правила.
+
+    Свідомо плануються ЛИШЕ нові колонки. Порожня клітинка в колонці, яка
+    вже існує, - це розбіжність між кількістю й виміром, а рішення "яке з
+    двох значень правда" належить людині: для цього вже є діалог
+    "Перевірка залишків". Мовчки проставити своє число означало б відповісти
+    за неї.
+    """
+    if "СКЛАД" not in workbook.sheetnames:
+        return None
+    worksheet = workbook["СКЛАД"]
+    header_row = _find_header_row(worksheet, "СКЛАД")
+    existing_columns = _normalized_header_columns(worksheet, header_row)
+    missing = [
+        header for header in _WAREHOUSE_SHEET_HEADERS
+        if _normalize_phrase(header) not in existing_columns
+    ]
+    if not missing:
+        return None
+
+    # Порожній лист openpyxl усе одно показує як max_column=1 - дописування
+    # "після останньої" почалось би з колонки 2 і лишило б порожню першу.
+    previous_last_column = worksheet.max_column if existing_columns else 0
+    next_index = previous_last_column
+    columns = []
+    planned_by_header = {}
+    for header in missing:
+        next_index += 1
+        entry = {
+            "index": next_index,
+            "header": header,
+            "style_from_index": _style_twin_column(header, existing_columns),
+            "values": {},
+        }
+        columns.append(entry)
+        planned_by_header[header] = entry
+
+    values_worksheet = None
+    if values_workbook is not None and "СКЛАД" in values_workbook.sheetnames:
+        values_worksheet = values_workbook["СКЛАД"]
+
+    def column_of(header):
+        return existing_columns.get(_normalize_phrase(header))
+
+    product_column = column_of("Продукт")
+    thickness_column = column_of("Толщина, мм")
+    width_column = column_of("Ширина, мм")
+    length_column = column_of("Длина, мм")
+    if None not in (product_column, thickness_column, width_column, length_column):
+        qty_columns = [column_of(header) for header in _WAREHOUSE_QTY_HEADERS]
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            product = worksheet.cell(row=row, column=product_column).value
+            thickness = worksheet.cell(row=row, column=thickness_column).value
+            width = worksheet.cell(row=row, column=width_column).value
+            length = worksheet.cell(row=row, column=length_column).value
+            if product in (None, "") or thickness in (None, ""):
+                continue
+            if width in (None, "") or length in (None, ""):
+                continue
+            measure_kind = _shared_row_measure_kind(product, thickness, width)
+            if measure_kind is None:
+                continue
+            piece = _shared_piece_measure(thickness, width, length, measure_kind)
+            if piece <= 0:
+                continue
+            for position, measure_header in enumerate(_WAREHOUSE_MEASURE_HEADERS[measure_kind]):
+                entry = planned_by_header.get(measure_header)
+                if entry is None or qty_columns[position] is None:
+                    continue
+                readable, quantity = _readable_number(
+                    worksheet, values_worksheet, row, qty_columns[position]
+                )
+                if not readable:
+                    continue
+                entry["values"][row] = round(quantity * piece, 6)
+
+    return {
+        "header_row": header_row,
+        "previous_last_column": previous_last_column,
+        "columns": columns,
+        "headers": missing,
+        "filled_cells": sum(len(entry["values"]) for entry in columns),
+    }
+
+
+def repair_warehouse_columns():
+    """Доводить СКЛАД до еталонного формату прямо у файлі користувача.
+
+    Реальний випадок (2026-08-21): бот відмовив у продажу 36 мп - "на
+    складе недостаточно погонных метров... Доступно: 1033 шт / 0 мп" - при
+    повному складі. У таблиці лист СКЛАД закінчувався на "Комментарий":
+    чотирьох колонок мп не було ніколи, тож погонні метри не було де
+    зберігати, і перевірка наявності чесно бачила нуль. Звірка залишків теж
+    мовчала "розбіжностей немає" - рядок без колонки виміру вона просто
+    пропускала.
+
+    Вказівка користувача: "хай дописує автоматом колонки в таблиці, щоб під
+    формат було. і хай автоматом перераховує відразу".
+
+    Запис іде байтами архіву (xlsx_columns), а НЕ через openpyxl: інакше
+    зникли б кешовані значення всіх ~14 000 формул книги, і програма
+    осліпла б до наступного відкриття файлу в Excel.
+
+    Повертає опис зробленого або None, якщо дописувати не було чого.
+    """
+    workbook = excel_source.open_workbook()
+    values_workbook = None
+    try:
+        try:
+            # Числа беремо з data_only-копії: у формульному файлі
+            # "Остаток, шт" - це формула, і без кешованого значення її текст
+            # нічого не скаже. Рядки без кешу свідомо лишаться незаповненими
+            # - краще не заповнити, ніж вигадати залишок, на який потім
+            # спиратиметься відмова в продажу.
+            values_workbook = excel_source.open_workbook(data_only=True)
+        except Exception:
+            values_workbook = None
+        plan = plan_warehouse_columns(workbook, values_workbook)
+    finally:
+        if values_workbook is not None:
+            values_workbook.close()
+        workbook.close()
+
+    if not plan:
+        return None
+
+    create_excel_backup()
+    data = excel_source.backup_workbook_bytes()
+    patched = xlsx_columns.append_columns(
+        data,
+        "СКЛАД",
+        plan["header_row"],
+        plan["columns"],
+        plan["previous_last_column"],
+    )
+    excel_source.write_workbook_bytes(patched)
+    return plan
+
+
+def _readable_number(worksheet, values_worksheet, row, column):
+    # Повертає (чи вдалось прочитати, число). Формула без кешованого
+    # значення - це саме "не вдалось": підставити замість неї нуль означало
+    # б вигадати залишок, на який потім спиратиметься відмова в продажу.
+    value = worksheet.cell(row=row, column=column).value
+    if isinstance(value, str) and value.startswith("="):
+        value = values_worksheet.cell(row=row, column=column).value if values_worksheet else None
+        if value in (None, ""):
+            return False, 0.0
+    if value in (None, ""):
+        return True, 0.0
+    return True, _number_value(value)
+
+
+# --- Звірка книги з шаблоном: план "чого бракує" і його виконання ---
+# Задача користувача (2026-09-05): "при початку роботи клієнта, якщо чогось
+# не вистачає в екселі (вкладка\стовбець\інше), програма має відразу
+# запитати, чи додати нові стовпці. якщо так - додається відразу по нашому
+# шаблону і має також бути синхронізовано із налаштуваннями висоти\ширини
+# рядків у самих налаштуваннях программи".
+#
+# Раніше все це робилось мовчки й через openpyxl - а збереження openpyxl
+# знеструмлює кешовані значення формул (виміряно 2026-08-21: "Остаток, шт"
+# 1033 -> None), тоді як програма читає саме кеш. Тепер два кроки:
+#   plan_workbook_repairs()   - лише читає, повертає що бракує (або None);
+#   apply_workbook_repairs()  - байтами архіву (xlsx_columns), один запис,
+#                               одна резервна копія, ширини/висота шапки з
+#                               налаштувань "Формат таблицы".
+# Єдиний виняток, що лишився на openpyxl, - "Точное время" у СПИСАНИЕ:
+# та колонка історично вставляється ПЕРШОЮ (зсуває всі інші), а зсув усіх
+# клітинок листа байтами - окрема велика робота заради файлів, у яких її
+# немає роками. Планується окремим пунктом і виконується лише коли справді
+# бракує.
+
+
+def _sheet_header_values(worksheet, header_row):
+    return [
+        worksheet.cell(row=header_row, column=column).value
+        for column in range(1, worksheet.max_column + 1)
+    ]
+
+
+def plan_workbook_repairs():
+    """Що бракує в книзі порівняно з шаблоном. Нічого не пише.
+
+    Повертає None, коли все на місці, інакше словник:
+        sheets               назви листів, яких немає взагалі
+        columns              [{sheet, header, header_row, previous_last_column}]
+                             для колонок автора в наявних листах
+        writeoff_time_column True, якщо в СПИСАНИЕ немає "Точное время"
+        warehouse            план колонок мп для СКЛАД (plan_warehouse_columns)
+    """
+    workbook = excel_source.open_workbook()
+    values_workbook = None
+    try:
+        try:
+            values_workbook = excel_source.open_workbook(data_only=True)
+        except Exception:
+            values_workbook = None
+
+        sheets = [name for name, _headers in _REQUIRED_SHEETS_FULL if name not in workbook.sheetnames]
+
+        columns = []
         for sheet_name, required_header in _REQUIRED_OPERATION_AUTHOR_COLUMNS:
             if sheet_name not in workbook.sheetnames:
+                # Лист створиться цілком, уже з цією колонкою.
                 continue
             worksheet = workbook[sheet_name]
             header_row = _find_header_row(worksheet, sheet_name)
-            existing_headers = [
-                worksheet.cell(row=header_row, column=column).value
-                for column in range(1, worksheet.max_column + 1)
-            ]
-            if required_header in existing_headers:
+            existing = _sheet_header_values(worksheet, header_row)
+            if required_header in existing:
                 continue
-            if not changed:
-                create_excel_backup()
-            worksheet.cell(row=header_row, column=worksheet.max_column + 1, value=required_header)
-            changed = True
+            # Порожній лист openpyxl показує як max_column=1 - дописування
+            # "після останньої" почалось би з другої колонки.
+            has_any = any(value not in (None, "") for value in existing)
+            columns.append({
+                "sheet": sheet_name,
+                "header": required_header,
+                "header_row": header_row,
+                "previous_last_column": worksheet.max_column if has_any else 0,
+            })
 
-        if changed:
-            excel_source.save_workbook(workbook)
-        return changed
+        writeoff_time_column = False
+        if WRITEOFF_SHEET_NAME in workbook.sheetnames:
+            worksheet = workbook[WRITEOFF_SHEET_NAME]
+            writeoff_time_column = _WRITEOFF_TIME_HEADER not in _sheet_header_values(worksheet, 1)
+
+        warehouse = plan_warehouse_columns(workbook, values_workbook)
+    finally:
+        if values_workbook is not None:
+            values_workbook.close()
+        workbook.close()
+
+    plan = {
+        "sheets": sheets,
+        "columns": columns,
+        "writeoff_time_column": writeoff_time_column,
+        "warehouse": warehouse,
+    }
+    return plan if workbook_repairs_needed(plan) else None
+
+
+def workbook_repairs_needed(plan, include_warehouse=True):
+    if not plan:
+        return False
+    return bool(
+        plan["sheets"] or plan["columns"] or plan["writeoff_time_column"]
+        or (include_warehouse and plan["warehouse"])
+    )
+
+
+def _russian_columns(count):
+    if count % 10 == 1 and count % 100 != 11:
+        return "%d столбец" % count
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "%d столбца" % count
+    return "%d столбцов" % count
+
+
+def describe_workbook_plan(plan, include_warehouse=True):
+    """Рядки для людини (мовою застосунку) + підпис плану для "Позже".
+
+    Підпис - те, за чим програма впізнає, що бракує ТОГО САМОГО, що й
+    минулого разу: тоді повторно не питає, а лише тримає цятку на
+    дзвіночку. Зʼявилось щось нове - підпис інший, і питання повертається.
+    """
+    lines = []
+    keys = []
+    for sheet_name in plan["sheets"]:
+        lines.append("лист %s" % sheet_name)
+        keys.append("sheet:%s" % sheet_name)
+    for item in plan["columns"]:
+        lines.append("в листе %s — столбец «%s»" % (item["sheet"], item["header"]))
+        keys.append("column:%s:%s" % (item["sheet"], item["header"]))
+    if plan["writeoff_time_column"]:
+        lines.append("в листе %s — столбец «%s»" % (WRITEOFF_SHEET_NAME, _WRITEOFF_TIME_HEADER))
+        keys.append("column:%s:%s" % (WRITEOFF_SHEET_NAME, _WRITEOFF_TIME_HEADER))
+    if include_warehouse and plan["warehouse"]:
+        headers = plan["warehouse"]["headers"]
+        lines.append("в листе СКЛАД — %s: %s" % (_russian_columns(len(headers)), ", ".join(headers)))
+        keys.append("warehouse:%s" % ",".join(headers))
+    return lines, "|".join(sorted(keys))
+
+
+def _planned_column_width(header, settings):
+    """Ширина нової колонки за тими ж правилами, що й "Выровнять"."""
+    width_mode = settings.get(TABLE_FORMAT_COLUMN_WIDTH_MODE_KEY) or TABLE_FORMAT_DEFAULT_COLUMN_WIDTH_MODE
+    if width_mode == "fixed":
+        return float(settings.get(TABLE_FORMAT_COLUMN_WIDTH_KEY) or TABLE_FORMAT_DEFAULT_COLUMN_WIDTH)
+    return float(min(
+        TABLE_FORMAT_MAX_AUTO_COLUMN_WIDTH,
+        max(TABLE_FORMAT_MIN_AUTO_COLUMN_WIDTH, len(str(header)) + TABLE_FORMAT_COLUMN_WIDTH_PADDING),
+    ))
+
+
+def _reference_header_style(data):
+    """Стиль шапки одного з наявних листів - щоб новий лист не був "голим"."""
+    for sheet_name in (INCOME_SHEET_NAME, SALES_SHEET_NAME, WRITEOFF_SHEET_NAME):
+        style = xlsx_columns.header_style_of(data, sheet_name, 1)
+        if style:
+            return style
+    return None
+
+
+def apply_workbook_repairs(plan, settings=None, include_warehouse=True):
+    """Виконує план: резервна копія → листи → колонки → СКЛАД мп. Один запис.
+
+    Повертає звіт: {sheets: [...], columns: [(лист, заголовок)],
+    writeoff_time_column: bool, warehouse: план мп або None}.
+    """
+    report = {"sheets": [], "columns": [], "writeoff_time_column": False, "warehouse": None}
+    if not workbook_repairs_needed(plan, include_warehouse):
+        return report
+    settings = settings or SettingsStore(SETTINGS_PATH)
+    header_row_height = settings.get(TABLE_FORMAT_HEADER_ROW_HEIGHT_KEY) or None
+
+    create_excel_backup()
+    data = excel_source.backup_workbook_bytes()
+    touched = False
+
+    if plan["sheets"]:
+        header_style = _reference_header_style(data)
+        headers_by_sheet = dict(_REQUIRED_SHEETS_FULL)
+        for sheet_name in plan["sheets"]:
+            headers = headers_by_sheet[sheet_name]
+            data = xlsx_columns.add_sheet(
+                data, sheet_name, headers,
+                column_widths=[_planned_column_width(header, settings) for header in headers],
+                header_row_height=header_row_height,
+                header_style=header_style,
+            )
+            report["sheets"].append(sheet_name)
+            touched = True
+
+    # Кілька нових колонок в одному листі (KD за номіналом: чотири в ПРОДАЖА)
+    # мають той самий previous_last_column з плану - пишуться ОДНИМ викликом
+    # із послідовними номерами, інакше лягали б одна поверх одної.
+    columns_by_sheet = {}
+    for item in plan["columns"]:
+        columns_by_sheet.setdefault(item["sheet"], []).append(item)
+    for sheet_name, items in columns_by_sheet.items():
+        previous = items[0]["previous_last_column"]
+        data = xlsx_columns.append_columns(
+            data, sheet_name, items[0]["header_row"],
+            [{
+                "index": previous + 1 + offset,
+                "header": item["header"],
+                "style_from_index": previous or None,
+                "values": {},
+                "width": _planned_column_width(item["header"], settings),
+            } for offset, item in enumerate(items)],
+            previous,
+        )
+        for item in items:
+            report["columns"].append((item["sheet"], item["header"]))
+        touched = True
+
+    if include_warehouse and plan["warehouse"]:
+        warehouse = plan["warehouse"]
+        for column in warehouse["columns"]:
+            column.setdefault("width", _planned_column_width(column["header"], settings))
+        data = xlsx_columns.append_columns(
+            data, "СКЛАД", warehouse["header_row"], warehouse["columns"], warehouse["previous_last_column"],
+        )
+        report["warehouse"] = warehouse
+        touched = True
+
+    if touched:
+        excel_source.write_workbook_bytes(data)
+
+    if plan["writeoff_time_column"]:
+        _ensure_writeoff_time_column()
+        report["writeoff_time_column"] = True
+    return report
+
+
+def ensure_workbook_has_required_sheets(settings=None):
+    """Мовчазна обгортка для gui.py: план + виконання без питань.
+
+    Колонки мп для СКЛАД сюди НЕ входять - домашка робить їх окремим
+    викликом repair_warehouse_columns() і показує про це власний звіт.
+    """
+    plan = plan_workbook_repairs()
+    if not workbook_repairs_needed(plan, include_warehouse=False):
+        return False
+    apply_workbook_repairs(plan, settings, include_warehouse=False)
+    return True
+
+
+def _ensure_writeoff_time_column():
+    """Старий випадок: "Точное время" ПЕРШОЮ колонкою СПИСАНИЕ (зсуває решту).
+
+    Єдине місце, що лишилось на openpyxl, - див. коментар над
+    plan_workbook_repairs. Викликається лише коли колонки справді немає.
+    """
+    workbook = excel_source.open_workbook()
+    try:
+        if WRITEOFF_SHEET_NAME not in workbook.sheetnames:
+            return False
+        worksheet = workbook[WRITEOFF_SHEET_NAME]
+        if _WRITEOFF_TIME_HEADER in _sheet_header_values(worksheet, 1):
+            return False
+        worksheet.insert_cols(1)
+        worksheet.cell(row=1, column=1, value=_WRITEOFF_TIME_HEADER)
+        excel_source.save_workbook(workbook)
+        return True
     finally:
         workbook.close()
 
@@ -1326,6 +1805,32 @@ class ExcelSqliteStore:
             CREATE INDEX IF NOT EXISTS idx_custom_menu_buttons_parent
                 ON custom_menu_buttons(parent_id, position);
 
+            -- Ролі (Задача користувача, 2026-09-06): раніше 5 жорстких ролей
+            -- у permissions.py; тепер список редагується в «Персонал» →
+            -- «Кнопки ролей»: свої ролі додаються/перейменовуються/
+            -- перефарбовуються/видаляються. builtin: 'admin' (не показується,
+            -- має все) і 'guest' (роль новачків бота: лише набір кнопок,
+            -- без перейменування/видалення). bot_users.role зберігає key.
+            CREATE TABLE IF NOT EXISTS bot_roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                color_bg TEXT NOT NULL,
+                color_fg TEXT NOT NULL,
+                builtin TEXT,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            -- Які кнопки бота (custom_menu_buttons.id) дозволені ролі. Кнопка-
+            -- батько (ДАННЫЕ) видима, коли дозволена хоч одна її дитина.
+            CREATE TABLE IF NOT EXISTS role_buttons (
+                role_key TEXT NOT NULL,
+                button_id INTEGER NOT NULL,
+                PRIMARY KEY (role_key, button_id)
+            );
+
             -- Задача користувача: "видаляю кнопку - вона потім знову
             -- з'являється". _seed_builtin_migrated_custom_buttons (нижче)
             -- звіряє лише "чи є ЗАРАЗ рядок із цим migration_key" - після
@@ -1641,6 +2146,27 @@ class ExcelSqliteStore:
         # (стор._sync_warehouse_item/apply_writeoff_operation), тож єдиний
         # запис аудиту - саме цей рядок stock_movements.
         self._ensure_column("stock_movements", "reason", "TEXT")
+        # Задача користувача (2026-09-05, ТЗ пункт 1): "вся операция должна
+        # сохраняться в истории как один обмен, а не как несколько
+        # отдельных операций" - раніше журнал знав лише окремі рядки без
+        # жодного звʼязку між ними. Номер документа ("Обмен №7") звʼязує
+        # всі рядки однієї операції; це ж фундамент для пунктів 7, 9, 12.
+        self._ensure_column("stock_movements", "document", "TEXT")
+        # Адмін-форма (2026-09-06): залишок після руху - щоб журнал показував
+        # «остаток 380 → 368» без перерахунку заднім числом.
+        self._ensure_column("stock_movements", "balance_after", "REAL")
+        # Сума операції в MDL (2026-09-06): продаж і антисептик у журналі
+        # показують дохід, а не «+м3».
+        self._ensure_column("stock_movements", "amount", "REAL")
+        # Відкат операції (рішення користувача, 2026-09-10): рух типу
+        # «rollback» пам'ятає, ЯКУ операцію він скасував (тип, час, автор,
+        # номер) - JSON у цій колонці; сам скасований рух видаляється.
+        self._ensure_column("stock_movements", "rollback_of", "TEXT")
+        # Відкат (2026-09-10): чи цей рух СТВОРИВ рядок СКЛАД (прихід нового
+        # розміру, «получаем» обміну). Без цієї ознаки відкат не відрізнить
+        # рядок, заведений операцією, від порожнього рядка, який лежав у
+        # таблиці до неї, - і стер би чужий.
+        self._ensure_column("stock_movements", "created_stock_row", "INTEGER")
         # Шаблони/недавні мега-форми (Задача користувача: "в історії
         # зберігається все... окрім ціни, штук") спершу забули адресу
         # вивантаження - вона теж мала зберігатись разом з клієнтом/оплатою.
@@ -1694,13 +2220,21 @@ class ExcelSqliteStore:
             )
         self._seed_builtin_bot_commands()
         self._seed_builtin_migrated_custom_buttons()
+        self._ensure_roles_seeded()
+        self.last_lath_rows_marked = 0
+        self.last_measures_filled = 0
+        self.last_stock_rows_normalized = 0
+        self.last_sales_numbered = {"sheet_rows": 0, "movements": 0, "journal_only": 0}
+        self.last_writeoffs_numbered = {"sheet_rows": 0, "movements": 0, "journal_only": 0}
         self._apply_standard_menu_policy()
+        self._drop_chat_calculator_once()
+        self._number_existing_sales_once()
         self._backfill_writeoff_root_action_code()
         self._backfill_writeoff_form_root_label()
         self._seed_builtin_operations()
         self._seed_report_operations()
         self._migrate_add_address_field()
-        self._migrate_osb_quantity_only()
+        self._migrate_osb_linear()
         self._fix_operation_field_language()
         self._simplify_measure_field_label()
         self._relabel_vagonka_measure_field()
@@ -1711,6 +2245,155 @@ class ExcelSqliteStore:
         self._seed_operation_category_synonyms()
         self._backfill_bot_user_names()
         self._seed_known_personnel()
+        self._normalize_existing_stock_once()
+        self._backfill_movement_amounts()
+        set_product_measure_kinds(self.product_measure_kinds())
+
+    # Сума для старих рухів (2026-09-06): продаж - із листа ПРОДАЖА за
+    # документом, розміром і кількістю; антисептик - з листа АНТИСЕПТИРОВАНИЕ
+    # за датою й об'ємом (у руху не було номера послуги). Береться лише
+    # однозначний збіг, інакше сума лишається порожньою. Разово.
+    # Нові продукти з вікна «Новый размер» (2026-09-07): одиниця виміру
+    # (app_meta JSON {назва: kind}) і три категорії у формах бота.
+    _PRODUCT_KINDS_KEY = "product_measure_kinds"
+    _NEW_PRODUCT_SOURCES = (("income_osb", "start_income", "income"), ("sale_osb", "start_sale", "sale"),
+                            ("writeoff_osb", "start_writeoff", "writeoff"))
+    _MEASURE_FIELD_LABELS = {"volume": "Количество, м3", "area": "Количество, м2", "linear": "Количество, мп"}
+
+    def product_measure_kinds(self):
+        row = self.conn.execute("SELECT value FROM app_meta WHERE key = ?", (self._PRODUCT_KINDS_KEY,)).fetchone()
+        try:
+            data = json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def set_product_measure_kind(self, product, kind):
+        mapping = self.product_measure_kinds()
+        mapping[str(product).strip()] = kind
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                              (self._PRODUCT_KINDS_KEY, json.dumps(mapping, ensure_ascii=False)))
+        set_product_measure_kinds(mapping)
+
+    def ensure_product_operations(self, product, measure_kind=None):
+        """Новий продукт сам стає категорією у формах бота (прихід, продаж,
+        списання) - копія полів «ОСБ» (без стану), підпис поля виміру за
+        одиницею; без виміру, коли одиниця «шт». Повертає id створених."""
+        product = str(product or "").strip()
+        if not product:
+            return []
+        created = []
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            for builtin_key, parent, kind in self._NEW_PRODUCT_SOURCES:
+                exists = any(
+                    row[2] == kind and _normalize_phrase((json.loads(row[6]) if row[6] else {}).get("product") or "") == _normalize_phrase(product)
+                    for row in self.list_operations(parent, include_disabled=True)
+                )
+                if exists:
+                    continue
+                source = self.conn.execute("SELECT id, requires_row_identity FROM bot_operations WHERE builtin_key = ?", (builtin_key,)).fetchone()
+                if source is None:
+                    continue
+                position = self.conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM bot_operations WHERE parent_action_code = ?", (parent,)).fetchone()[0]
+                base_code = "%s_%s" % (kind, _normalize_phrase(product).replace(" ", "_") or "product")
+                code, suffix = base_code, 2
+                while self.conn.execute("SELECT 1 FROM bot_operations WHERE code = ?", (code,)).fetchone():
+                    code, suffix = "%s_%d" % (base_code, suffix), suffix + 1
+                cursor = self.conn.execute(
+                    "INSERT INTO bot_operations (code, kind, requires_row_identity, label, parent_action_code, prefill_json, position, enabled, builtin_key, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)",
+                    (code, kind, source[1], product.upper(), parent, json.dumps({"product": product}, ensure_ascii=False), position, now, now),
+                )
+                operation_id = cursor.lastrowid
+                fields = self.conn.execute(
+                    "SELECT id, field_key, label, is_identity, position, enabled FROM bot_operation_fields WHERE operation_id = ? ORDER BY position, id",
+                    (source[0],),
+                ).fetchall()
+                for field_id, field_key, label, is_identity, field_position, enabled in fields:
+                    if field_key == "measure":
+                        if measure_kind in (None, "quantity"):
+                            continue
+                        label = self._MEASURE_FIELD_LABELS.get(measure_kind, label)
+                    field_cursor = self.conn.execute(
+                        "INSERT INTO bot_operation_fields (operation_id, field_key, label, is_identity, position, enabled, builtin_key, created_at, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                        (operation_id, field_key, label, is_identity, field_position, enabled, now, now),
+                    )
+                    columns = self.conn.execute(
+                        "SELECT sheet, column_key, marker, write_mode, position FROM bot_operation_field_columns WHERE operation_field_id = ? ORDER BY position, id",
+                        (field_id,),
+                    ).fetchall()
+                    for column in columns:
+                        self.conn.execute(
+                            "INSERT INTO bot_operation_field_columns (operation_field_id, sheet, column_key, marker, write_mode, position, builtin_key, created_at, updated_at)"
+                            " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                            (field_cursor.lastrowid, *column, now, now),
+                        )
+                created.append(operation_id)
+        return created
+
+    _MOVEMENT_AMOUNTS_KEY = "movement_amounts_v1"
+
+    def _backfill_movement_amounts(self, force=False):
+        if not force and self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (self._MOVEMENT_AMOUNTS_KEY,)).fetchone():
+            return 0
+        updated = 0
+        with self.conn:
+            sales_headers = self.get_headers(SALES_SHEET_NAME)
+            if sales_headers:
+                cols = sales_columns(sales_headers)
+                by_document = {}
+                for _row_id, values in self.fetch_rows(SALES_SHEET_NAME, 1000000, 0):
+                    document = str(row_value(values, cols.get("document")) or "").strip()
+                    if document:
+                        by_document.setdefault(document, []).append(values)
+                rows = self.conn.execute(
+                    "SELECT id, document, thickness, width, length, quantity FROM stock_movements"
+                    " WHERE movement_type = 'sale' AND amount IS NULL AND document IS NOT NULL"
+                ).fetchall()
+                for movement_id, document, thickness, width, length, quantity in rows:
+                    candidates = [
+                        values for values in by_document.get(str(document).strip(), [])
+                        if _same_number(row_value(values, cols.get("thickness")), thickness)
+                        and _same_number(row_value(values, cols.get("width")), width)
+                        and _same_number(row_value(values, cols.get("length")), length)
+                        and _same_number(row_value(values, cols.get("quantity")), quantity)
+                    ]
+                    amounts = {round(_sheet_amount(values, cols), 2) for values in candidates if _sheet_amount(values, cols) is not None}
+                    if len(amounts) == 1:
+                        self.conn.execute("UPDATE stock_movements SET amount = ? WHERE id = ?", (amounts.pop(), movement_id))
+                        updated += 1
+            anti_headers = self.get_headers(ANTISEPTIC_SHEET_NAME)
+            if anti_headers:
+                cols = antiseptic_columns(anti_headers)
+                by_day = {}
+                for _row_id, values in self.fetch_rows(ANTISEPTIC_SHEET_NAME, 1000000, 0):
+                    day = _parse_date_text(str(row_value(values, cols.get("date")) or "")[:10])
+                    if day:
+                        by_day.setdefault(day.isoformat(), []).append(values)
+                rows = self.conn.execute(
+                    "SELECT id, created_at, volume, document FROM stock_movements"
+                    " WHERE movement_type = 'antiseptic' AND amount IS NULL"
+                ).fetchall()
+                for movement_id, created_at, volume, document in rows:
+                    candidates = [
+                        values for values in by_day.get(str(created_at or "")[:10], [])
+                        if _same_number(row_value(values, cols.get("volume")), volume)
+                    ]
+                    amounts = {round(_sheet_amount(values, cols), 2) for values in candidates if _sheet_amount(values, cols) is not None}
+                    if len(amounts) != 1:
+                        continue
+                    numbers = {str(row_value(values, cols.get("service_number")) or "").strip() for values in candidates}
+                    number = numbers.pop() if len(numbers) == 1 else None
+                    self.conn.execute(
+                        "UPDATE stock_movements SET amount = ?, document = COALESCE(NULLIF(document, ''), ?) WHERE id = ?",
+                        (amounts.pop(), number, movement_id),
+                    )
+                    updated += 1
+            self.conn.execute("INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, '1')", (self._MOVEMENT_AMOUNTS_KEY,))
+        return updated
 
     def _ensure_column(self, table_name, column_name, column_sql):
         columns = {
@@ -1844,9 +2527,125 @@ class ExcelSqliteStore:
     # пізніше вручну увімкне (enabled=1) приховану кнопку через Редактор
     # кнопок — мітка 'resolved' вже стоїть, тож жоден майбутній запуск
     # застосунку більше НІКОЛИ не поверне її назад у enabled=0.
+    # Реальна помилка (2026-09-05, знайшов користувач: "чому ти зробив цю
+    # кнопку прихованою?"): "ОБМЕН (форма)" додали в BUILTIN_MIGRATED_
+    # CUSTOM_BUTTONS, але не сюди - і політика нижче чесно сховала її при
+    # першому запуску, як колись старі чатові кнопки. Усі кнопки "(форма)"
+    # - це і є стандартне меню, тож нова "(форма)" мусить бути тут.
     _STANDARD_MENU_ROOT_MIGRATION_KEYS = frozenset(
-        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form"}
+        {"income_form", "sale_form", "antiseptic_form", "writeoff_form", "data_browser_form",
+         "exchange_form", "admin_form", "calculator_form"}
     )
+
+    # Рішення користувача (2026-09-07): «звичайний калькулятор в чаті -
+    # видали зовсім». На вже наявних базах лишаються сліди: рядок команди
+    # з її словами-синонімами, стара (схована) кнопка «Калькулятор» з
+    # мертвою дією і - найважливіше - незакриті стани очікування виразу,
+    # через які бот відповідав «Не смог посчитать» на кожне натискання
+    # меню. Прибираємо все це рівно один раз.
+    def _drop_chat_calculator_once(self):
+        marker = "chat_calculator_removed_v1"
+        with self.conn:
+            done = self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (marker,)).fetchone()
+            if done:
+                return
+            self.conn.execute("DELETE FROM bot_pending_operations WHERE operation_type = 'calculator'")
+            self.conn.execute("DELETE FROM custom_menu_buttons WHERE migration_key = 'calculator'")
+            self.conn.execute("DELETE FROM bot_commands WHERE code = 'calculator'")
+            self.conn.execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, '1')", (marker,))
+
+    # Разова нумерація продажів (рішення користувача, 2026-09-10):
+    # «пронумерувати які вже є, а далі просто надавати новий вільний номер»;
+    # «якщо у продажи був відкат - то номер не видаляється». Друге виконано
+    # само собою: document_counters лише зростає й ніколи не переприсвоює.
+    _SALES_NUMBERED_KEY = "sales_numbered_v1"
+    _WRITEOFFS_NUMBERED_KEY = "writeoffs_numbered_v1"
+
+    def _number_existing_sales_once(self):
+        self.last_sales_numbered = self._number_existing_documents_once(
+            self._SALES_NUMBERED_KEY, SALES_SHEET_NAME, sales_columns, "sale", "Продажа №",
+        )
+        self.last_writeoffs_numbered = self._number_existing_documents_once(
+            self._WRITEOFFS_NUMBERED_KEY, WRITEOFF_SHEET_NAME, writeoff_columns, "writeoff", "Списание №",
+        )
+
+    def _number_existing_documents_once(self, marker, sheet_name, columns_of, movement_type, prefix):
+        empty = {"sheet_rows": 0, "movements": 0, "journal_only": 0}
+        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (marker,)).fetchone():
+            return empty
+        headers = self.get_headers(sheet_name)
+        if not headers:
+            return empty
+        index = columns_of(headers).get("document")
+        if index is None:
+            return empty
+        sheet_rows = self.conn.execute(
+            "SELECT id, values_json, updated_at FROM sheet_rows WHERE sheet_name = ? ORDER BY position, id",
+            (sheet_name,),
+        ).fetchall()
+        used = set()
+        for _row_id, values_json, _stamp in sheet_rows:
+            number = _document_number_from_text(row_value(_deserialize_row(values_json), index), prefix)
+            if number is not None:
+                used.add(number)
+        next_number = (max(used) + 1) if used else 1
+
+        numbered_rows = 0
+        numbers_by_stamp = {}
+        with self.conn:
+            for row_id, values_json, stamp in sheet_rows:
+                values = _deserialize_row(values_json)
+                number = _document_number_from_text(row_value(values, index), prefix)
+                if number is None:
+                    number = next_number
+                    next_number += 1
+                    set_value(values, index, "%s%d" % (prefix, number))
+                    # Пряме оновлення, а не update_row: updated_at має
+                    # лишитись часом операції - за ним відкат знаходить
+                    # рядки свого листа.
+                    self.conn.execute(
+                        "UPDATE sheet_rows SET values_json = ? WHERE id = ?", (_serialize_row(values), row_id),
+                    )
+                    numbered_rows += 1
+                numbers_by_stamp.setdefault(stamp, set()).add(number)
+
+            numbered_movements = 0
+            journal_only = 0
+            movements = self.conn.execute(
+                "SELECT id, created_at, telegram_user_id FROM stock_movements"
+                " WHERE movement_type = ? AND (document IS NULL OR document = '')"
+                " ORDER BY created_at, id", (movement_type,),
+            ).fetchall()
+            fresh_by_group = {}
+            for movement_id, created_at, user_id in movements:
+                found = numbers_by_stamp.get(created_at) or set()
+                if len(found) == 1:
+                    number = next(iter(found))
+                else:
+                    # Рядка листа за часом не знайшлось (лист перечитували
+                    # чи правили) - даємо номер лише руху, щоб операція в
+                    # журналі перестала бути безіменною.
+                    group = (created_at, str(user_id or ""))
+                    if group not in fresh_by_group:
+                        fresh_by_group[group] = next_number
+                        next_number += 1
+                        journal_only += 1
+                    number = fresh_by_group[group]
+                self.conn.execute(
+                    "UPDATE stock_movements SET document = ? WHERE id = ?",
+                    ("%s%d" % (prefix, number), movement_id),
+                )
+                numbered_movements += 1
+
+            self.conn.execute(
+                "INSERT INTO document_counters (sheet_name, next_number) VALUES (?, ?)"
+                " ON CONFLICT(sheet_name) DO UPDATE SET next_number = MAX(next_number, excluded.next_number)",
+                (sheet_name, next_number),
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, '1')", (marker,),
+            )
+        return {"sheet_rows": numbered_rows, "movements": numbered_movements, "journal_only": journal_only}
 
     def _apply_standard_menu_policy(self):
         with self.conn:
@@ -1882,6 +2681,31 @@ class ExcelSqliteStore:
                 )
                 self.conn.execute(
                     "INSERT INTO app_meta (key, value) VALUES (?, '1')", (meta_key,)
+                )
+            # Повернення "ОБМЕН (форма)" там, де політика вище встигла її
+            # сховати до виправлення білого списку (2026-09-05). Рівно один
+            # раз: далі рішення адміністратора в Редакторі кнопок - остаточне.
+            restored = self.conn.execute(
+                "SELECT 1 FROM app_meta WHERE key = 'exchange_form_restored_once'"
+            ).fetchone()
+            if not restored:
+                self.conn.execute(
+                    "UPDATE custom_menu_buttons SET enabled = 1 WHERE migration_key = 'exchange_form'"
+                )
+                self.conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES ('exchange_form_restored_once', '1')"
+                )
+            # Адмін-форма (2026-09-06): показати кнопку рівно один раз, далі -
+            # рішення адміністратора в Редакторі кнопок.
+            restored_admin = self.conn.execute(
+                "SELECT 1 FROM app_meta WHERE key = 'admin_form_restored_once'"
+            ).fetchone()
+            if not restored_admin:
+                self.conn.execute(
+                    "UPDATE custom_menu_buttons SET enabled = 1 WHERE migration_key = 'admin_form'"
+                )
+                self.conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES ('admin_form_restored_once', '1')"
                 )
 
     # "Хмарна істина" (standard_menu_cloud.py) — Задача користувача
@@ -1920,27 +2744,168 @@ class ExcelSqliteStore:
         self._reset_file_scoped_state_if_source_changed()
         for worksheet in workbook.worksheets:
             self.import_sheet(worksheet, worksheet.title in read_only_sheets)
+        # Рейка (2026-09-06): одразу після імпорту рядки з перерізом рейки
+        # отримують «(рейка)» у продукті й «мп» в одиниці; викликач
+        # (client_app/gui) синхронізує СКЛАД назад у Excel, якщо щось змінилось.
+        counts = self.normalize_stock_rows() if "СКЛАД" in workbook.sheetnames else {"rows": 0, "lath": 0, "measures": 0}
+        self.last_lath_rows_marked = counts["lath"]
+        self.last_measures_filled = counts["measures"]
+        self.last_stock_rows_normalized = counts["rows"]
+        return self.last_lath_rows_marked
 
-    # Задача користувача (2026-08-14): "ніяких перенесень. всі таблиці і
-    # дані з таблиць ЛИШЕ ПЕРСОНАЛЬНІ і не мають ЖОДНІ дані бути
-    # пов'язаними між таблицями, жодні" — приводом стало те, що номер
-    # документа ("Приход №28") діставався з наскрізного лічильника
-    # (document_counters), який не знав, що підключений файл змінився на
-    # зовсім інший, порожній. Тут — єдина точка (import_workbook, спільна
-    # для gui.py й client_app.py), де перевіряється, чи excel_source
-    # вказує на ІНШИЙ файл, ніж минулого разу; якщо так — стан, похідний
-    # від вмісту ПОПЕРЕДНЬОГО файлу, скидається, щоб не протікав у новий:
-    #   - document_counters (нумерація Приход/Продажа/Списание/Услуга)
-    #   - operation_recent_uses ("останні використані" підказки форми)
-    #   - client_name_aliases (вивчені виправлення одруків клієнтів)
-    #   - stock_movements (журнал приход/продажа/списание/антисептирование,
-    #     на якому побудований репорт бота "скільки прийшло за період") —
-    #     спершу лишав окремо (реальна історія, не кеш), але Задача
-    #     користувача (2026-08-14, одразу після пояснення що це таке):
-    #     "а, так, його скидаємо" — підтверджено явно, тож теж входить.
-    # Перший запуск (ще немає збереженого excel_source_identity) НІЧОГО
-    # не скидає — лише запам'ятовує поточний файл, щоб не знищити вже
-    # накопичені реальні дані існуючих встановлень одразу після оновлення.
+    def normalize_lath_rows(self):
+        return self.normalize_stock_rows()["lath"]
+
+    def _stock_measure_plan(self, headers):
+        """(columns, by_header) для рядків СКЛАД; кешується за заголовками."""
+        key = tuple(headers)
+        cached = getattr(self, "_stock_plan_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        columns = warehouse_columns(headers)
+        by_header = {}
+        for index, header in enumerate(headers):
+            phrase = _normalize_phrase(header)
+            if phrase and phrase not in by_header:
+                by_header[phrase] = index
+        plan = (columns, by_header)
+        self._stock_plan_cache = (key, plan)
+        return plan
+
+    # Правда - штуки (рішення користувача 2026-09-06): для одного рядка СКЛАД
+    # кожна клітинка виміру (м3/м2/мп) = штуки × вимір за штуку в тій самій
+    # четвірці (начальный, приход, продано, остаток); заповнена клітинка теж
+    # перезаписується, коли не сходиться; при нулі штук - нуль. Одна й та
+    # сама функція для імпорту (normalize_stock_rows) і для кожного запису
+    # (update_row/add_row), тож вимір ніколи не розходиться зі штуками.
+    # Повертає (нові значення, скільки клітинок змінено).
+    def _measures_from_pieces(self, values, headers):
+        columns, by_header = self._stock_measure_plan(headers)
+        if any(columns.get(key) is None for key in ("product", "thickness", "width", "length")):
+            return values, 0
+        product = row_value(values, columns["product"])
+        if product in (None, ""):
+            return values, 0
+        thickness = row_value(values, columns["thickness"])
+        width = row_value(values, columns["width"])
+        length = row_value(values, columns["length"])
+        kind = _shared_row_measure_kind(plain_product_name(product), thickness, width)
+        if kind is None:
+            return values, 0
+        piece = _shared_piece_measure(thickness, width, length, kind)
+        if piece <= 0:
+            return values, 0
+        new_values = list(values)
+        changed = 0
+        for qty_header, measure_header in zip(_WAREHOUSE_QTY_HEADERS, _WAREHOUSE_MEASURE_HEADERS[kind]):
+            qty_index = by_header.get(_normalize_phrase(qty_header))
+            measure_index = by_header.get(_normalize_phrase(measure_header))
+            if qty_index is None or measure_index is None:
+                continue
+            quantity = row_value(values, qty_index)
+            if quantity in (None, ""):
+                continue
+            try:
+                quantity = float(str(quantity).replace(",", "."))
+            except ValueError:
+                continue
+            raw_measure = row_value(values, measure_index)
+            computed = round(quantity * piece, 6)
+            if raw_measure not in (None, "") and abs(_number_value(raw_measure) - computed) <= 1e-6:
+                continue
+            set_value(new_values, measure_index, computed)
+            changed += 1
+        return new_values, changed
+
+    # Разовий перерахунок на ВЖЕ імпортованій базі (2026-09-06): раніше
+    # normalize_stock_rows викликався лише з import_workbook, тож база,
+    # імпортована до появи «ОСБ у мп», лишалась із порожньою «Остаток, мп» і
+    # одиницею «шт» - а порожній вимір обнуляв залишок ОСБ у формі продажу.
+    # v3 - «правда - штуки»: перераховуються і заповнені клітинки.
+    # Наступний імпорт Excel синхронізує пораховане назад у таблицю.
+    _STOCK_NORMALIZED_KEY = "stock_measures_normalized_v3"
+
+    def _normalize_existing_stock_once(self):
+        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = ?", (self._STOCK_NORMALIZED_KEY,)).fetchone():
+            return
+        counts = self.normalize_stock_rows()
+        self.last_lath_rows_marked = counts["lath"]
+        self.last_measures_filled = counts["measures"]
+        self.last_stock_rows_normalized = counts["rows"]
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, '1')", (self._STOCK_NORMALIZED_KEY,))
+
+    _UNIT_LABEL_BY_KIND = {"volume": "м3", "area": "м2", "linear": "мп"}
+
+    def normalize_stock_rows(self):
+        """Після імпорту СКЛАД: позначка «(рейка)», одиниця виміру за видом
+        товару в «Основная ед. учета» і перерахунок клітинок виміру з
+        кількості штук. Рішення користувача 2026-09-06: «правда - штуки; штук
+        0, значить одиниця виміру = 0; поправити можна самому» - вимір
+        завжди рахується зі штук, розбіжність перезаписується, без питань.
+        Повертає {"rows", "lath", "measures"}."""
+        headers = self.get_headers("СКЛАД")
+        if not headers:
+            return {"rows": 0, "lath": 0, "measures": 0}
+        columns = warehouse_columns(headers)
+        if any(columns.get(key) is None for key in ("product", "thickness", "width", "length")):
+            return {"rows": 0, "lath": 0, "measures": 0}
+        by_header = {}
+        for index, header in enumerate(headers):
+            key = _normalize_phrase(header)
+            if key and key not in by_header:
+                by_header[key] = index
+        unit_column = columns.get("unit")
+        condition_column = columns.get("condition")
+        # Сухість (AD/KD) у старих рядках могла жити лише в назві («Доска
+        # AD»); після перейменування на «Рейка» вона там не лишиться, тож
+        # переносимо її в колонку «Состояние». Перелік станів беремо з самої
+        # таблиці, нічого не зашиваємо.
+        known_conditions = set()
+        if condition_column is not None:
+            for _row_id, values in self.fetch_rows("СКЛАД", 100000, 0):
+                value = str(row_value(values, condition_column) or "").strip()
+                if value:
+                    known_conditions.add(value)
+        now = datetime.now().isoformat(timespec="seconds")
+        counts = {"rows": 0, "lath": 0, "measures": 0}
+        with self.conn:
+            for row_id, values in self.fetch_rows("СКЛАД", 100000, 0):
+                values = list(values)
+                product = row_value(values, columns["product"])
+                if product in (None, ""):
+                    continue
+                thickness = row_value(values, columns["thickness"])
+                width = row_value(values, columns["width"])
+                length = row_value(values, columns["length"])
+                kind = _shared_row_measure_kind(plain_product_name(product), thickness, width)
+                if kind is None:
+                    continue
+                new_values = list(values)
+                if is_lath_row(product, thickness, width):
+                    if condition_column is not None and not str(row_value(values, condition_column) or "").strip():
+                        plain = str(plain_product_name(product) or "")
+                        for condition in sorted(known_conditions, key=len, reverse=True):
+                            if plain.lower().endswith(" " + condition.lower()):
+                                set_value(new_values, condition_column, condition)
+                                break
+                    set_value(new_values, columns["product"], lath_product_name(product, thickness, width))
+                if unit_column is not None:
+                    set_value(new_values, unit_column, self._UNIT_LABEL_BY_KIND[kind])
+                new_values, filled = self._measures_from_pieces(new_values, headers)
+                if new_values == values:
+                    continue
+                self.conn.execute(
+                    "UPDATE sheet_rows SET values_json = ?, updated_at = ? WHERE id = ?",
+                    (_serialize_row(new_values), now, row_id),
+                )
+                self._sync_warehouse_item(row_id, "СКЛАД", new_values)
+                counts["rows"] += 1
+                counts["measures"] += filled
+                if row_value(new_values, columns["product"]) != product:
+                    counts["lath"] += 1
+        return counts
+
     def _reset_file_scoped_state_if_source_changed(self):
         current_identity = excel_source.current_source_identity()
         row = self.conn.execute(
@@ -2139,6 +3104,9 @@ class ExcelSqliteStore:
         row = self.conn.execute(
             "SELECT sheet_name FROM sheet_rows WHERE id = ?", (row_id,)
         ).fetchone()
+        if row and row[0] == "СКЛАД":
+            # Правда - штуки (2026-09-06): вимір рядка зі штук при кожному записі.
+            values, _changed = self._measures_from_pieces(list(values), self.get_headers("СКЛАД"))
         self.conn.execute(
             """
             UPDATE sheet_rows
@@ -2154,6 +3122,9 @@ class ExcelSqliteStore:
 
     def add_row(self, sheet_name, values):
         was_in_transaction = self.conn.in_transaction
+        if sheet_name == "СКЛАД":
+            # Правда - штуки (2026-09-06): нова позиція теж зі штук.
+            values, _changed = self._measures_from_pieces(list(values), self.get_headers("СКЛАД"))
         cursor = self.conn.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM sheet_rows WHERE sheet_name = ?",
             (sheet_name,),
@@ -2545,6 +3516,31 @@ class ExcelSqliteStore:
     # обидва як прийшли — виконавець (_enter_custom_button_node,
     # telegram_dialog.py) перевіряє operation_id ПЕРШИМ, тож навіть якщо
     # обидва колись опиняться заповненими, поведінка лишається однозначною.
+    # Задача користувача (2026-09-05): "ставити статус прихованої в самому
+    # редакторі кнопок" - раніше enabled міняли лише міграції та хмара, а
+    # редактор тільки писав "(скрыта)" і нічим не давав це змінити.
+    def set_custom_button_enabled(self, node_id, enabled):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE custom_menu_buttons SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, now, node_id),
+            )
+
+    def custom_button_migration_key(self, node_id):
+        row = self.conn.execute(
+            "SELECT migration_key FROM custom_menu_buttons WHERE id = ?", (node_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    # Видимість КОРЕНЕВИХ вбудованих кнопок живе ще й у хмарі (стандартне
+    # меню, standard_menu_cloud): без цього запису наступний старт клієнта
+    # повернув би стан із хмари поверх щойно натиснутого 👁.
+    def standard_menu_state_if_root_builtin(self, node_id):
+        if self.custom_button_migration_key(node_id) not in self.get_standard_menu_root_keys():
+            return None
+        return self.get_standard_menu_state()
+
     def update_custom_button(self, node_id, label, message_text, action_code, layout="full", operation_id=None):
         now = datetime.now().isoformat(timespec="seconds")
         with self.conn:
@@ -2658,6 +3654,11 @@ class ExcelSqliteStore:
                     (row[0], now),
                 )
             self.conn.execute("DELETE FROM custom_menu_buttons WHERE id = ?", (node_id,))
+            # Дозволи ролей на видалену кнопку (і її дітей, знесених
+            # каскадом) більше ні на що не вказують - прибираємо.
+            self.conn.execute(
+                "DELETE FROM role_buttons WHERE button_id NOT IN (SELECT id FROM custom_menu_buttons)"
+            )
 
     # --- Крок 3+ "Дії": bot_operations / bot_operation_fields /
     # bot_operation_field_columns (дія-категорія -> поля-запити -> прив'язки
@@ -2720,142 +3721,6 @@ class ExcelSqliteStore:
     # Задача користувача: "5 занадто багато місця займає" - 3 рядки на
     # панель (шаблони і недавні окремо).
     _OPERATION_TEMPLATE_LIMIT = 3
-
-    def add_operation_template(
-        self, kind, category_operation_id, breed=None, thickness=None, width=None,
-        length=None, client=None, address=None, payment_method=None,
-    ):
-        # Задача користувача: "мають бути лише унікальні шаблони. однакових
-        # там не має бути" - унікальність рахується за тим, що РЕАЛЬНО
-        # показано в рядку панелі (категорія/порода/розмір/спосіб оплати),
-        # а НЕ за клієнтом/адресою - вони в списку взагалі не відображаються,
-        # тож два шаблони, що відрізняються лише невидимим клієнтом,
-        # виглядали б як дублікат. "IS" (не "=") коректно порівнює й NULL.
-        with self.conn:
-            existing = self.conn.execute(
-                """
-                SELECT id FROM operation_templates
-                WHERE kind = ? AND category_operation_id = ?
-                  AND breed IS ? AND thickness IS ? AND width IS ? AND length IS ?
-                  AND payment_method IS ?
-                """,
-                (kind, category_operation_id, breed, thickness, width, length, payment_method),
-            ).fetchone()
-            if existing is not None:
-                return
-            now = datetime.now().isoformat(timespec="seconds")
-            self.conn.execute(
-                """
-                INSERT INTO operation_templates
-                    (kind, category_operation_id, breed, thickness, width, length,
-                     client, address, payment_method, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (kind, category_operation_id, breed, thickness, width, length, client, address, payment_method, now),
-            )
-            # Задача користувача: рівно 5 рядків на панель — найстаріший
-            # шаблон цього kind мовчки поступається місцем новому 6-му,
-            # без окремого видалення користувачем (той самий "FIFO-вітрина"
-            # принцип, що й у db-знімків/резервних копій).
-            excess_ids = [
-                row[0]
-                for row in self.conn.execute(
-                    "SELECT id FROM operation_templates WHERE kind = ? ORDER BY created_at DESC, id DESC",
-                    (kind,),
-                ).fetchall()[self._OPERATION_TEMPLATE_LIMIT:]
-            ]
-            if excess_ids:
-                placeholders = ",".join("?" for _ in excess_ids)
-                self.conn.execute(f"DELETE FROM operation_templates WHERE id IN ({placeholders})", excess_ids)
-
-    def list_operation_templates(self, kind, limit=_OPERATION_TEMPLATE_LIMIT):
-        return self.conn.execute(
-            """
-            SELECT id, category_operation_id, breed, thickness, width, length, client, address, payment_method
-            FROM operation_templates WHERE kind = ? ORDER BY created_at DESC, id DESC LIMIT ?
-            """,
-            (kind, limit),
-        ).fetchall()
-
-    def delete_operation_template(self, template_id):
-        with self.conn:
-            self.conn.execute("DELETE FROM operation_templates WHERE id = ?", (template_id,))
-
-    # "5 останніх створених" — жива історія подань мега-форми, наповнюється
-    # автоматично (record_operation_use), не користувачем. Дедуплікація —
-    # у Python (recent_operation_uses), не в SQL: ключ поєднує кілька NULL-
-    # придатних полів (client/payment_method відсутні для income/writeoff),
-    # а SQLite DISTINCT трактує NULL непередбачувано для такого випадку.
-    def record_operation_use(
-        self, kind, category_operation_id, breed=None, thickness=None, width=None,
-        length=None, client=None, address=None, payment_method=None,
-    ):
-        if category_operation_id is None:
-            return
-        now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO operation_recent_uses
-                    (kind, category_operation_id, breed, thickness, width, length,
-                     client, address, payment_method, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (kind, category_operation_id, breed, thickness, width, length, client, address, payment_method, now),
-            )
-            # Дешева гігієна диска — лишаємо із запасом (10x показуваного
-            # ліміту) на дедуплікацію в recent_operation_uses, не тримаємо
-            # необмежену історію.
-            excess_ids = [
-                row[0]
-                for row in self.conn.execute(
-                    "SELECT id FROM operation_recent_uses WHERE kind = ? ORDER BY created_at DESC, id DESC",
-                    (kind,),
-                ).fetchall()[self._OPERATION_TEMPLATE_LIMIT * 10:]
-            ]
-            if excess_ids:
-                placeholders = ",".join("?" for _ in excess_ids)
-                self.conn.execute(f"DELETE FROM operation_recent_uses WHERE id IN ({placeholders})", excess_ids)
-
-    def recent_operation_uses(self, kind, limit=_OPERATION_TEMPLATE_LIMIT):
-        rows = self.conn.execute(
-            """
-            SELECT id, category_operation_id, breed, thickness, width, length, client, address, payment_method
-            FROM operation_recent_uses WHERE kind = ? ORDER BY created_at DESC, id DESC LIMIT ?
-            """,
-            (kind, self._OPERATION_TEMPLATE_LIMIT * 10),
-        ).fetchall()
-        # Дедуплікація за ВМІСТОМ (без id, який завжди унікальний) - id
-        # лишається в поверненому рядку, щоб GUI/webapp могли видалити
-        # САМЕ цей конкретний запис (найновіший серед дублікатів, бо
-        # ORDER BY created_at DESC).
-        seen = set()
-        unique = []
-        for row in rows:
-            signature = row[1:]
-            if signature in seen:
-                continue
-            seen.add(signature)
-            unique.append(row)
-            if len(unique) >= limit:
-                break
-        return unique
-
-    def get_operation_template(self, template_id):
-        return self.conn.execute(
-            "SELECT id, kind, category_operation_id FROM operation_templates WHERE id = ?",
-            (template_id,),
-        ).fetchone()
-
-    def get_operation_recent_use(self, use_id):
-        return self.conn.execute(
-            "SELECT id, kind, category_operation_id FROM operation_recent_uses WHERE id = ?",
-            (use_id,),
-        ).fetchone()
-
-    def delete_operation_recent_use(self, use_id):
-        with self.conn:
-            self.conn.execute("DELETE FROM operation_recent_uses WHERE id = ?", (use_id,))
 
     def list_operation_fields(self, operation_id, include_disabled=False):
         query = (
@@ -2935,10 +3800,10 @@ class ExcelSqliteStore:
     # write просто пропускає прив'язку, якщо відповідне значення в item
     # відсутнє, тож зайві прив'язки безпечні) — саме ті два поля, чиї
     # прив'язки на СКЛАД є write_mode='generic' (просте +/-).
-    def _seed_quantity_measure_fields(self, operation_id, kind, now):
+    def _seed_quantity_measure_fields(self, operation_id, kind, now, measure_label="Количество, м3"):
         qty_field_id = self._insert_operation_field(operation_id, "quantity", "Количество, шт", False, "quantity", now)
         measure_field_id = self._insert_operation_field(
-            operation_id, "measure", "Количество, м3", False, "measure", now
+            operation_id, "measure", measure_label, False, "measure", now
         )
         if kind == "income":
             self._insert_operation_field_column(qty_field_id, "СКЛАД", "income_qty", "add", "generic", "income_qty", now)
@@ -3058,7 +3923,7 @@ class ExcelSqliteStore:
                 )
                 operation_id = cursor.lastrowid
                 self._seed_warehouse_identity_fields(operation_id, entry["condition_identity"], now)
-                self._seed_quantity_measure_fields(operation_id, entry["kind"], now)
+                self._seed_quantity_measure_fields(operation_id, entry["kind"], now, entry.get("measure_label", "Количество, м3"))
                 if entry["kind"] == "sale":
                     self._seed_sale_ledger_fields(operation_id, now)
 
@@ -3185,29 +4050,51 @@ class ExcelSqliteStore:
     # треба. Ідемпотентно (як і сусідні одноразові міграції вище): якщо
     # поле вже відсутнє (попереднім запуском ЦІЄЇ міграції) — просто
     # пропускаємо.
-    def _migrate_osb_quantity_only(self):
-        for code in ("income_osb", "sale_osb"):
-            operation_row = self.conn.execute(
-                "SELECT id FROM bot_operations WHERE builtin_key = ?", (code,)
-            ).fetchone()
+    def _seed_measure_field(self, operation_id, kind, now, label="Количество, м3"):
+        """Поле виміру з прив'язками до колонок - те саме, що засіває
+        _seed_quantity_measure_fields, лише без поля кількості."""
+        measure_field_id = self._insert_operation_field(operation_id, "measure", label, False, "measure", now)
+        if kind == "income":
+            for suffix in ("volume", "area", "linear"):
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"income_{suffix}", "add", "generic", f"income_{suffix}", now)
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"balance_{suffix}", "add", "generic", f"balance_{suffix}", now)
+        elif kind == "sale":
+            for suffix in ("volume", "area", "linear"):
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"sold_{suffix}", "add", "generic", f"sold_{suffix}", now)
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"balance_{suffix}", "subtract", "generic", f"balance_{suffix}", now)
+                self._insert_operation_field_column(measure_field_id, SALES_SHEET_NAME, f"total_{suffix}", "add", "ledger", f"sales_total_{suffix}", now)
+        else:
+            for suffix in ("volume", "area", "linear"):
+                self._insert_operation_field_column(measure_field_id, "СКЛАД", f"balance_{suffix}", "subtract", "generic", f"balance_{suffix}", now)
+        return measure_field_id
+
+    # ОСБ у мп (рішення користувача 2026-09-06): раніше _migrate_osb_quantity_
+    # only прибирала поле виміру з операцій ОСБ (облік лише в штуках) -
+    # тепер поле повертається з підписом «Количество, мп», одноразово
+    # (app_meta osb_linear_v1), щоб не сперечатись із правками адміністратора.
+    def _migrate_osb_linear(self):
+        if self.conn.execute("SELECT 1 FROM app_meta WHERE key = 'osb_linear_v1'").fetchone():
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        for code, kind in (("income_osb", "income"), ("sale_osb", "sale"), ("writeoff_osb", "writeoff")):
+            operation_row = self.conn.execute("SELECT id FROM bot_operations WHERE builtin_key = ?", (code,)).fetchone()
             if operation_row is None:
                 continue
-            field_row = self.conn.execute(
-                "SELECT id, builtin_key FROM bot_operation_fields WHERE operation_id = ? AND field_key = 'measure'",
-                (operation_row[0],),
+            exists = self.conn.execute(
+                "SELECT 1 FROM bot_operation_fields WHERE operation_id = ? AND field_key = 'measure'", (operation_row[0],)
             ).fetchone()
-            if field_row is None:
-                continue
-            # Свіжий пере-аудит (New-Notable #7): без цієї перевірки міграція
-            # (виконується на КОЖЕН старт програми) видаляла б і поле, яке
-            # адміністратор навмисно ЗАНОВО додав через "Дії" - той самий
-            # provenance-гвард, що вже застосовує сусідня _remove_noop_
-            # identity_bindings (перевіряє builtin_key перед автовидаленням
-            # вручну доданих рядків). Видаляємо ЛИШЕ оригінально засіяне поле.
-            if field_row[1] != "measure":
+            if exists:
+                with self.conn:
+                    self.conn.execute(
+                        "UPDATE bot_operation_fields SET label = 'Количество, мп' WHERE operation_id = ? AND field_key = 'measure'"
+                        " AND builtin_key = 'measure' AND label = 'Количество, м3'",
+                        (operation_row[0],),
+                    )
                 continue
             with self.conn:
-                self.conn.execute("DELETE FROM bot_operation_fields WHERE id = ?", (field_row[0],))
+                self._seed_measure_field(operation_row[0], kind, now, label="Количество, мп")
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('osb_linear_v1', '1')")
 
     # Одноразове виправлення мови (Задача користувача, знайдено при
     # підключенні чек-листа до конфігурації): перший сідінг (Крок 3+
@@ -3505,6 +4392,296 @@ class ExcelSqliteStore:
                             field_id, entry["sheet"], column_key, "info", "ledger", field_key, now
                         )
 
+
+    # ---------------- Ролі та кнопки ролей (2026-09-06) ----------------
+    # Початкові набори кнопок за ролями - з тих прав, що були зашиті в
+    # permissions.ROLE_PERMISSIONS до цього; далі все правиться руками в
+    # «Кнопки ролей». Ключі - migration_key з BUILTIN_MIGRATED_CUSTOM_BUTTONS.
+    _DEFAULT_ROLE_BUTTON_KEYS = {
+        permissions.WAREHOUSE: (
+            "income", "income_form", "sale", "sale_form", "antiseptic_form", "writeoff", "writeoff_form",
+            "exchange_form", "data_browser_form", "stock_report_section", "sales_report_section",
+            "antiseptic_report_section", "low_stock_report_section", "calculator_form", "help",
+        ),
+        permissions.ACCOUNTING: (
+            "sales_report_section", "antiseptic_report_section", "sales_by_client_report_section",
+            "low_stock_report_section", "data_browser_form", "help",
+        ),
+        permissions.GUEST: (),
+    }
+    _BUILTIN_ROLE_SEED = (
+        (permissions.ADMIN, "Администратор", "admin"),
+        (permissions.WAREHOUSE, "Склад", None),
+        (permissions.ACCOUNTING, "Бухгалтерия", None),
+        (permissions.GUEST, "Гость", "guest"),
+    )
+
+    def _ensure_roles_seeded(self):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            for position, (key, label, builtin) in enumerate(self._BUILTIN_ROLE_SEED):
+                bg, fg = permissions.ROLE_CHIP_COLORS[key]
+                self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO bot_roles (key, label, color_bg, color_fg, builtin, position, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (key, label, bg, fg, builtin, position, now, now),
+                )
+            # Рішення користувача (2026-09-06): «продажи відносяться напряму
+            # до складу» - ролі «Продажи» більше нема, її люди стають «Склад».
+            # Один раз: далі адміністратор вільний призначати що завгодно.
+            if not self.conn.execute("SELECT 1 FROM app_meta WHERE key = 'sales_role_merged'").fetchone():
+                self.conn.execute(
+                    "UPDATE bot_users SET role = ?, updated_at = ? WHERE lower(role) IN ('sales', 'продажи', 'продажі')",
+                    (permissions.WAREHOUSE, now),
+                )
+                self.conn.execute("INSERT INTO app_meta (key, value) VALUES ('sales_role_merged', '1')")
+            if not self.conn.execute("SELECT 1 FROM app_meta WHERE key = 'role_buttons_seeded'").fetchone():
+                for role_key, migration_keys in self._DEFAULT_ROLE_BUTTON_KEYS.items():
+                    for migration_key in migration_keys:
+                        row = self.conn.execute(
+                            "SELECT id FROM custom_menu_buttons WHERE migration_key = ?", (migration_key,)
+                        ).fetchone()
+                        if row:
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO role_buttons (role_key, button_id) VALUES (?, ?)",
+                                (role_key, row[0]),
+                            )
+                self.conn.execute("INSERT INTO app_meta (key, value) VALUES ('role_buttons_seeded', '1')")
+
+    def _role_row_to_dict(self, row):
+        key, label, color_bg, color_fg, builtin, position, users = row
+        return {
+            "key": key, "label": label, "color_bg": color_bg, "color_fg": color_fg,
+            "builtin": builtin, "position": position, "users": users,
+        }
+
+    def list_roles(self, include_admin=True):
+        rows = self.conn.execute(
+            """
+            SELECT r.key, r.label, r.color_bg, r.color_fg, r.builtin, r.position,
+                   (SELECT COUNT(*) FROM bot_users u WHERE u.role = r.key)
+            FROM bot_roles r
+            ORDER BY r.position, r.id
+            """
+        ).fetchall()
+        roles = [self._role_row_to_dict(row) for row in rows]
+        if not include_admin:
+            roles = [role for role in roles if role["builtin"] != "admin"]
+        return roles
+
+    def get_role(self, key):
+        if not key:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT r.key, r.label, r.color_bg, r.color_fg, r.builtin, r.position,
+                   (SELECT COUNT(*) FROM bot_users u WHERE u.role = r.key)
+            FROM bot_roles r WHERE r.key = ?
+            """,
+            (key,),
+        ).fetchone()
+        return self._role_row_to_dict(row) if row else None
+
+    # Підпис і кольори для бейджів «Персоналу» й повідомлень бота. Невідомий
+    # ключ (стара вільна назва ролі) - показується як є, сірим, без прав.
+    def role_label(self, key):
+        role = self.get_role(permissions.normalize_role(key))
+        if role:
+            return role["label"]
+        return str(key or "") or permissions.ROLE_LABELS_RU[permissions.GUEST]
+
+    def role_colors(self, key):
+        role = self.get_role(permissions.normalize_role(key))
+        if role:
+            return role["color_bg"], role["color_fg"]
+        return permissions.ROLE_CHIP_COLORS[permissions.GUEST]
+
+    @staticmethod
+    def contrast_text_color(color_bg):
+        """Світлий текст на темному тлі й навпаки - за яскравістю кольору."""
+        value = str(color_bg or "").lstrip("#")
+        try:
+            r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+        except (ValueError, IndexError):
+            return "#FFFFFF"
+        return "#1A1D21" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#F4F6F8"
+
+    def add_role(self, label, color_bg, color_fg=None):
+        label = " ".join(str(label or "").split())
+        if not label:
+            raise ValueError("Введите название роли.")
+        if any(role["label"].lower() == label.lower() for role in self.list_roles()):
+            raise ValueError("Роль с таким названием уже есть.")
+        color_bg = str(color_bg or "#6B7280")
+        color_fg = color_fg or self.contrast_text_color(color_bg)
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            position = self.conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM bot_roles").fetchone()[0]
+            cursor = self.conn.execute(
+                """
+                INSERT INTO bot_roles (key, label, color_bg, color_fg, builtin, position, created_at, updated_at)
+                VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+                """,
+                ("role_pending", label, color_bg, color_fg, position, now, now),
+            )
+            key = "role%d" % cursor.lastrowid
+            self.conn.execute("UPDATE bot_roles SET key = ? WHERE id = ?", (key, cursor.lastrowid))
+        return key
+
+    def update_role(self, key, label=None, color_bg=None, color_fg=None):
+        role = self.get_role(key)
+        if role is None:
+            raise ValueError("Роль не найдена.")
+        if role["builtin"]:
+            raise ValueError("Эту роль нельзя переименовать или перекрасить.")
+        new_label = " ".join(str(label if label is not None else role["label"]).split())
+        if not new_label:
+            raise ValueError("Введите название роли.")
+        if any(other["key"] != key and other["label"].lower() == new_label.lower() for other in self.list_roles()):
+            raise ValueError("Роль с таким названием уже есть.")
+        new_bg = str(color_bg or role["color_bg"])
+        new_fg = color_fg or (self.contrast_text_color(new_bg) if color_bg else role["color_fg"])
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE bot_roles SET label = ?, color_bg = ?, color_fg = ?, updated_at = ? WHERE key = ?",
+                (new_label, new_bg, new_fg, now, key),
+            )
+
+    def delete_role(self, key, move_users_to=None):
+        role = self.get_role(key)
+        if role is None:
+            raise ValueError("Роль не найдена.")
+        if role["builtin"]:
+            raise ValueError("Эту роль нельзя удалить.")
+        target = move_users_to or permissions.GUEST
+        if self.get_role(target) is None or target == key:
+            raise ValueError("Выберите роль, в которую перевести сотрудников.")
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE bot_users SET role = ?, updated_at = ? WHERE role = ?", (target, now, key)
+            )
+            self.conn.execute("DELETE FROM role_buttons WHERE role_key = ?", (key,))
+            self.conn.execute("DELETE FROM bot_roles WHERE key = ?", (key,))
+
+    def role_button_ids(self, key):
+        rows = self.conn.execute("SELECT button_id FROM role_buttons WHERE role_key = ?", (key,)).fetchall()
+        return {row[0] for row in rows}
+
+    def all_role_button_ids(self):
+        """{role_key: {button_id, ...}} для всіх ролей одразу."""
+        result = {role["key"]: set() for role in self.list_roles(include_admin=False)}
+        for role_key, button_id in self.conn.execute("SELECT role_key, button_id FROM role_buttons").fetchall():
+            result.setdefault(role_key, set()).add(button_id)
+        return result
+
+    def set_role_buttons(self, key, button_ids):
+        role = self.get_role(key)
+        if role is None:
+            raise ValueError("Роль не найдена.")
+        if role["builtin"] == "admin":
+            raise ValueError("У администратора всегда все кнопки.")
+        ids = sorted({int(value) for value in button_ids})
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute("DELETE FROM role_buttons WHERE role_key = ?", (key,))
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO role_buttons (role_key, button_id) VALUES (?, ?)",
+                [(key, button_id) for button_id in ids],
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('role_buttons_saved_at', ?)", (now,)
+            )
+        return len(ids)
+
+    def role_buttons_saved_at(self):
+        row = self.conn.execute("SELECT value FROM app_meta WHERE key = 'role_buttons_saved_at'").fetchone()
+        return row[0] if row else ""
+
+    def is_role_admin(self, key):
+        role = self.get_role(permissions.normalize_role(key))
+        return bool(role and role["builtin"] == "admin")
+
+    def is_button_allowed(self, role_key, button_id):
+        """Чи бачить роль цю кнопку: адміністратор - усі; батько - коли
+        дозволена хоч одна дитина; решта - за role_buttons."""
+        role_key = permissions.normalize_role(role_key)
+        if self.is_role_admin(role_key):
+            return True
+        if role_key is None:
+            return False
+        if self.conn.execute(
+            "SELECT 1 FROM role_buttons WHERE role_key = ? AND button_id = ?", (role_key, button_id)
+        ).fetchone():
+            return True
+        return bool(self.conn.execute(
+            """
+            SELECT 1 FROM role_buttons rb
+            JOIN custom_menu_buttons b ON b.id = rb.button_id
+            WHERE rb.role_key = ? AND b.parent_id = ? AND b.enabled = 1
+            """,
+            (role_key, button_id),
+        ).fetchone())
+
+    def role_allowed_action_codes(self, role_key):
+        """Коди дій увімкнених кнопок, дозволених ролі (для прав бота)."""
+        role_key = permissions.normalize_role(role_key)
+        if role_key is None:
+            return set()
+        rows = self.conn.execute(
+            """
+            SELECT b.action_code FROM role_buttons rb
+            JOIN custom_menu_buttons b ON b.id = rb.button_id
+            WHERE rb.role_key = ? AND b.enabled = 1 AND b.action_code IS NOT NULL AND b.action_code != ''
+            """,
+            (role_key,),
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def list_buttons_for_roles(self):
+        """Увімкнені кнопки бота для вікна «Кнопки ролей»: діти йдуть одразу
+        за батьком, підпис дитини - «Батько › Дитина»."""
+        rows = self.conn.execute(
+            """
+            SELECT id, parent_id, label, action_code, COALESCE(layout, 'full'), created_at, position
+            FROM custom_menu_buttons WHERE enabled = 1
+            ORDER BY position, id
+            """
+        ).fetchall()
+        by_parent = {}
+        labels = {}
+        for node_id, parent_id, label, action_code, layout, created_at, position in rows:
+            by_parent.setdefault(parent_id, []).append((node_id, label, action_code, layout, created_at))
+            labels[node_id] = label
+        result = []
+
+        def walk(parent_id, prefix):
+            for node_id, label, action_code, layout, created_at in by_parent.get(parent_id, []):
+                has_children = node_id in by_parent
+                result.append({
+                    "id": node_id, "parent_id": parent_id, "label": label,
+                    "display": (prefix + " › " + label) if prefix else label,
+                    "action_code": action_code, "layout": layout, "created_at": created_at,
+                    "has_children": has_children,
+                })
+                walk(node_id, (prefix + " › " + label) if prefix else label)
+
+        walk(None, "")
+        return result
+
+    def roles_payload(self):
+        """Усе для вікна «Кнопки ролей» одним запитом (локально або через тунель)."""
+        allowed = self.all_role_button_ids()
+        return {
+            "roles": self.list_roles(include_admin=False),
+            "buttons": self.list_buttons_for_roles(),
+            "allowed": {key: sorted(ids) for key, ids in allowed.items()},
+            "saved_at": self.role_buttons_saved_at(),
+        }
+
     def list_users(self):
         cursor = self.conn.execute(
             """
@@ -3628,9 +4805,10 @@ class ExcelSqliteStore:
             INSERT INTO stock_movements (
                 movement_type, source, telegram_user_id, username, full_name,
                 product, breed, condition, thickness, width, length,
-                quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at
+                quantity, volume, area, linear, reason, sheet_row_id, original_text, created_at,
+                document, balance_after, amount, rollback_of, created_stock_row
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("movement_type", "income"),
@@ -3652,10 +4830,180 @@ class ExcelSqliteStore:
                 movement.get("sheet_row_id"),
                 movement.get("original_text"),
                 movement.get("created_at", datetime.now().isoformat(timespec="seconds")),
+                movement.get("document"),
+                movement.get("balance_after"),
+                movement.get("amount"),
+                movement.get("rollback_of"),
+                1 if movement.get("created_stock_row") else None,
             ),
         )
         if not was_in_transaction:
             self.conn.commit()
+
+    # Адмін-форма (2026-09-06): журнал з фільтрами - операції (список типів),
+    # дати (включно, за датою створення), продукт (підрядок), хто (підрядок
+    # імені), пошук за розміром/породою/станом (підрядок "47x150"); порціями.
+    # ---------------- Журнал операцій (2026-09-06) ----------------
+    # Одне джерело для трьох місць: форма адміністратора, клієнт «Журналы»,
+    # домашка «Журнал операцій». Фільтр на кожну колонку вікна-таблиці.
+    _JOURNAL_NEGATIVE_TYPES = ("sale", "writeoff", "exchange_out")
+
+    def _journal_where(self, movement_types=None, date_from=None, date_to=None, product=None, who=None,
+                       search=None, documents=None, who_list=None, product_list=None, size=None, sign=None,
+                       qty_min=None, qty_max=None, measure_min=None, measure_max=None,
+                       balance_min=None, balance_max=None, reason=None, size_list=None, reason_list=None):
+        # SQLite lower() lowercases only ASCII - Cyrillic filters need a Python function.
+        self.conn.create_function("py_lower", 1, lambda value: value.lower() if isinstance(value, str) else value)
+        where = []
+        params = []
+        negative = "movement_type IN (%s)" % ",".join("'%s'" % t for t in self._JOURNAL_NEGATIVE_TYPES)
+        # Корекція і відкат зберігають кількість уже зі знаком: у відкату
+        # знак залежить від скасованої операції, а не від типу.
+        signed_qty = "(CASE WHEN movement_type IN ('correction', 'rollback') THEN coalesce(quantity, 0) WHEN %s THEN -abs(coalesce(quantity, 0)) ELSE abs(coalesce(quantity, 0)) END)" % negative
+        measure_expr = "coalesce(volume, area, linear, 0)"
+        size_expr = ("(printf('%g', coalesce(thickness, 0)) || 'x' || printf('%g', coalesce(width, 0)) || 'x'"
+                     " || printf('%g', coalesce(length, 0)))")
+        if movement_types:
+            where.append("movement_type IN (%s)" % ",".join("?" for _ in movement_types))
+            params.extend(movement_types)
+        if date_from:
+            where.append("substr(created_at, 1, 10) >= ?")
+            params.append(str(date_from)[:10])
+        if date_to:
+            where.append("substr(created_at, 1, 10) <= ?")
+            params.append(str(date_to)[:10])
+        if product:
+            where.append("py_lower(coalesce(product, '')) LIKE ?")
+            params.append("%" + str(product).lower() + "%")
+        if who:
+            where.append("(py_lower(coalesce(full_name, '')) LIKE ? OR py_lower(coalesce(username, '')) LIKE ?)")
+            params.extend(["%" + str(who).lower() + "%"] * 2)
+        if search:
+            needle = "%" + str(search).lower().replace("×", "x") + "%"
+            where.append(
+                "(py_lower(coalesce(breed, '') || ' ' || coalesce(condition, '') || ' ' || " + size_expr
+                + " || ' ' || coalesce(document, '')) LIKE ?)"
+            )
+            params.append(needle)
+        if documents:
+            clauses = []
+            for value in documents:
+                text = str(value).strip()
+                if not text:
+                    continue
+                digits = re.sub(r"\D", "", text)
+                if digits and digits == text:
+                    clauses.append("(coalesce(document, '') LIKE ? OR coalesce(document, '') = ?)")
+                    params.extend(["%№" + digits, digits])
+                else:
+                    clauses.append("py_lower(coalesce(document, '')) LIKE ?")
+                    params.append("%" + text.lower() + "%")
+            if clauses:
+                where.append("(" + " OR ".join(clauses) + ")")
+        if who_list is not None:
+            values = [str(v) for v in who_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append("coalesce(nullif(full_name, ''), username, '') IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if product_list is not None:
+            values = [str(v) for v in product_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append("coalesce(product, '') IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if size:
+            where.append("py_lower(" + size_expr + ") LIKE ?")
+            params.append("%" + str(size).lower().replace("×", "x").replace(" ", "") + "%")
+        if size_list is not None:
+            values = [str(v).replace("×", "x") for v in size_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append(size_expr + " IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if reason_list is not None:
+            values = [str(v) for v in reason_list]
+            if not values:
+                where.append("0")
+            else:
+                where.append("coalesce(reason, '') IN (%s)" % ",".join("?" for _ in values))
+                params.extend(values)
+        if sign == "plus":
+            where.append(signed_qty + " > 0")
+        elif sign == "minus":
+            where.append(signed_qty + " < 0")
+        elif sign == "none":
+            where.append("0")
+        for value, clause in ((qty_min, "abs(coalesce(quantity, 0)) >= ?"), (qty_max, "abs(coalesce(quantity, 0)) <= ?"),
+                              (measure_min, "abs(" + measure_expr + ") >= ?"), (measure_max, "abs(" + measure_expr + ") <= ?"),
+                              (balance_min, "coalesce(balance_after, 0) >= ?"), (balance_max, "coalesce(balance_after, 0) <= ?")):
+            if value not in (None, ""):
+                where.append(clause)
+                params.append(_number_value(value))
+        if reason:
+            where.append("py_lower(coalesce(reason, '')) LIKE ?")
+            params.append("%" + str(reason).lower() + "%")
+        return (" WHERE " + " AND ".join(where)) if where else "", params
+
+    def list_journal_movements(self, movement_types=None, date_from=None, date_to=None, product=None,
+                               who=None, search=None, limit=50, offset=0, sort="desc", **column_filters):
+        where_sql, params = self._journal_where(movement_types, date_from, date_to, product, who, search, **column_filters)
+        sql = (
+            "SELECT id, movement_type, source, telegram_user_id, username, full_name, product, breed, condition,"
+            " thickness, width, length, quantity, volume, area, linear, reason, sheet_row_id, created_at, document,"
+            " balance_after, amount, rollback_of, created_stock_row FROM stock_movements" + where_sql
+        )
+        direction = "ASC" if str(sort).lower() == "asc" else "DESC"
+        sql += " ORDER BY created_at %s, id %s LIMIT ? OFFSET ?" % (direction, direction)
+        params = list(params) + [int(limit) + 1, int(offset)]
+        cursor = self.conn.execute(sql, params)
+        keys = [column[0] for column in cursor.description]
+        rows = [dict(zip(keys, values)) for values in cursor.fetchall()]
+        has_more = len(rows) > int(limit)
+        return rows[: int(limit)], has_more
+
+    def count_journal_movements(self, movement_types=None, date_from=None, date_to=None, product=None,
+                                who=None, search=None, **column_filters):
+        where_sql, params = self._journal_where(movement_types, date_from, date_to, product, who, search, **column_filters)
+        return self.conn.execute("SELECT COUNT(*) FROM stock_movements" + where_sql, params).fetchone()[0]
+
+    def journal_facets(self):
+        """Значення для фільтрів-прапорців: хто робив і які товари є в журналі."""
+        who = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT coalesce(nullif(full_name, ''), username, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
+        ).fetchall() if row[0]]
+        products = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT coalesce(product, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
+        ).fetchall() if row[0]]
+        size_rows = self.conn.execute(
+            "SELECT DISTINCT coalesce(thickness, 0), coalesce(width, 0), coalesce(length, 0) FROM stock_movements"
+            " WHERE coalesce(thickness, width, length) IS NOT NULL ORDER BY 1, 2, 3"
+        ).fetchall()
+        sizes = ["x".join("%g" % _number_value(v) for v in row) for row in size_rows]
+        reasons = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT coalesce(reason, '') FROM stock_movements ORDER BY 1 COLLATE NOCASE"
+        ).fetchall() if row[0]]
+        return {"who": who, "products": products, "sizes": sizes, "reasons": reasons}
+
+    def delete_journal_movement(self, movement_id, actor=None):
+        """Видалення запису журналу - лише з домашки (рішення користувача):
+        залишок не чіпає, слід лишається в технічному журналі (action_log)."""
+        row = self.conn.execute(
+            "SELECT id, movement_type, document, product, thickness, width, length, quantity, full_name, created_at"
+            " FROM stock_movements WHERE id = ?", (movement_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Запись журнала не найдена.")
+        with self.conn:
+            self.conn.execute("DELETE FROM stock_movements WHERE id = ?", (movement_id,))
+        keys = ("id", "movement_type", "document", "product", "thickness", "width", "length", "quantity", "full_name", "created_at")
+        details = dict(zip(keys, row))
+        details["deleted_by"] = actor or "домашняя программа"
+        self.add_action_log("journal_entry_deleted", details)
+        return details
 
     def get_user_preference(self, telegram_user_id):
         cursor = self.conn.execute(
@@ -4059,6 +5407,10 @@ class ExcelSqliteStore:
             "linear": columns.get("balance_linear"),
         }
         mismatches = []
+        # Скільки рядків довелось пропустити через ВІДСУТНЮ колонку виміру.
+        # Раніше це губилось мовчки: таблиця без "Остаток, мп" давала той
+        # самий результат, що й ідеально зведена, - "розбіжностей немає".
+        self._last_mismatch_scan = {"rows": len(rows), "skipped_no_measure_column": 0}
         for row_id, row in rows:
             product = row_value(row, product_idx)
             thickness = row_value(row, thickness_idx)
@@ -4071,6 +5423,7 @@ class ExcelSqliteStore:
                 continue
             measure_idx = measure_balance_columns.get(measure_kind)
             if measure_idx is None:
+                self._last_mismatch_scan["skipped_no_measure_column"] += 1
                 continue
             piece = _shared_piece_measure(thickness, width, length, measure_kind)
             if piece <= 0:
@@ -4401,6 +5754,19 @@ INCOME_SHEET_NAME = "ПРИХОД МАТЕРИАЛА"
 # списания" на самому СКЛАД - єдине поточне значення, без історії). Новий
 # лист з тим самим принципом, що вже мають ПРОДАЖА МАТЕРИАЛА/АНТИСЕПТИРОВАНИЕ.
 WRITEOFF_SHEET_NAME = "СПИСАНИЕ"
+# Задача користувача (2026-09-05, ТЗ пункт 1 "ОБМЕН"): "окремий лист, із
+# записуванням автора обміну та датою". Обидва боки обміну лежать в одному
+# листі, по рядку на позицію: колонка "Отдаём / Получаем" каже, до якого
+# блоку належить рядок, а "Обмен №" звʼязує всі рядки однієї операції.
+# Гроші й контрагент сюди СВІДОМО не закладені - користувач на це ще не
+# відповів; коли відповість, колонки допише той самий механізм звірки.
+# KD за номіналом: перемикач клієнта "Показывать группе расчёт при списании
+# другого размера". None/True - група бачить те саме, що автор; False - копія
+# для групи без підміни розміру й без доходу по перерахунку.
+GROUP_SEES_SIZE_RECALC_SETTING = "group_sees_size_recalc"
+
+CORRECTION_SHEET_NAME = "КОРРЕКЦИЯ"
+EXCHANGE_SHEET_NAME = "ОБМЕН"
 # Задача користувача: "нащо в стовбцю дата час з секундами? прибери. лівіше
 # додай окрему колонку точний час" - "Дата" лишається чистою датою (як і
 # була, _parse_date_text завжди повертає .date()), а реальний момент
@@ -4432,6 +5798,14 @@ _WRITEOFF_SHEET_HEADERS = [
 _REQUIRED_OPERATION_AUTHOR_COLUMNS = [
     (WRITEOFF_SHEET_NAME, "Менеджер"),
     (SALES_SHEET_NAME, "Менеджер (итог)"),
+    # KD за номіналом (рішення 2026-09-05): чотири колонки "як продано" і
+    # "Доход по пересчету" у наявний лист ПРОДАЖА - через ту саму звірку.
+    (SALES_SHEET_NAME, "Продано как"),
+    (SALES_SHEET_NAME, "Объем как продано, м3"),
+    (SALES_SHEET_NAME, "Сумма как продано, MDL"),
+    (SALES_SHEET_NAME, "Доход по пересчету, MDL"),
+    # Обмін блоками (2026-09-06): пара «що на що» в наявному листі ОБМЕН.
+    (EXCHANGE_SHEET_NAME, "Замена №"),
     (ANTISEPTIC_SHEET_NAME, "Ответственный"),
     (INCOME_SHEET_NAME, "Менеджер"),
 ]
@@ -4471,6 +5845,13 @@ _SALES_SHEET_HEADERS = [
     "Расчетный метраж, мп",
     "Итоговый метраж, мп",
     "Адрес выгрузки",
+    # KD за номіналом (рішення 2026-09-05): основні колонки - фактичний
+    # списаний розмір і сума за ним; ці чотири - як продано клієнту й
+    # різниця. Валюта в заголовку, як у інших листах. Без підміни - порожні.
+    "Продано как",
+    "Объем как продано, м3",
+    "Сумма как продано, MDL",
+    "Доход по пересчету, MDL",
 ]
 
 # АНТИСЕПТИРОВАНИЕ: реальний файл має інформаційний KPI-блок (формули)
@@ -4555,12 +5936,58 @@ _WAREHOUSE_SHEET_HEADERS = [
 # нього під час запису) - не критично для самого створення листів (кожен
 # лист незалежний), але логічно найближче до того, як людина сама читала б
 # структуру "спочатку склад, потім документи руху".
+_EXCHANGE_SHEET_HEADERS = [
+    "Дата",
+    "Время",
+    "Обмен №",
+    # Обмін блоками (2026-09-06): номер заміни всередині одного обміну -
+    # рядки з одним «Обмен №» і одним «Замена №» - це одна пара «що на що».
+    "Замена №",
+    "Отдаём / Получаем",
+    "Продукт",
+    "Порода",
+    "Состояние",
+    "Толщина, мм",
+    "Ширина, мм",
+    "Длина, мм",
+    "Количество, шт",
+    "Итоговый объем, м3",
+    "Итоговая площадь, м2",
+    "Расчетный метраж, мп",
+    "Менеджер",
+    "Комментарий",
+]
+
+# Корекція залишків (2026-09-06): людина вводить лише «Стало, шт», різницю
+# в штуках і в одиниці виміру (м3/м2/мп) рахує програма.
+_CORRECTION_SHEET_HEADERS = [
+    "Дата",
+    "Время",
+    "Коррекция №",
+    "Продукт",
+    "Порода",
+    "Состояние",
+    "Толщина, мм",
+    "Ширина, мм",
+    "Длина, мм",
+    "Было, шт",
+    "Стало, шт",
+    "Разница, шт",
+    "Разница, м3",
+    "Разница, м2",
+    "Разница, мп",
+    "Менеджер",
+    "Причина",
+]
+
 _REQUIRED_SHEETS_FULL = [
     ("СКЛАД", _WAREHOUSE_SHEET_HEADERS),
     (INCOME_SHEET_NAME, _INCOME_SHEET_HEADERS),
     (SALES_SHEET_NAME, _SALES_SHEET_HEADERS),
     (WRITEOFF_SHEET_NAME, _WRITEOFF_SHEET_HEADERS),
     (ANTISEPTIC_SHEET_NAME, _ANTISEPTIC_SHEET_HEADERS),
+    (EXCHANGE_SHEET_NAME, _EXCHANGE_SHEET_HEADERS),
+    (CORRECTION_SHEET_NAME, _CORRECTION_SHEET_HEADERS),
 ]
 
 
@@ -4581,7 +6008,211 @@ def product_requires_type(product):
     return normalized in {"доска", "doska"}
 
 
+# --- Журнал операцій: форматування записів (спільне для форми, клієнта й домашки) ---
+JOURNAL_TYPE_LABELS = {
+    "income": "Приход",
+    "sale": "Продажа",
+    "writeoff": "Списание",
+    "exchange_out": "Обмен: отдаём",
+    "exchange_in": "Обмен: получаем",
+    "antiseptic": "Антисептирование",
+    "correction": "Коррекция",
+    "rollback": "Откат",
+}
+JOURNAL_NEGATIVE_TYPES = frozenset({"sale", "writeoff", "exchange_out"})
+# Типи, що зберігають кількість уже зі знаком (не виводиться з типу).
+JOURNAL_SIGNED_TYPES = frozenset({"correction", "rollback"})
+# Групи прапорців у фільтрі «Операция»: один прапорець «Обмен» = обидва боки.
+JOURNAL_FILTER_GROUPS = (
+    ("Продажа", ("sale",)),
+    ("Приход", ("income",)),
+    ("Списание", ("writeoff",)),
+    ("Обмен", ("exchange_out", "exchange_in")),
+    ("Антисептирование", ("antiseptic",)),
+    ("Коррекция", ("correction",)),
+    ("Откат", ("rollback",)),
+)
+
+
+def _is_service_movement(row):
+    """Рух без штук: антисептик і відкат антисептика - лише гроші."""
+    movement_type = row.get("movement_type") or ""
+    return movement_type == "antiseptic" or (movement_type == "rollback" and row.get("quantity") is None)
+
+
+def _rollback_of_info(raw):
+    """JSON колонки rollback_of → словник для журналу (або None)."""
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    created = str(info.get("created_at") or "")
+    try:
+        time_text = datetime.fromisoformat(created).strftime("%H:%M %Y.%m.%d")
+    except ValueError:
+        time_text = created
+    return {
+        "type": info.get("type") or "",
+        "type_label": info.get("type_label") or JOURNAL_TYPE_LABELS.get(info.get("type") or "", ""),
+        "document": info.get("document") or "",
+        "created_at": created,
+        "time": time_text,
+        "who": info.get("who") or "",
+    }
+
+
+def movement_report_rows(store):
+    """Компактні рухи складу для вкладки «Движение» (ТЗ п.8.4/8.5): дата,
+    тип, товар, стан і ЗНАКОВІ кількість та вимір. Антисептирование сюди не
+    входить - це послуга, а не рух складу. Знак ставиться тут, щоб форма не
+    повторювала правила типів."""
+    rows, _has_more = store.list_journal_movements(limit=1000000, offset=0, sort="asc")
+    result = []
+    for row in rows:
+        movement_type = row.get("movement_type") or ""
+        if _is_service_movement(row):
+            continue
+        kind = item_measure_kind(row)
+        quantity = _number_value(row.get("quantity"))
+        measure = _number_value(row.get(kind)) if kind else 0
+        if movement_type not in JOURNAL_SIGNED_TYPES:
+            sign = -1 if movement_type in JOURNAL_NEGATIVE_TYPES else 1
+            quantity = abs(quantity) * sign
+            measure = abs(measure) * sign
+        created = str(row.get("created_at") or "")
+        try:
+            day = datetime.fromisoformat(created).strftime("%d.%m.%Y")
+        except ValueError:
+            day = created[:10]
+        result.append({
+            "date": day,
+            "type": movement_type,
+            "product": row.get("product") or "",
+            "condition": row.get("condition") or "",
+            "quantity": round(quantity, 6),
+            "measure_kind": kind,
+            "measure": round(measure, 6) if kind else None,
+        })
+    return result
+
+
+def journal_entries(rows):
+    entries = []
+    for row in rows:
+        created = row.get("created_at") or ""
+        try:
+            time_text = datetime.fromisoformat(created).strftime("%H:%M %Y.%m.%d")
+        except ValueError:
+            time_text = created
+        movement_type = row.get("movement_type") or ""
+        quantity = _number_value(row.get("quantity"))
+        measure_kind = item_measure_kind(row)
+        measure = _number_value(row.get(measure_kind)) if measure_kind else None
+        service = _is_service_movement(row)
+        if movement_type not in JOURNAL_SIGNED_TYPES:
+            sign = -1 if movement_type in JOURNAL_NEGATIVE_TYPES else 1
+            quantity = abs(quantity) * sign
+            if measure is not None:
+                measure = abs(measure) * sign
+        dims = [row.get("thickness"), row.get("width"), row.get("length")]
+        size = "x".join(_display_bot_number(v) for v in dims if v not in (None, "")) if any(v not in (None, "") for v in dims) else ""
+        entries.append({
+            "id": row.get("id"),
+            "time": time_text,
+            "created_at": created,
+            "type": movement_type,
+            "type_label": JOURNAL_TYPE_LABELS.get(movement_type, movement_type),
+            "document": row.get("document") or "",
+            "who": row.get("full_name") or row.get("username") or "",
+            "product": row.get("product") or "",
+            "breed": row.get("breed") or "",
+            "condition": row.get("condition") or "",
+            "size": size,
+            # Антисептик (2026-09-06): лише дохід, без «± шт / ± м3» - це
+            # послуга, а не рух на складі. Те саме - відкат антисептика.
+            "quantity": None if service else round(quantity, 6),
+            "measure_kind": None if service else measure_kind,
+            "measure": None if service or measure is None else round(measure, 6),
+            "unit": "" if service else (ITEM_MEASURE_UNIT.get(measure_kind, "") if measure_kind else ""),
+            "amount": _number_value(row.get("amount")) if row.get("amount") not in (None, "") else None,
+            "balance_after": row.get("balance_after"),
+            "reason": row.get("reason") or "",
+            # Відкат (2026-09-10): яку операцію скасовано - для картки журналу.
+            "rollback_of": _rollback_of_info(row.get("rollback_of")) if movement_type == "rollback" else None,
+        })
+    return entries
+
+
+def _journal_filter_kwargs(filters):
+    def text(key):
+        value = filters.get(key)
+        return str(value).strip() if value not in (None, "") else None
+
+    def listing(key):
+        value = filters.get(key)
+        return [str(v) for v in value] if isinstance(value, list) else None
+
+    def number(key):
+        value = filters.get(key)
+        return value if value not in (None, "") else None
+
+    types = listing("types")
+    return {
+        "movement_types": types or None,
+        "date_from": text("date_from"),
+        "date_to": text("date_to"),
+        "product": text("product"),
+        "who": text("who"),
+        "search": text("search"),
+        "documents": listing("documents"),
+        "who_list": listing("who_list"),
+        "product_list": listing("product_list"),
+        "size": text("size"),
+        "size_list": listing("size_list"),
+        "reason_list": listing("reason_list"),
+        "sign": text("sign"),
+        "qty_min": number("qty_min"), "qty_max": number("qty_max"),
+        "measure_min": number("measure_min"), "measure_max": number("measure_max"),
+        "balance_min": number("balance_min"), "balance_max": number("balance_max"),
+        "reason": text("reason"),
+    }
+
+
+def journal_page(store, filters):
+    """Сторінка журналу: {"entries", "has_more", "total", "facets"?}. filters -
+    словник з форми/вікна (types, date_from/to, product, who, search,
+    documents, who_list, product_list, size, sign, *_min/*_max, reason, sort,
+    limit, offset, with_facets)."""
+    filters = filters if isinstance(filters, dict) else {}
+    try:
+        limit = max(1, min(int(filters.get("limit") or 50), 5000))
+        offset = max(0, int(filters.get("offset") or 0))
+    except (TypeError, ValueError):
+        limit, offset = 50, 0
+    kwargs = _journal_filter_kwargs(filters)
+    rows, has_more = store.list_journal_movements(limit=limit, offset=offset, sort=filters.get("sort") or "desc", **kwargs)
+    page = {
+        "entries": journal_entries(rows),
+        "has_more": has_more,
+        "total": store.count_journal_movements(**kwargs),
+    }
+    if filters.get("with_facets"):
+        page["facets"] = store.journal_facets()
+    return page
+
+
 def display_product_name(payload):
+    # Рейка (2026-09-06): позиція з перерізом рейки показується як
+    # «Доска AD (рейка)» у повідомленнях бота й у листах операцій.
+    product = payload.get("product") or ""
+    rows = payload.get("rows") or []
+    first = rows[0] if rows and isinstance(rows[0], dict) else None
+    if product and first:
+        return lath_product_name(product, first.get("thickness"), first.get("width"))
     # Задача користувача: "ніяких КД АД в продукті, лише в состоянии" -
     # раніше сюди дописувалась condition (AD/КД) для "Доска", хоча вона й
     # так завжди записується окремо в колонку "Состояние" (set_value(...,
@@ -4719,6 +6350,25 @@ def income_report_rows(store):
             "quantity": row_value(values, columns.get("quantity")),
             "manager": row_value(values, columns.get("manager")),
         })
+    # Вимога користувача (2026-08-21, скріншот вкладки "Приход"): "не видно
+    # одиниць вимірювання - додай". У листі ПРИХОД МАТЕРИАЛА виміру немає
+    # взагалі - є лише розміри й кількість, тож рахуємо його тут, тією ж
+    # парою row_measure_kind/piece_measure, якою користуються бот і склад.
+    # Рахувати це в браузері означало б завести ТРЕТЮ копію правила
+    # "25x50 - це погонні метри" (перші дві - utils.py і webapp/app.js).
+    # Поля саме volume/area/linear, а не measure+unit: рівно такий контракт
+    # уже має вкладка "Продажи", і той самий measureCellText (data.js) їх
+    # читає. Свій, окремий формат тут означав би другу гілку показу того
+    # самого числа.
+    for row in result:
+        kind = _shared_row_measure_kind(row.get("product"), row.get("thickness"), row.get("width"))
+        piece = _shared_piece_measure(
+            row.get("thickness"), row.get("width"), row.get("length"), kind
+        ) if kind else 0
+        value = round(piece * _number_value(row.get("quantity")), 6) if piece > 0 else None
+        row["volume"] = value if kind == "volume" else None
+        row["area"] = value if kind == "area" else None
+        row["linear"] = value if kind == "linear" else None
     result.reverse()
     return result
 
@@ -4835,6 +6485,51 @@ def warehouse_rows(store):
     return headers, columns, rows
 
 
+def stock_size_options(store):
+    """Розміри, які вже були в таблиці складу - для випадного списку
+    калькулятора (ТЗ п.6; рішення користувача 2026-09-07: «вибір із тих
+    розмірів, що вже коли-небудь були в роботі», цілим рядком).
+
+    Один запис на пару товар+розмір; товар нормалізується так само, як
+    усюди (рейка визначається за перерізом, стан AD/KD лишається в назві).
+    """
+    _headers, columns, rows = warehouse_rows(store)
+    seen = set()
+    # У таблиці трапляється «Доска AD» і «доска AD» - для людини це один
+    # товар, тож перше написання, що трапилось, стає спільним для всіх.
+    spelling = {}
+    options = []
+    for _row_id, values in rows:
+        thickness = _number_value(row_value(values, columns.get("thickness")))
+        width = _number_value(row_value(values, columns.get("width")))
+        length = _number_value(row_value(values, columns.get("length")))
+        if thickness <= 0 or width <= 0 or length <= 0:
+            continue
+        product = plain_product_name(str(row_value(values, columns.get("product")) or "").strip())
+        product = lath_product_name(product, thickness, width) or product
+        if not product:
+            continue
+        product = spelling.setdefault(product.casefold(), product)
+        key = (product, thickness, width, length)
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append({
+            "product": product,
+            "thickness": thickness,
+            "width": width,
+            "length": length,
+            "label": "%s\u00d7%s\u00d7%s" % (
+                _display_bot_number(thickness), _display_bot_number(width), _display_bot_number(length),
+            ),
+            # Чим цей товар міряється - щоб у списку стояла позначка
+            # «пог. м» чи «м2» там, де рахують не куби.
+            "kind": row_measure_kind(product, thickness, width) or "quantity",
+        })
+    options.sort(key=lambda option: (option["product"], option["thickness"], option["width"], option["length"]))
+    return options
+
+
 def sales_rows(store):
     headers = store.get_headers(SALES_SHEET_NAME)
     columns = sales_columns(headers)
@@ -4856,32 +6551,6 @@ def antiseptic_rows(store):
 # метод ExcelSqliteStore чи TelegramDialogMixin. Мітка категорії резолвиться
 # щоразу заново (не зберігається в самих таблицях) - адмін міг перейменувати
 # bot_operations.label з того часу.
-def operation_template_entries(store, rows, source):
-    entries = []
-    for row in rows:
-        (
-            entry_id, category_operation_id, breed, thickness, width, length,
-            client, address, payment_method,
-        ) = row
-        operation = store.get_operation(category_operation_id) if category_operation_id is not None else None
-        if operation is None:
-            continue
-        entries.append({
-            "id": entry_id,
-            "source": source,
-            "category_operation_id": category_operation_id,
-            "category_label": operation[4],
-            "breed": breed,
-            "thickness": thickness,
-            "width": width,
-            "length": length,
-            "client": client,
-            "address": address,
-            "payment_method": payment_method,
-        })
-    return entries
-
-
 def row_value(row, index):
     # row=None означає "немає рядка складу" (наприклад продаж послуги
     # антисептирования без прив'язки до конкретної позиції складу) —
@@ -4897,6 +6566,91 @@ def add_to_row_value(row_values, index, amount):
     while len(row_values) <= index:
         row_values.append("")
     row_values[index] = _number_value(row_values[index]) + _number_value(amount)
+
+
+def _new_stock_row_values(store, position_payload, item):
+    """Порожній рядок СКЛАД для нової позиції з вікна корекції: назва (з
+    позначкою рейки), порода, стан, розмір, одиниця за видом, нулі, SKU."""
+    headers = store.get_headers("СКЛАД")
+    columns = warehouse_columns(headers)
+    values = [""] * len(headers)
+    product = lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width"))
+    set_value(values, columns.get("product"), product)
+    set_value(values, columns.get("breed"), position_payload.get("breed") or "")
+    set_value(values, columns.get("condition"), position_payload.get("condition") or "")
+    for key in ("thickness", "width", "length"):
+        set_value(values, columns.get(key), item.get(key))
+    kind = row_measure_kind(product, item.get("thickness"), item.get("width"))
+    set_value(values, columns.get("unit"), ExcelSqliteStore._UNIT_LABEL_BY_KIND.get(kind, "шт"))
+    for key in ("income_qty", "sold_qty", "balance_qty"):
+        if columns.get(key) is not None:
+            set_value(values, columns.get(key), 0)
+    set_value(values, columns.get("sku"), "%s|%s|%s" % (product, position_payload.get("breed") or "", income_item_size(item)))
+    return values
+
+
+def find_stock_row_id(store, position, item):
+    """Рядок СКЛАД за ознаками: продукт (без стану й позначки рейки), порода,
+    стан, розмір. Потрібен, коли номер рядка застарів після перечитування
+    Excel (кожен імпорт створює рядки заново)."""
+    _headers, columns, rows = warehouse_rows(store)
+    wanted_products = set()
+    candidates = [position.get("product"), sheet_product_name(position)]
+    # Рейка за перерізом (2026-09-07): «Доска AD» + 30×50 шукає рядок «Рейка».
+    candidates.append(lath_product_name(position.get("product"), item.get("thickness"), item.get("width")))
+    for candidate in candidates:
+        plain = _normalize_phrase(plain_product_name(candidate or "") or "")
+        if plain:
+            wanted_products.add(plain)
+    condition = _normalize_phrase(position.get("condition") or "")
+    if condition:
+        wanted_products |= {p[: -len(condition)].strip() for p in list(wanted_products) if p.endswith(" " + condition)}
+    wanted_breed = _normalize_phrase(position.get("breed") or "")
+    dims = [_number_value(item.get(key)) for key in ("thickness", "width", "length")]
+    for row_id, row in rows:
+        # Той самий двобічний звід, що й у _warehouse_row_matches
+        # (2026-09-09): рядок «Доска AD» із рейковим перерізом - це рейка,
+        # незалежно від того, що стоїть у клітинці.
+        raw_product = plain_product_name(row_value(row, columns.get("product")) or "") or ""
+        raw_product = lath_product_name(
+            raw_product,
+            row_value(row, columns.get("thickness")),
+            row_value(row, columns.get("width")),
+        ) or raw_product
+        product = _normalize_phrase(raw_product)
+        row_condition = _normalize_phrase(row_value(row, columns.get("condition")) or "")
+        if condition and product.endswith(" " + condition):
+            product = product[: -len(condition)].strip()
+        if product not in wanted_products:
+            continue
+        if wanted_breed and _normalize_phrase(row_value(row, columns.get("breed")) or "") != wanted_breed:
+            continue
+        if condition and row_condition and row_condition != condition:
+            continue
+        if all(abs(_number_value(row_value(row, columns.get(key))) - value) < 1e-6 for key, value in zip(("thickness", "width", "length"), dims)):
+            return row_id
+    return None
+
+
+def shortage_line(requested, available, unit):
+    """ТЗ п.10: скільки саме не вистачає. Порожньо, коли нестачі немає."""
+    missing = _number_value(requested) - _number_value(available)
+    if missing <= 0:
+        return ""
+    return "Не хватает: %s %s" % (_display_bot_number(round(missing, 6)), unit)
+
+
+def _sheet_amount(values, columns):
+    """Сума («Сумма» / «Стоимость, MDL») з рядка листа або None."""
+    index = columns.get("total_amount")
+    raw = row_value(values, index) if index is not None else ""
+    return _number_value(raw) if raw not in (None, "") else None
+
+
+def _same_number(left, right):
+    if left in (None, "") or right in (None, ""):
+        return False
+    return abs(_number_value(left) - _number_value(right)) < 1e-6
 
 
 def set_value(row_values, index, value):
@@ -4984,12 +6738,45 @@ def execute_operation_write(store, operation_id, item, row_values, columns, shee
             add_to_row_value(row_values, column_index, amount)
 
 
-def income_item_size(item):
+def plain_item_size(item):
+    """Розмір "50x150x6000" без жодних суфіксів."""
     return (
         f"{_display_bot_number(item['thickness'])}x"
         f"{_display_bot_number(item['width'])}x"
         f"{_display_bot_number(item['length'])}"
     )
+
+
+def income_item_size(item):
+    text = plain_item_size(item)
+    # KD за номіналом (ТЗ пункт 2): продали 50x150, списали обраний 47x150 -
+    # людина має бачити обидва розміри скрізь, де показується позиція.
+    if item.get("stock_thickness") is not None:
+        text += (
+            f" (списывается {_display_bot_number(item['stock_thickness'])}x"
+            f"{_display_bot_number(item['stock_width'])}x"
+            f"{_display_bot_number(item['stock_length'])})"
+        )
+    return text
+
+
+def _stock_view(item):
+    """Копія позиції з ФАКТИЧНИМ складським розміром і його виміром (KD за
+    номіналом), або та сама позиція, якщо фактичний = введеному."""
+    if item.get("stock_thickness") is None:
+        return item
+    view = dict(item)
+    view["thickness"] = item["stock_thickness"]
+    view["width"] = item["stock_width"]
+    view["length"] = item["stock_length"]
+    for measure_key in ("volume", "area", "linear"):
+        stock_value = item.get("stock_" + measure_key)
+        if stock_value is not None:
+            view[measure_key] = stock_value
+    view.pop("stock_thickness", None)
+    view.pop("stock_width", None)
+    view.pop("stock_length", None)
+    return view
 
 
 # "area"/"linear" (мп, розміри 25x50/30x50/50x50) взаємовиключні з "volume"
@@ -5081,6 +6868,10 @@ def sales_columns(headers):
         "sku": ["Код позиции (SKU)", "SKU"],
         "comment": ["Комментарий"],
         "manual_manager": ["Менеджер вручную"],
+        "sold_as": ["Продано как"],
+        "sold_as_volume": ["Объем как продано, м3"],
+        "sold_as_amount": ["Сумма как продано, MDL"],
+        "recalc_income": ["Доход по пересчету, MDL"],
     }
     normalized_headers = {
         _normalize_phrase(header): index
@@ -5102,6 +6893,11 @@ def sales_columns(headers):
 
 def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map, now, document_number=None):
     headers = store.get_headers(SALES_SHEET_NAME)
+    # KD за номіналом: у листі - фактичний списаний розмір, його вимір і сума
+    # за ним ("прибуток - за 47x150"); введений (номінальний) - у колонках
+    # "Продано как" / "Сумма как продано" / "Доход по пересчету".
+    sold_as = item if item.get("stock_thickness") is not None else None
+    item = _stock_view(item)
     values = [""] * len(headers)
     columns = sales_columns(headers)
     user = payload.get("user") or {}
@@ -5118,7 +6914,8 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
     set_value(
         values,
         columns.get("product"),
-        row_value(warehouse_row, warehouse_columns_map["product"]) or sheet_product_name(payload),
+        row_value(warehouse_row, warehouse_columns_map["product"])
+        or lath_product_name(sheet_product_name(payload), item.get("thickness"), item.get("width")),
     )
     set_value(
         values,
@@ -5148,7 +6945,9 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
         set_value(values, columns.get("total_linear"), item.get("linear"))
     # ОСБ (і будь-який інший товар без фізичного виміру): жодне з трьох
     # is_area/is_linear/is_volume не спрацьовує — рахуємо/показуємо "шт".
-    if is_linear:
+    if is_piece_priced_product(payload.get("product")):
+        price_unit = "шт"
+    elif is_linear:
         price_unit = "мп"
     elif is_area:
         price_unit = "м2"
@@ -5161,9 +6960,11 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
 
     price_per_unit = payload.get("price_per_unit")
     set_value(values, columns.get("price_per_unit"), price_per_unit)
-    total_amount = payload.get("total_amount")
+    total_amount = None if sold_as is not None else payload.get("total_amount")
     if total_amount in (None, "") and price_per_unit not in (None, ""):
-        if is_linear:
+        if is_piece_priced_product(payload.get("product")):
+            measure_for_price = item.get("quantity")
+        elif is_linear:
             measure_for_price = item.get("linear")
         elif is_area:
             measure_for_price = item.get("area")
@@ -5183,10 +6984,32 @@ def sale_sheet_values(store, payload, item, warehouse_row, warehouse_columns_map
     set_value(values, columns.get("manager_final"), manager)
     set_value(values, columns.get("manual_manager"), user.get("full_name") or user.get("username"))
 
-    comment_parts = [f"Telegram: {payload.get('original_text', '')}"]
+    # Без тексту з чату (усі операції тепер із форм) префікс лишався порожнім
+    # хвостом «Telegram:  | коментар» - не пишемо його взагалі.
+    comment_parts = [f"Telegram: {payload['original_text']}"] if payload.get("original_text") else []
     if payload.get("comment"):
         comment_parts.append(payload["comment"])
     set_value(values, columns.get("comment"), " | ".join(part for part in comment_parts if part))
+    if sold_as is not None:
+        if is_linear:
+            nominal_measure = sold_as.get("linear")
+        elif is_area:
+            nominal_measure = sold_as.get("area")
+        elif is_volume:
+            nominal_measure = sold_as.get("volume")
+        else:
+            nominal_measure = sold_as.get("quantity")
+        set_value(values, columns.get("sold_as"), plain_item_size(sold_as))
+        if is_volume and not is_area and not is_linear:
+            set_value(values, columns.get("sold_as_volume"), sold_as.get("volume"))
+        if price_per_unit not in (None, ""):
+            sold_as_amount = _priced_amount(price_per_unit, nominal_measure)
+            set_value(values, columns.get("sold_as_amount"), sold_as_amount)
+            set_value(
+                values,
+                columns.get("recalc_income"),
+                round(_number_value(sold_as_amount) - _number_value(total_amount), 2),
+            )
     return values
 
 
@@ -5252,7 +7075,8 @@ def income_sheet_values(store, payload, item, warehouse_row, warehouse_columns_m
     set_value(
         values,
         columns.get("product"),
-        row_value(warehouse_row, warehouse_columns_map["product"]) or sheet_product_name(payload),
+        row_value(warehouse_row, warehouse_columns_map["product"])
+        or lath_product_name(sheet_product_name(payload), item.get("thickness"), item.get("width")),
     )
     set_value(
         values,
@@ -5304,7 +7128,9 @@ def income_sheet_values(store, payload, item, warehouse_row, warehouse_columns_m
         total_amount = _priced_amount(price_per_unit, measure_for_price)
     set_value(values, columns.get("total_amount"), total_amount)
 
-    comment_parts = [f"Telegram: {payload.get('original_text', '')}"]
+    # Без тексту з чату (усі операції тепер із форм) префікс лишався порожнім
+    # хвостом «Telegram:  | коментар» - не пишемо його взагалі.
+    comment_parts = [f"Telegram: {payload['original_text']}"] if payload.get("original_text") else []
     if payload.get("comment"):
         comment_parts.append(payload["comment"])
     set_value(values, columns.get("comment"), " | ".join(part for part in comment_parts if part))
@@ -5411,6 +7237,20 @@ def _income_positions(payload):
 # номер. current_count_fallback — лише для ПЕРШОГО виклику на ще не
 # засіяному лічильнику: продовжує з поточного рахунку рядків, БЕЗ
 # ретроактивної переномерації вже виданих номерів.
+def _document_number_from_text(value, prefix):
+    """«Продажа №42» + префікс «Продажа №» → 42; будь-що інше (порожньо,
+    «Telegram продажа …», руками введений тип документа) → None."""
+    text = str(value or "").strip()
+    if not text.startswith(prefix):
+        return None
+    tail = text[len(prefix):].strip()
+    return int(tail) if tail.isdigit() else None
+
+
+def _sale_document_number(value):
+    return _document_number_from_text(value, "Продажа №")
+
+
 def _next_document_number(store, sheet_name, current_count_fallback):
     row = store.conn.execute(
         "SELECT next_number FROM document_counters WHERE sheet_name = ?", (sheet_name,)
@@ -5439,6 +7279,30 @@ def _next_document_number(store, sheet_name, current_count_fallback):
 # адреса, коментар, назва товару/породи), яке потрапляє в ці 4 функції.
 def _esc(value):
     return html.escape(str(value)) if value is not None else ""
+
+
+def signed_bot_number(value):
+    """«+486» / «-711,36» - знак від числа (дохід по перерахунку буває
+    відʼємним, коли списаний обʼєм більший за проданий)."""
+    value = round(_number_value(value), 2)
+    return ("-" if value < 0 else "+") + _display_bot_number(abs(value))
+
+
+def sale_recalc_income(position):
+    """Дохід по перерахунку позиції (KD за номіналом): ціна × (введений вимір
+    − фактично списаний). 0, якщо підміни розміру не було."""
+    price = _number_value(position.get("price_per_unit"))
+    if price <= 0:
+        return 0.0
+    total = 0.0
+    for item in position.get("rows") or []:
+        if item.get("stock_thickness") is None:
+            continue
+        measure_kind = item_measure_kind(item)
+        if measure_kind is None:
+            continue
+        total += price * (_number_value(item.get(measure_kind)) - _number_value(item.get("stock_" + measure_kind)))
+    return round(total, 2)
 
 
 def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
@@ -5509,6 +7373,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                     "message": "Не удалось записать продажу: должна быть указана цена за единицу или сумма.",
                 }
             for item in position["rows"]:
+                stock_item = _stock_view(item)
                 row_id = item.get("row_id")
                 if row_id is None:
                     # Рядок-послуга (наприклад антисептирование без конкретної
@@ -5567,36 +7432,8 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                             f"Доступно: {_display_bot_number(balance_qty)} шт."
                         ),
                     }
-                if is_area:
-                    balance_area = _number_value(row_value(row_values, columns.get("balance_area")))
-                    if _number_value(item.get("area")) > balance_area + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать продажу: на складе уже недостаточно площади.\n"
-                                f"Доступно: {_display_bot_number(balance_area)} м2."
-                            ),
-                        }
-                elif is_linear:
-                    balance_linear = _number_value(row_value(row_values, columns.get("balance_linear")))
-                    if _number_value(item.get("linear")) > balance_linear + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать продажу: на складе уже недостаточно погонных метров.\n"
-                                f"Доступно: {_display_bot_number(balance_linear)} мп."
-                            ),
-                        }
-                else:
-                    balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
-                    if _number_value(item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
-                        return {
-                            "ok": False,
-                            "message": (
-                                "Не удалось записать продажу: на складе уже недостаточно объема.\n"
-                                f"Доступно: {_display_bot_number(balance_volume)} м3."
-                            ),
-                        }
+                # Сторожі виміру (м2/мп/м3) прибрано (2026-09-06): правда -
+                # штуки, вимір рахується зі штук і окремо не звіряється.
 
                 # Крок 3+ "Дії": якщо продукт/тип збігається із заведеною
                 # дією (ДОСКА AD/KD/ОСБ/ВАГОНКА) — запис веде конфігурований
@@ -5605,7 +7442,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                 # жорстко закодована поведінка (товар поза 4 категоріями).
                 operation_id = resolve_operation_for_payload(store, "start_sale", "sale", position_payload)
                 if operation_id is not None:
-                    execute_operation_write(store, operation_id, item, row_values, columns)
+                    execute_operation_write(store, operation_id, stock_item, row_values, columns)
                 else:
                     add_to_row_value(row_values, columns["sold_qty"], item["quantity"])
                     add_to_row_value(row_values, columns["balance_qty"], -_number_value(item["quantity"]))
@@ -5624,8 +7461,8 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                     # рядок" приходу вже мають цей самий guard
                     # (item.get("volume") is not None) - тут його бракувало.
                     elif item.get("volume") is not None:
-                        add_to_row_value(row_values, columns["sold_volume"], item["volume"])
-                        add_to_row_value(row_values, columns["balance_volume"], -_number_value(item["volume"]))
+                        add_to_row_value(row_values, columns["sold_volume"], stock_item["volume"])
+                        add_to_row_value(row_values, columns["balance_volume"], -_number_value(stock_item["volume"]))
 
         # Один номер документа на ВЕСЬ продаж (усі позиції/розміри однієї
         # операції), а не по одному на кожен рядок листа — рахується
@@ -5649,6 +7486,7 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
             position_payload = {**payload, **position}
             rows_in_position = position["rows"]
             for item in rows_in_position:
+                stock_item = _stock_view(item)
                 row_values = row_values_by_row_id.get(item.get("row_id"))
                 item_payload = position_payload
                 if len(rows_in_position) > 1:
@@ -5678,23 +7516,30 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
                 store.add_stock_movement(
                     {
                         "movement_type": "sale",
+                        # Номер продажу в русі (рішення користувача,
+                        # 2026-09-10): «я не бачу яка продажа відкатилась в
+                        # чаті і не можу звірити в програмі». Той самий
+                        # номер, що вже стоїть у листі ПРОДАЖА.
+                        "document": document_number,
                         "source": "telegram",
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
                         "full_name": user.get("full_name"),
-                        "product": sheet_product_name(position_payload),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
-                        "thickness": item.get("thickness"),
-                        "width": item.get("width"),
-                        "length": item.get("length"),
+                        "thickness": stock_item.get("thickness"),
+                        "width": stock_item.get("width"),
+                        "length": stock_item.get("length"),
                         "quantity": item.get("quantity"),
-                        "volume": item.get("volume"),
+                        "volume": stock_item.get("volume"),
                         "area": item.get("area"),
                         "linear": item.get("linear"),
                         "sheet_row_id": item.get("row_id"),
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "amount": _sheet_amount(sale_values, sales_columns(store.get_headers(SALES_SHEET_NAME))),
+                        "balance_after": (_number_value(row_value(row_values, columns["balance_qty"])) if row_values else None),
                     }
                 )
                 updated += 1
@@ -5717,117 +7562,156 @@ def apply_sale_operation(store, payload, sync_mode, dirty_notifier=None):
         key = (position_payload.get("product"), position_payload.get("breed"), position_payload.get("condition"))
         if key not in group_index_by_key:
             group_index_by_key[key] = len(groups)
-            groups.append({
-                "payload": position_payload,
-                "rows": [],
-                "total_amount": 0.0,
-                "antiseptic_volume": 0.0,
-                "antiseptic_sum": 0.0,
-            })
+            groups.append({"payload": position_payload, "positions": []})
         group = groups[group_index_by_key[key]]
-        group["rows"].extend(position["rows"])
-        group["total_amount"] += _number_value(position.get("total_amount"))
+        # Реальний випадок (2026-09-07): дві позиції одного товару з РІЗНИМИ
+        # цінами (6200 і 5850) зливались в один блок, і друкувалась лише
+        # ціна першої - сума при цьому рахувалась по обох. Тепер позиції
+        # всередині блоку лишаються окремими: спільний у них тільки
+        # заголовок, а ціна й сума - у кожної своя.
         antiseptic_addon = position.get("antiseptic")
         has_antiseptic = isinstance(antiseptic_addon, dict) and antiseptic_addon.get("volume") and antiseptic_addon.get("price_per_unit")
-        if has_antiseptic:
-            antiseptic_volume = _number_value(antiseptic_addon.get("volume"))
-            antiseptic_price = _number_value(antiseptic_addon.get("price_per_unit"))
-            group["antiseptic_volume"] += antiseptic_volume
-            group["antiseptic_sum"] += round(antiseptic_volume * antiseptic_price, 2)
+        antiseptic_volume = _number_value(antiseptic_addon.get("volume")) if has_antiseptic else 0.0
+        antiseptic_price = _number_value(antiseptic_addon.get("price_per_unit")) if has_antiseptic else 0.0
+        group["positions"].append({
+            "payload": position_payload,
+            "rows": position["rows"],
+            "total_amount": _number_value(position.get("total_amount")),
+            "recalc_income": sale_recalc_income(position_payload),
+            "antiseptic_volume": antiseptic_volume,
+            "antiseptic_sum": round(antiseptic_volume * antiseptic_price, 2) if has_antiseptic else 0.0,
+        })
 
-    lines = ["Продажа записана:"]
-    index = 0
-    grand_total = 0.0
-    grand_total_goods = 0.0
-    grand_total_antiseptic = 0.0
-    for group_number, group in enumerate(groups, start=1):
-        position_payload = group["payload"]
-        if group_number > 1:
-            lines.append("")
-        header_parts = [_esc(display_product_name(position_payload)), _esc(position_payload.get("breed"))]
-        if position_payload.get("condition"):
-            header_parts.append(_esc(position_payload["condition"]))
-        lines.append(f"Позиция: {' / '.join(part for part in header_parts if part)}")
-        for item in group["rows"]:
-            index += 1
-            measure_kind = item_measure_kind(item)
-            if item.get("row_id") is None:
-                # Рядок-послуга — розмірів немає, показуємо назву товару/послуги
-                # замість "толщинаxширинаxдлина", без мінуса (склад не списаний).
-                position_label = _esc(sheet_product_name(position_payload))
-                if measure_kind is None:
-                    lines.append(f"{index}. {position_label}: {_display_bot_number(item.get('quantity'))} шт")
-                else:
-                    measure_value = item.get(measure_kind)
-                    measure_unit = ITEM_MEASURE_UNIT[measure_kind]
-                    lines.append(
-                        f"{index}. {position_label}: "
-                        f"{_display_bot_number(item.get('quantity'))} шт, "
-                        f"{_display_bot_number(measure_value)} {measure_unit}"
-                    )
-            else:
-                row_values = row_values_by_row_id.get(item["row_id"])
-                remaining_suffix = (
-                    f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
-                    if row_values is not None
-                    else ""
+    # KD за номіналом: той самий звіт у двох версіях - повна для автора і
+    # для групи (full_info=False: без підміни розміру й доходу по
+    # перерахунку); яку слати в групу, вирішує перемикач клієнта.
+    def build_lines(full_info):
+        # Номер у заголовку (рішення користувача, 2026-09-10) - той самий,
+        # що в листі, русі й журналі: щоб продаж можна було звірити.
+        lines = ["<b>%s</b> записана:" % _esc(document_number)]
+        index = 0
+        grand_total = 0.0
+        grand_total_goods = 0.0
+        grand_total_antiseptic = 0.0
+        grand_recalc = 0.0
+        for group_number, group in enumerate(groups, start=1):
+            header_payload = group["payload"]
+            if group_number > 1:
+                lines.append("")
+            header_parts = [_esc(display_product_name(header_payload)), _esc(header_payload.get("breed"))]
+            if header_payload.get("condition"):
+                header_parts.append(_esc(header_payload["condition"]))
+            lines.append(f"Позиция: {' / '.join(part for part in header_parts if part)}")
+            for position_number, position in enumerate(group["positions"], start=1):
+                position_payload = position["payload"]
+                if position_number > 1:
+                    lines.append("")
+                for item in position["rows"]:
+                    index += 1
+                    measure_kind = item_measure_kind(item)
+                    if item.get("row_id") is None:
+                        # Рядок-послуга — розмірів немає, показуємо назву товару/послуги
+                        # замість "толщинаxширинаxдлина", без мінуса (склад не списаний).
+                        position_label = _esc(sheet_product_name(position_payload))
+                        if measure_kind is None:
+                            lines.append(f"{index}. {position_label}: {_display_bot_number(item.get('quantity'))} шт")
+                        else:
+                            measure_value = item.get(measure_kind)
+                            measure_unit = ITEM_MEASURE_UNIT[measure_kind]
+                            lines.append(
+                                f"{index}. {position_label}: "
+                                f"{_display_bot_number(item.get('quantity'))} шт, "
+                                f"{_display_bot_number(measure_value)} {measure_unit}"
+                            )
+                    else:
+                        row_values = row_values_by_row_id.get(item["row_id"])
+                        # KD за номіналом: автор бачить "50x150x6000 (списывается
+                        # 47x150x6000)" і списаний вимір; копія для групи при
+                        # вимкненому перемикачі - лише введений розмір і його вимір,
+                        # без залишку (він стосується рядка 47, якого група не бачить).
+                        substituted = item.get("stock_thickness") is not None
+                        shown_item = item
+                        measure_value = item.get(measure_kind) if measure_kind else None
+                        remaining_suffix = (
+                            f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
+                            if row_values is not None
+                            else ""
+                        )
+                        if substituted and not full_info:
+                            shown_item = {key: value for key, value in item.items() if not key.startswith("stock_")}
+                            remaining_suffix = ""
+                        elif substituted and measure_kind:
+                            measure_value = item.get("stock_" + measure_kind, measure_value)
+                        if measure_kind is None:
+                            lines.append(
+                                f"{index}. {_esc(income_item_size(shown_item))}: -"
+                                f"{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+                            )
+                        else:
+                            measure_unit = ITEM_MEASURE_UNIT[measure_kind]
+                            lines.append(
+                                f"{index}. {_esc(income_item_size(shown_item))}: -"
+                                f"{_display_bot_number(item['quantity'])} шт, -"
+                                f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
+                            )
+                price_line = price_line_text(
+                    position_payload.get("price_per_unit"),
+                    [item_measure_kind(item) for item in position["rows"]],
                 )
-                if measure_kind is None:
+                if price_line:
+                    lines.append(f"  {_esc(price_line)}")
+                goods_total = round(position["total_amount"], 2)
+                antiseptic_sum = round(position["antiseptic_sum"], 2)
+                if antiseptic_sum:
+                    if goods_total:
+                        lines.append(f"  <b>Сумма за товар: {_display_bot_number(goods_total)} MDL</b>")
+                    lines.append("  Дополнительная услуга:")
                     lines.append(
-                        f"{index}. {_esc(income_item_size(item))}: -"
-                        f"{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+                        f"  Антисептирование: {_display_bot_number(round(position['antiseptic_volume'], 2))} м3 — "
+                        f"{_display_bot_number(antiseptic_sum)} MDL"
                     )
-                else:
-                    measure_value = item.get(measure_kind)
-                    measure_unit = ITEM_MEASURE_UNIT[measure_kind]
-                    lines.append(
-                        f"{index}. {_esc(income_item_size(item))}: -"
-                        f"{_display_bot_number(item['quantity'])} шт, -"
-                        f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
-                    )
-        goods_total = round(group["total_amount"], 2)
-        antiseptic_sum = round(group["antiseptic_sum"], 2)
-        if antiseptic_sum:
-            if goods_total:
-                lines.append(f"  <b>Сумма за товар: {_display_bot_number(goods_total)} MDL</b>")
-            lines.append("  Дополнительная услуга:")
-            lines.append(
-                f"  Антисептирование: {_display_bot_number(round(group['antiseptic_volume'], 2))} м3 — "
-                f"{_display_bot_number(antiseptic_sum)} MDL"
-            )
-            lines.append(f"  <b>Сумма позиции: {_display_bot_number(round(goods_total + antiseptic_sum, 2))} MDL</b>")
-        elif goods_total:
-            lines.append(f"  <b>Сумма позиции: {_display_bot_number(goods_total)} MDL</b>")
-        grand_total += goods_total + antiseptic_sum
-        grand_total_goods += goods_total
-        grand_total_antiseptic += antiseptic_sum
-    lines.append("")
-    client = payload.get("client")
-    if client:
-        lines.append(f"Клиент: {_esc(client)}")
-    address = payload.get("address")
-    if address:
-        lines.append(f"Адрес выгрузки: {_esc(address)}")
-    payment_method = normalize_payment_method(store, payload.get("payment_method"))
-    if payment_method:
-        lines.append(f"Оплата: {_esc(payment_method)}")
-    if grand_total:
+                    lines.append(f"  <b>Сумма позиции: {_display_bot_number(round(goods_total + antiseptic_sum, 2))} MDL</b>")
+                elif goods_total:
+                    lines.append(f"  <b>Сумма позиции: {_display_bot_number(goods_total)} MDL</b>")
+                recalc_income = round(position["recalc_income"], 2)
+                if full_info and recalc_income:
+                    lines.append(f"  Доход по пересчету: {signed_bot_number(recalc_income)} MDL")
+                grand_recalc += recalc_income
+                grand_total += goods_total + antiseptic_sum
+                grand_total_goods += goods_total
+                grand_total_antiseptic += antiseptic_sum
         lines.append("")
-        # Задача користувача: "хочу бачити загалом за антисепт і загалом за
-        # товар, а вже в кінці итог" - той самий принцип, що й у
-        # _sale_preview (telegram_dialog_income_sale_flow.py): "Сумма за
-        # Антисептирование" лише коли вона реально є, "Сумма за товар"
-        # завжди поруч з підсумковим "Итого по всей продаже".
-        if grand_total_antiseptic:
-            lines.append(f"<b>Сумма за Антисептирование: {_display_bot_number(round(grand_total_antiseptic, 2))} MDL</b>")
-        lines.append(f"<b>Сумма за товар: {_display_bot_number(round(grand_total_goods, 2))} MDL</b>")
-        lines.append(f"<b>Итого по всей продаже: {_display_bot_number(round(grand_total, 2))} MDL</b>")
-    lines.append("")
-    lines.append("✅ Выполнено.")
-    if excel_warning:
+        client = payload.get("client")
+        if client:
+            lines.append(f"Клиент: {_esc(client)}")
+        address = payload.get("address")
+        if address:
+            lines.append(f"Адрес выгрузки: {_esc(address)}")
+        payment_method = normalize_payment_method(store, payload.get("payment_method"))
+        if payment_method:
+            lines.append(f"Оплата: {_esc(payment_method)}")
+        if grand_total:
+            lines.append("")
+            # Задача користувача: "хочу бачити загалом за антисепт і загалом за
+            # товар, а вже в кінці итог" - той самий принцип, що й у
+            # _sale_preview (telegram_dialog_income_sale_flow.py): "Сумма за
+            # Антисептирование" лише коли вона реально є, "Сумма за товар"
+            # завжди поруч з підсумковим "Итого по всей продаже".
+            if grand_total_antiseptic:
+                lines.append(f"<b>Сумма за Антисептирование: {_display_bot_number(round(grand_total_antiseptic, 2))} MDL</b>")
+            if full_info and grand_recalc:
+                lines.append(f"Сумма по факту: {_display_bot_number(round(grand_total_goods - grand_recalc, 2))} MDL")
+                lines.append(f"Доход по пересчету: {signed_bot_number(grand_recalc)} MDL")
+            lines.append(f"<b>Сумма за товар: {_display_bot_number(round(grand_total_goods, 2))} MDL</b>")
+            lines.append(f"<b>Итого по всей продаже: {_display_bot_number(round(grand_total, 2))} MDL</b>")
         lines.append("")
-        lines.append(_esc(excel_warning))
-    return {"ok": True, "message": "\n".join(lines)}
+        lines.append("✅ Выполнено.")
+        if excel_warning:
+            lines.append("")
+            lines.append(_esc(excel_warning))
+        return "\n".join(lines)
+
+    return {"ok": True, "message": build_lines(True), "group_message": build_lines(False)}
 
 
 def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
@@ -5918,6 +7802,12 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                     }
                 row_values_by_row_id[row_id] = row_values
 
+        # Номер документа рахується ДО рухів: раніше він з'являвся вже після
+        # них, і рухи приходу лишались без номера (у журналі порожня «№»,
+        # і форма не могла зібрати позиції одного приходу в один запис).
+        existing_income_count = len(store.fetch_rows(INCOME_SHEET_NAME, 100000, 0))
+        income_document_number = "Приход №%d" % _next_document_number(store, INCOME_SHEET_NAME, existing_income_count)
+
         for position in positions:
             # Крок 3+ "Дії": усі рядки ОДНІЄЇ позиції мають той самий
             # товар/тип (position, не по-рядково) — резолвимо ОДИН раз НА
@@ -5930,6 +7820,8 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                 is_area = item.get("area") is not None
                 is_linear = item.get("linear") is not None
                 sheet_row_id = item.get("row_id")
+                # Відкат (2026-09-10): рух пам'ятає, що рядок створив саме він.
+                created_stock_row = False
                 if item.get("row_id"):
                     row_values = row_values_by_row_id[item["row_id"]]
                     if operation_id is not None:
@@ -5954,7 +7846,7 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                     updated += 1
                 else:
                     values = [""] * len(headers)
-                    sheet_product = sheet_product_name(position_payload)
+                    sheet_product = lath_product_name(sheet_product_name(position_payload), item["thickness"], item["width"])
                     set_value(values, columns.get("product"), sheet_product)
                     set_value(values, columns.get("breed"), position_payload.get("breed"))
                     # Реальний баг (2026-08-14): "чому в них типу немає? я ж
@@ -6017,17 +7909,23 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                     # самий словник обслуговує обидві гілки (знайдено/
                     # створено).
                     row_values_by_row_id[sheet_row_id] = values
+                    created_stock_row = True
                     created += 1
 
                 user = payload.get("user") or {}
                 store.add_stock_movement(
                     {
                         "movement_type": "income",
+                        # ТЗ п.4: коментар видно в історії (колонка «Причина /
+                        # клиент»). ТЗ п.7/9: у приходу тепер є свій номер, тож
+                        # усі його позиції збираються в один запис журналу.
+                        "reason": position_payload.get("comment") or payload.get("comment"),
+                        "document": income_document_number,
                         "source": "telegram",
                         "telegram_user_id": user.get("id"),
                         "username": user.get("username"),
                         "full_name": user.get("full_name"),
-                        "product": sheet_product_name(position_payload),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
                         "breed": position_payload.get("breed"),
                         "condition": position_payload.get("condition"),
                         "thickness": item.get("thickness"),
@@ -6040,14 +7938,14 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
                         "sheet_row_id": sheet_row_id,
                         "original_text": payload.get("original_text"),
                         "created_at": now,
+                        "balance_after": _number_value(row_value(row_values_by_row_id.get(sheet_row_id) or [], columns["balance_qty"])),
+                        "created_stock_row": created_stock_row,
                     }
                 )
 
         # Той самий персистентний _next_document_number, що вже мають
         # продаж/списання/антисептирование — один номер на ВЕСЬ виклик (усі
         # позиції цього приходу), не по одному на кожен рядок.
-        existing_income_count = len(store.fetch_rows(INCOME_SHEET_NAME, 100000, 0))
-        income_document_number = f"Приход №{_next_document_number(store, INCOME_SHEET_NAME, existing_income_count)}"
         for position in positions:
             position_payload = {**payload, **position}
             for item in position["rows"]:
@@ -6077,7 +7975,9 @@ def apply_income_operation(store, payload, sync_mode, dirty_notifier=None):
             groups.append({"payload": position_payload, "rows": []})
         groups[group_index_by_key[key]]["rows"].extend(position["rows"])
 
-    lines = ["Приход записан:", ""]
+    # Номер у заголовку (рішення користувача, 2026-09-10): усі п'ять
+    # операцій називають свій документ однаково.
+    lines = ["<b>%s</b> записан:" % _esc(income_document_number), ""]
     index = 0
     for group_number, group in enumerate(groups, start=1):
         position_payload = group["payload"]
@@ -6176,7 +8076,7 @@ def writeoff_sheet_values(store, payload, item, now, document_number=None):
     writeoff_date = _parse_date_text(payload.get("date")) or date.today()
     set_value(values, columns.get("date"), writeoff_date)
     set_value(values, columns.get("document"), document_number)
-    set_value(values, columns.get("product"), sheet_product_name(payload))
+    set_value(values, columns.get("product"), lath_product_name(sheet_product_name(payload), item.get("thickness"), item.get("width")))
     set_value(values, columns.get("breed"), payload.get("breed"))
     set_value(values, columns.get("condition"), payload.get("condition"))
     set_value(values, columns.get("thickness"), item.get("thickness"))
@@ -6189,195 +8089,169 @@ def writeoff_sheet_values(store, payload, item, now, document_number=None):
     return values
 
 
+def _writeoff_positions(payload):
+    """Позиції списання: completed_positions (кілька позицій з форми,
+    2026-09-06) + поточна. Кожна несе product/condition/breed/rows."""
+    positions = list(payload.get("completed_positions") or [])
+    positions.append({
+        "product": payload.get("product"),
+        "condition": payload.get("condition"),
+        "breed": payload.get("breed"),
+        "rows": payload.get("rows") or [],
+    })
+    return positions
+
+
 def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
     headers, columns, _ = warehouse_rows(store)
-    for item in payload["rows"]:
-        if _number_value(item.get("quantity")) <= 0:
-            return {
-                "ok": False,
-                "message": "Не удалось записать списание: количество не может быть отрицательным или равным нулю.",
-            }
-        # Той самий ОСБ-виняток, що й у apply_sale_operation/apply_income_
-        # operation: вимір перевіряємо лише коли він РЕАЛЬНО є в цієї
-        # позиції (item_measure_kind) - для ОСБ (кількість без фізичного
-        # виміру) 0 у "volume" - коректний, очікуваний стан, не помилка.
-        measure_kind = item_measure_kind(item)
-        if measure_kind is not None and _number_value(item.get(measure_kind)) <= 0:
-            return {
-                "ok": False,
-                "message": (
-                    "Не удалось записать списание: объём/площадь/погонные метры "
-                    "не могут быть отрицательными или равными нулю."
-                ),
-            }
-
-    now = datetime.now().isoformat(timespec="seconds")
-    updated = 0
-    with store.conn:
-        # Той самий TOCTOU-фікс (BEGIN IMMEDIATE), що й у apply_sale_
-        # operation/apply_income_operation — читання залишку й перевірка
-        # "чи вистачає" мають бути в одній нероздільній транзакції з
-        # фактичним записом.
-        store.conn.execute("BEGIN IMMEDIATE")
-        operation_id = resolve_operation_for_payload(store, "start_writeoff", "writeoff", payload)
-
-        row_values_by_row_id = {}
-        for item in payload["rows"]:
-            row_id = item.get("row_id")
-            if row_id is None:
-                continue
-            row_values = row_values_by_row_id.get(row_id)
-            if row_values is None:
-                row_values = store.get_row(row_id)
-                if not row_values:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: позиция больше не найдена на складе.\n"
-                            f"Позиция: {income_item_size(item)}"
-                        ),
-                    }
-                row_values_by_row_id[row_id] = row_values
-
-            is_area = item.get("area") is not None
-            is_linear = item.get("linear") is not None
-            balance_qty = _number_value(row_value(row_values, columns["balance_qty"]))
-            if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
+    # Кілька позицій з форми (2026-09-06): кожна позиція - свій продукт/
+    # порода/стан; усі перевірки до першого запису, запис - однією
+    # транзакцією й одним документом «Списание №N».
+    positions = [{**payload, **position} for position in _writeoff_positions(payload)]
+    for position_payload in positions:
+        for item in position_payload["rows"]:
+            if _number_value(item.get("quantity")) <= 0:
+                return {
+                    "ok": False,
+                    "message": "Не удалось записать списание: количество не может быть отрицательным или равным нулю.",
+                }
+            measure_kind = item_measure_kind(item)
+            if measure_kind is not None and _number_value(item.get(measure_kind)) <= 0:
                 return {
                     "ok": False,
                     "message": (
-                        "Не удалось записать списание: на складе уже недостаточно штук.\n"
-                        f"Доступно: {_display_bot_number(balance_qty)} шт."
+                        "Не удалось записать списание: объём/площадь/погонные метры "
+                        "не могут быть отрицательными или равными нулю."
                     ),
                 }
-            if is_area:
-                balance_area = _number_value(row_value(row_values, columns.get("balance_area")))
-                if _number_value(item.get("area")) > balance_area + INCOME_VOLUME_TOLERANCE:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: на складе уже недостаточно площади.\n"
-                            f"Доступно: {_display_bot_number(balance_area)} м2."
-                        ),
-                    }
-            elif is_linear:
-                balance_linear = _number_value(row_value(row_values, columns.get("balance_linear")))
-                if _number_value(item.get("linear")) > balance_linear + INCOME_VOLUME_TOLERANCE:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: на складе уже недостаточно погонных метров.\n"
-                            f"Доступно: {_display_bot_number(balance_linear)} мп."
-                        ),
-                    }
-            elif item.get("volume") is not None:
-                balance_volume = _number_value(row_value(row_values, columns["balance_volume"]))
-                if _number_value(item.get("volume")) > balance_volume + INCOME_VOLUME_TOLERANCE:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Не удалось записать списание: на складе уже недостаточно объема.\n"
-                            f"Доступно: {_display_bot_number(balance_volume)} м3."
-                        ),
-                    }
 
-            if operation_id is not None:
-                execute_operation_write(store, operation_id, item, row_values, columns)
-            else:
-                add_to_row_value(row_values, columns["balance_qty"], -_number_value(item["quantity"]))
-                if is_area:
-                    add_to_row_value(row_values, columns.get("balance_area"), -_number_value(item["area"]))
-                elif is_linear:
-                    add_to_row_value(row_values, columns.get("balance_linear"), -_number_value(item["linear"]))
-                elif item.get("volume") is not None:
-                    add_to_row_value(row_values, columns["balance_volume"], -_number_value(item["volume"]))
+    now = datetime.now().isoformat(timespec="seconds")
+    updated = 0
+    row_values_by_row_id = {}
+    with store.conn:
+        store.conn.execute("BEGIN IMMEDIATE")
+        for position_payload in positions:
+            operation_id = resolve_operation_for_payload(store, "start_writeoff", "writeoff", position_payload)
+            for item in position_payload["rows"]:
+                row_id = item.get("row_id")
+                if row_id is None:
+                    continue
+                row_values = row_values_by_row_id.get(row_id)
+                if row_values is None:
+                    row_values = store.get_row(row_id)
+                    if not row_values:
+                        return {
+                            "ok": False,
+                            "message": (
+                                "Не удалось записать списание: позиция больше не найдена на складе.\n"
+                                f"Позиция: {income_item_size(item)}"
+                            ),
+                        }
+                    row_values_by_row_id[row_id] = row_values
 
-            # Задача користувача: "додамо колонку причина списания в
-            # складі... там буде відображатись весь текст причини" — пише
-            # ПОВЕРХ (не accumulate), бо СКЛАД — агрегований рядок за
-            # SKU, а не журнал операцій; це і є "поточна причина останнього
-            # списання цього рядка", той самий принцип, що вже діє для
-            # balance_qty (завжди поточне значення, не історія). set_value
-            # безпечно ігнорує відсутню колонку (columns.get(...) is None)
-            # — старі встановлення без цієї колонки не ламаються.
-            if payload.get("comment"):
-                set_value(row_values, columns.get("writeoff_reason"), payload["comment"])
+                is_area = item.get("area") is not None
+                is_linear = item.get("linear") is not None
+                balance_qty = _number_value(row_value(row_values, columns["balance_qty"]))
+                if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
+                    return {
+                        "ok": False,
+                        "message": (
+                            "Не удалось записать списание: на складе уже недостаточно штук.\n"
+                            f"Доступно: {_display_bot_number(balance_qty)} шт."
+                        ),
+                    }
+                # Сторожі виміру (м2/мп/м3) прибрано (2026-09-06): правда -
+                # штуки, вимір рахується зі штук і окремо не звіряється.
+
+                if operation_id is not None:
+                    execute_operation_write(store, operation_id, item, row_values, columns)
+                else:
+                    add_to_row_value(row_values, columns["balance_qty"], -_number_value(item["quantity"]))
+                    if is_area:
+                        add_to_row_value(row_values, columns.get("balance_area"), -_number_value(item["area"]))
+                    elif is_linear:
+                        add_to_row_value(row_values, columns.get("balance_linear"), -_number_value(item["linear"]))
+                    elif item.get("volume") is not None:
+                        add_to_row_value(row_values, columns["balance_volume"], -_number_value(item["volume"]))
+
+                if position_payload.get("comment"):
+                    set_value(row_values, columns.get("writeoff_reason"), position_payload["comment"])
 
         for row_id, row_values in row_values_by_row_id.items():
             store.update_row(row_id, row_values)
 
-        # Той самий персистентний _next_document_number, що вже мають
-        # продаж/антисептирование - один номер на ВЕСЬ виклик (усі позиції
-        # цього списання), не по одному на кожен рядок.
         existing_writeoff_count = len(store.fetch_rows(WRITEOFF_SHEET_NAME, 100000, 0))
         writeoff_document_number = (
             f"Списание №{_next_document_number(store, WRITEOFF_SHEET_NAME, existing_writeoff_count)}"
         )
-        for item in payload["rows"]:
-            writeoff_sheet_row = writeoff_sheet_values(store, payload, item, now, writeoff_document_number)
-            insert_sheet_row(store, WRITEOFF_SHEET_NAME, writeoff_sheet_row, now)
-
         user = payload.get("user") or {}
-        for item in payload["rows"]:
-            store.add_stock_movement(
-                {
-                    "movement_type": "writeoff",
-                    "source": "telegram",
-                    "telegram_user_id": user.get("id"),
-                    "username": user.get("username"),
-                    "full_name": user.get("full_name"),
-                    "product": sheet_product_name(payload),
-                    "breed": payload.get("breed"),
-                    "condition": payload.get("condition"),
-                    "thickness": item.get("thickness"),
-                    "width": item.get("width"),
-                    "length": item.get("length"),
-                    "quantity": item.get("quantity"),
-                    "volume": item.get("volume"),
-                    "area": item.get("area"),
-                    "linear": item.get("linear"),
-                    "reason": payload.get("comment"),
-                    "sheet_row_id": item.get("row_id"),
-                    "original_text": payload.get("original_text"),
-                    "created_at": now,
-                }
-            )
-            updated += 1
+        for position_payload in positions:
+            for item in position_payload["rows"]:
+                writeoff_sheet_row = writeoff_sheet_values(store, position_payload, item, now, writeoff_document_number)
+                insert_sheet_row(store, WRITEOFF_SHEET_NAME, writeoff_sheet_row, now)
+            for item in position_payload["rows"]:
+                store.add_stock_movement(
+                    {
+                        "movement_type": "writeoff",
+                        # Номер списання в русі (рішення користувача,
+                        # 2026-09-10) - та сама діра, що була в продажу.
+                        "document": writeoff_document_number,
+                        "source": "telegram",
+                        "telegram_user_id": user.get("id"),
+                        "username": user.get("username"),
+                        "full_name": user.get("full_name"),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
+                        "breed": position_payload.get("breed"),
+                        "condition": position_payload.get("condition"),
+                        "thickness": item.get("thickness"),
+                        "width": item.get("width"),
+                        "length": item.get("length"),
+                        "quantity": item.get("quantity"),
+                        "volume": item.get("volume"),
+                        "area": item.get("area"),
+                        "linear": item.get("linear"),
+                        "reason": position_payload.get("comment"),
+                        "sheet_row_id": item.get("row_id"),
+                        "original_text": payload.get("original_text"),
+                        "created_at": now,
+                        "balance_after": _number_value(row_value(row_values_by_row_id.get(item.get("row_id")) or [], columns["balance_qty"])),
+                    }
+                )
+                updated += 1
 
     excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", WRITEOFF_SHEET_NAME], dirty_notifier)
 
-    # Задача користувача (2026-08-17): "Состояние має показуватись скрізь" -
-    # той самий заголовок "Позиция: Продукт / Порода / Состояние", що вже
-    # має apply_sale_operation/apply_income_operation. На відміну від них,
-    # списання завжди має РІВНО один product/breed/condition на весь виклик
-    # (payload-рівень, не по позиціях/рядках) - групувати нема чого,
-    # заголовок друкується один раз.
-    lines = ["Списание записано:"]
-    header_parts = [
-        _esc(part) for part in (display_product_name(payload), payload.get("breed"), payload.get("condition")) if part
-    ]
-    if header_parts:
-        lines.append(f"Позиция: {' / '.join(header_parts)}")
-    for index, item in enumerate(payload["rows"], start=1):
-        measure_kind = item_measure_kind(item)
-        row_values = row_values_by_row_id.get(item.get("row_id"))
-        remaining_suffix = (
-            f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
-            if row_values is not None
-            else ""
-        )
-        if measure_kind is None:
-            lines.append(
-                f"{index}. {_esc(income_item_size(item))}: -{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+    lines = ["<b>%s</b> записано:" % _esc(writeoff_document_number)]
+    index = 0
+    for position_payload in positions:
+        header_parts = [
+            _esc(part)
+            for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition"))
+            if part
+        ]
+        if header_parts:
+            lines.append(f"Позиция: {' / '.join(header_parts)}")
+        for item in position_payload["rows"]:
+            index += 1
+            measure_kind = item_measure_kind(item)
+            row_values = row_values_by_row_id.get(item.get("row_id"))
+            remaining_suffix = (
+                f" (Осталось: {_esc(_remaining_balance_text(row_values, columns, measure_kind))})"
+                if row_values is not None
+                else ""
             )
-            continue
-        measure_value = item.get(measure_kind)
-        measure_unit = ITEM_MEASURE_UNIT[measure_kind]
-        lines.append(
-            f"{index}. {_esc(income_item_size(item))}: -"
-            f"{_display_bot_number(item['quantity'])} шт, -"
-            f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
-        )
+            if measure_kind is None:
+                lines.append(
+                    f"{index}. {_esc(income_item_size(item))}: -{_display_bot_number(item['quantity'])} шт{remaining_suffix}"
+                )
+                continue
+            measure_value = item.get(measure_kind)
+            measure_unit = ITEM_MEASURE_UNIT[measure_kind]
+            lines.append(
+                f"{index}. {_esc(income_item_size(item))}: -"
+                f"{_display_bot_number(item['quantity'])} шт, -"
+                f"{_display_bot_number(measure_value)} {measure_unit}{remaining_suffix}"
+            )
     lines.append(f"Обновлено позиций: {updated}")
     if payload.get("comment"):
         lines.append(f"Причина: {_esc(payload['comment'])}")
@@ -6387,21 +8261,6 @@ def apply_writeoff_operation(store, payload, sync_mode, dirty_notifier=None):
         lines.append("")
         lines.append(_esc(excel_warning))
     return {"ok": True, "message": "\n".join(lines)}
-
-
-# =============================================================================
-# Услуга антисептирования — окремий лист (АНТИСЕПТИРОВАНИЕ), НЕ рядок у
-# ПРОДАЖА МАТЕРИАЛА: інша структура колонок (Тип расчета/Статус оплаты/
-# Приход наличных/Приход по банку/Отражение в расчетах — ведеться окремий
-# готівка/банк розподіл, якого нема у звичайній продажі), і склад НЕ
-# списується (доска клієнта, не наша). Зверху листа (перед реальними
-# заголовками колонок) є інформаційний блок зведення (об'єм/вартість/
-# кількість послуг, скільки готівкою/по банку) — НЕ формули, статичні
-# значення в шаблоні, тому sync_antiseptic_to_excel перераховує їх сама при
-# кожній синхронізації (на відміну від sync_sheets_to_excel, яка для
-# СКЛАД/ПРОДАЖА просто дописує рядки без жодного зведення зверху).
-# =============================================================================
-
 
 def antiseptic_columns(headers):
     names = {
@@ -6509,6 +8368,517 @@ def antiseptic_sheet_values(store, payload, now):
     return values
 
 
+# --- Обмін (ТЗ пункт 1, 2026-09-05) ---
+# "Отдаём" списується зі складу за тими ж перевірками, що й списання;
+# "Получаем" приходується як прихід - у наявний рядок або в новий (відповідь
+# користувача 3: новий розмір дозволений). Усі перевірки обох блоків ідуть
+# ДО першого запису, самі записи - в одній транзакції: впала хоч одна -
+# не записано нічого (ТЗ пункт 12). Лист ОБМЕН отримує по рядку на позицію,
+# колонка "Отдаём / Получаем" каже, до якого блоку належить рядок, "Обмен №"
+# звʼязує всі рядки однієї операції; той самий номер лягає в
+# stock_movements.document - тому в історії це ОДИН обмін.
+EXCHANGE_GIVE_LABEL = "Отдаём"
+EXCHANGE_TAKE_LABEL = "Получаем"
+
+
+class _ExchangeAbort(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def _header_index_map(headers, names):
+    normalized_headers = {
+        _normalize_phrase(header): index
+        for index, header in enumerate(headers)
+        if header is not None
+    }
+    return {
+        target: next(
+            (
+                normalized_headers[_normalize_phrase(candidate)]
+                for candidate in candidates
+                if _normalize_phrase(candidate) in normalized_headers
+            ),
+            None,
+        )
+        for target, candidates in names.items()
+    }
+
+
+def exchange_columns(headers):
+    return _header_index_map(headers, {
+        "date": ["Дата"],
+        "time": ["Время"],
+        "document": ["Обмен №", "Документ"],
+        "block": ["Замена №"],
+        "side": ["Отдаём / Получаем", "Отдаем / Получаем"],
+        "product": ["Продукт"],
+        "breed": ["Порода"],
+        "condition": ["Состояние"],
+        "thickness": ["Толщина, мм", "Толщина"],
+        "width": ["Ширина, мм", "Ширина"],
+        "length": ["Длина, мм", "Длинна, мм", "Длина", "Длинна"],
+        "quantity": ["Количество, шт"],
+        "volume": ["Итоговый объем, м3"],
+        "area": ["Итоговая площадь, м2"],
+        "linear": ["Расчетный метраж, мп"],
+        "manager": ["Менеджер"],
+        "comment": ["Комментарий"],
+    })
+
+
+def exchange_sheet_values(store, position_payload, item, side_label, now, document_number):
+    headers = store.get_headers(EXCHANGE_SHEET_NAME)
+    values = [""] * len(headers)
+    columns = exchange_columns(headers)
+    moment = datetime.fromisoformat(now)
+    set_value(values, columns.get("date"), moment.date())
+    set_value(values, columns.get("time"), moment.time())
+    set_value(values, columns.get("document"), document_number)
+    set_value(values, columns.get("block"), position_payload.get("block"))
+    set_value(values, columns.get("side"), side_label)
+    set_value(values, columns.get("product"), lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")))
+    set_value(values, columns.get("breed"), position_payload.get("breed"))
+    set_value(values, columns.get("condition"), position_payload.get("condition"))
+    set_value(values, columns.get("thickness"), item.get("thickness"))
+    set_value(values, columns.get("width"), item.get("width"))
+    set_value(values, columns.get("length"), item.get("length"))
+    set_value(values, columns.get("quantity"), item.get("quantity"))
+    set_value(values, columns.get("volume"), item.get("volume"))
+    set_value(values, columns.get("area"), item.get("area"))
+    set_value(values, columns.get("linear"), item.get("linear"))
+    user = position_payload.get("user") or {}
+    set_value(values, columns.get("manager"), user.get("full_name") or user.get("username"))
+    set_value(values, columns.get("comment"), position_payload.get("comment"))
+    return values
+
+
+def _exchange_item_error(prefix, item):
+    return "Не удалось записать обмен: %s.\nПозиция: %s" % (prefix, income_item_size(item))
+
+
+def _check_exchange_give_balance(item, row_values, columns):
+    balance_qty = _number_value(row_value(row_values, columns["balance_qty"]))
+    if _number_value(item.get("quantity")) > balance_qty + INCOME_QUANTITY_TOLERANCE:
+        raise _ExchangeAbort(
+            "Не удалось записать обмен: на складе недостаточно штук для блока «Отдаём».\n"
+            "Позиция: %s. Доступно: %s шт." % (income_item_size(item), _display_bot_number(balance_qty))
+        )
+    measure_kind = item_measure_kind(item)
+    if measure_kind is None:
+        return
+    balance_column = columns.get("balance_" + measure_kind)
+    balance_measure = _number_value(row_value(row_values, balance_column)) if balance_column is not None else 0.0
+    if _number_value(item.get(measure_kind)) > balance_measure + INCOME_VOLUME_TOLERANCE:
+        raise _ExchangeAbort(
+            "Не удалось записать обмен: на складе недостаточно %s для блока «Отдаём».\n"
+            "Позиция: %s. Доступно: %s %s."
+            % (
+                {"volume": "объёма", "area": "площади", "linear": "погонных метров"}[measure_kind],
+                income_item_size(item), _display_bot_number(balance_measure), ITEM_MEASURE_UNIT[measure_kind],
+            )
+        )
+
+
+def _exchange_measure_delta(row_values, columns, item, sign, prefix):
+    """Ручний запис у рядок СКЛАД, коли для операції немає конфігурації полів."""
+    add_to_row_value(row_values, columns[prefix + "_qty"], sign * _number_value(item["quantity"]))
+    measure_kind = item_measure_kind(item)
+    if measure_kind is None:
+        return
+    column = columns.get(prefix + "_" + measure_kind)
+    if column is not None:
+        add_to_row_value(row_values, column, sign * _number_value(item[measure_kind]))
+
+
+def _new_warehouse_row_for_exchange(headers, columns, position_payload, item):
+    values = [""] * len(headers)
+    sheet_product = lath_product_name(sheet_product_name(position_payload), item["thickness"], item["width"])
+    set_value(values, columns.get("product"), sheet_product)
+    set_value(values, columns.get("breed"), position_payload.get("breed"))
+    set_value(values, columns.get("condition"), position_payload.get("condition"))
+    set_value(values, columns.get("thickness"), item["thickness"])
+    set_value(values, columns.get("width"), item["width"])
+    set_value(values, columns.get("length"), item["length"])
+    measure_kind = item_measure_kind(item)
+    set_value(values, columns.get("unit"), ITEM_MEASURE_UNIT[measure_kind] if measure_kind else "шт")
+    set_value(values, columns.get("sku"), "%s|%s|%s" % (sheet_product, position_payload.get("breed"), income_item_size(item)))
+    return values
+
+
+def _exchange_report_line(index, head, item, sign, row_values, columns, note=""):
+    measure_kind = item_measure_kind(item)
+    text = "%d. %s%s: %s%s шт" % (
+        index, (head + " ") if head else "", _esc(income_item_size(item)), sign, _display_bot_number(item["quantity"]),
+    )
+    if measure_kind is not None:
+        text += ", %s%s %s" % (sign, _display_bot_number(item.get(measure_kind)), ITEM_MEASURE_UNIT[measure_kind])
+    if row_values is not None:
+        text += " (Осталось: %s)" % _esc(_remaining_balance_text(row_values, columns, measure_kind))
+    if note:
+        text += " " + note
+    return text
+
+
+def apply_exchange_operation(store, payload, sync_mode, dirty_notifier=None):
+    """Проводить обмін: "Отдаём" зі складу, "Получаем" на склад, один документ.
+
+    payload: user, comment, give=[позиція...], take=[позиція...]; позиція -
+    product/breed/condition + rows[{thickness,width,length,quantity,
+    volume|area|linear,row_id}] - те саме, що прихід/списання з форми.
+    """
+    give = payload.get("give") or []
+    take = payload.get("take") or []
+    if not give:
+        return {"ok": False, "message": "Не удалось записать обмен: блок «Отдаём» пуст."}
+    if not take:
+        return {"ok": False, "message": "Не удалось записать обмен: блок «Получаем» пуст."}
+    if not store.get_headers(EXCHANGE_SHEET_NAME):
+        return {
+            "ok": False,
+            "message": (
+                "Не удалось записать обмен: в таблице ещё нет листа ОБМЕН.\n"
+                "Нажмите «Обновить эксели» в программе, подтвердите добавление листа и повторите обмен."
+            ),
+        }
+    for position in list(give) + list(take):
+        for item in position.get("rows") or []:
+            if _number_value(item.get("quantity")) <= 0:
+                return {"ok": False, "message": "Не удалось записать обмен: количество не может быть отрицательным или равным нулю."}
+            measure_kind = item_measure_kind(item)
+            if measure_kind is not None and _number_value(item.get(measure_kind)) <= 0:
+                return {"ok": False, "message": "Не удалось записать обмен: объём/площадь/погонные метры не могут быть отрицательными или равными нулю."}
+
+    now = datetime.now().isoformat(timespec="seconds")
+    headers, columns, _rows = warehouse_rows(store)
+    user = payload.get("user") or {}
+    common = {key: value for key, value in payload.items() if key not in ("give", "take")}
+    give_done = []
+    take_done = []
+    document_number = None
+    try:
+        with store.conn:
+            store.conn.execute("BEGIN IMMEDIATE")
+            row_values_by_row_id = {}
+
+            # Отдаём: перевірка й списання позиція за позицією В ПАМʼЯТІ -
+            # так одна й та сама позиція у двох рядках перевіряється
+            # сукупно; на диск нічого не потрапляє до самого кінця.
+            for position in give:
+                position_payload = {**common, **position}
+                operation_id = resolve_operation_for_payload(store, "start_writeoff", "writeoff", position_payload)
+                for item in position.get("rows") or []:
+                    row_id = item.get("row_id")
+                    row_values = row_values_by_row_id.get(row_id) if row_id is not None else None
+                    if row_values is None and row_id is not None:
+                        row_values = store.get_row(row_id)
+                    if not row_values:
+                        raise _ExchangeAbort(_exchange_item_error("позиция для блока «Отдаём» не найдена на складе", item))
+                    row_values_by_row_id[row_id] = row_values
+                    _check_exchange_give_balance(item, row_values, columns)
+                    if operation_id is not None:
+                        execute_operation_write(store, operation_id, item, row_values, columns)
+                    else:
+                        _exchange_measure_delta(row_values, columns, item, -1, "balance")
+                    give_done.append((position_payload, item, row_values))
+
+            # Получаем: наявний рядок або новий.
+            for position in take:
+                position_payload = {**common, **position}
+                operation_id = resolve_operation_for_payload(store, "start_income", "income", position_payload)
+                for item in position.get("rows") or []:
+                    row_id = item.get("row_id")
+                    if row_id:
+                        row_values = row_values_by_row_id.get(row_id) or store.get_row(row_id)
+                        if not row_values:
+                            raise _ExchangeAbort(_exchange_item_error("позиция для блока «Получаем» больше не найдена на складе", item))
+                        row_values_by_row_id[row_id] = row_values
+                        if operation_id is not None:
+                            execute_operation_write(store, operation_id, item, row_values, columns)
+                        else:
+                            _exchange_measure_delta(row_values, columns, item, 1, "income")
+                            _exchange_measure_delta(row_values, columns, item, 1, "balance")
+                        take_done.append((position_payload, item, row_values, False))
+                    else:
+                        values = _new_warehouse_row_for_exchange(headers, columns, position_payload, item)
+                        if operation_id is not None:
+                            execute_operation_write(store, operation_id, item, values, columns)
+                        else:
+                            _exchange_measure_delta(values, columns, item, 1, "income")
+                            _exchange_measure_delta(values, columns, item, 1, "balance")
+                        sheet_row_id = store.add_row("СКЛАД", values)
+                        item["row_id"] = sheet_row_id
+                        row_values_by_row_id[sheet_row_id] = values
+                        take_done.append((position_payload, item, values, True))
+
+            for row_id, row_values in row_values_by_row_id.items():
+                store.update_row(row_id, row_values)
+
+            existing_count = len(store.fetch_rows(EXCHANGE_SHEET_NAME, 100000, 0))
+            document_number = "Обмен №%d" % _next_document_number(store, EXCHANGE_SHEET_NAME, existing_count)
+            for side_label, movement_type, done in (
+                # Відкат (2026-09-10): четвертий елемент - чи створив цей
+                # бік новий рядок СКЛАД («получаем» нового розміру).
+                (EXCHANGE_GIVE_LABEL, "exchange_out", [(p, i, r, False) for p, i, r in give_done]),
+                (EXCHANGE_TAKE_LABEL, "exchange_in", list(take_done)),
+            ):
+                for position_payload, item, _row_values, created_stock_row in done:
+                    insert_sheet_row(
+                        store, EXCHANGE_SHEET_NAME,
+                        exchange_sheet_values(store, position_payload, item, side_label, now, document_number), now,
+                    )
+                    store.add_stock_movement({
+                        "movement_type": movement_type,
+                        "source": "telegram",
+                        "telegram_user_id": user.get("id"),
+                        "username": user.get("username"),
+                        "full_name": user.get("full_name"),
+                        "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
+                        "breed": position_payload.get("breed"),
+                        "condition": position_payload.get("condition"),
+                        "thickness": item.get("thickness"),
+                        "width": item.get("width"),
+                        "length": item.get("length"),
+                        "quantity": item.get("quantity"),
+                        "volume": item.get("volume"),
+                        "area": item.get("area"),
+                        "linear": item.get("linear"),
+                        "reason": payload.get("comment"),
+                        "sheet_row_id": item.get("row_id"),
+                        "original_text": payload.get("original_text"),
+                        "created_at": now,
+                        "balance_after": _number_value(row_value(_row_values, columns["balance_qty"])),
+                        "document": document_number,
+                        "created_stock_row": created_stock_row,
+                    })
+    except _ExchangeAbort as exc:
+        return {"ok": False, "message": exc.message}
+
+    excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", EXCHANGE_SHEET_NAME], dirty_notifier)
+    # Обмін блоками (2026-09-06): звіт по заміна́х - у кожній свої «Отдаём» і
+    # один «Получаем»; при одній заміні заголовка «Замена N» нема.
+    def _head(position_payload):
+        return " / ".join(
+            _esc(part)
+            for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition"))
+            if part
+        )
+
+    blocks = sorted({int(p.get("block") or 1) for p, _i, _r in give_done} | {int(p.get("block") or 1) for p, _i, _r, _n in take_done})
+    multi = len(blocks) > 1
+    lines = ["<b>%s</b> записан." % _esc(document_number)]
+    for block in blocks:
+        lines.append("")
+        if multi:
+            lines.append("<b>Замена %d</b>" % block)
+        lines.append("<b>Отдаём:</b>")
+        index = 0
+        for position_payload, item, row_values in give_done:
+            if int(position_payload.get("block") or 1) != block:
+                continue
+            index += 1
+            lines.append(_exchange_report_line(index, _head(position_payload), item, "\u2212", row_values, columns))
+        lines.append("<b>Получаем:</b>")
+        index = 0
+        for position_payload, item, row_values, is_new in take_done:
+            if int(position_payload.get("block") or 1) != block:
+                continue
+            index += 1
+            lines.append(_exchange_report_line(index, _head(position_payload), item, "+", row_values, columns, "(новая позиция)" if is_new else ""))
+    if payload.get("comment"):
+        lines.append("")
+        lines.append("Комментарий: %s" % _esc(payload["comment"]))
+    lines.append("")
+    lines.append("✅ Выполнено.")
+    if excel_warning:
+        lines.append("")
+        lines.append(_esc(excel_warning))
+    return {"ok": True, "message": "\n".join(lines), "document": document_number}
+
+
+def correction_columns(headers):
+    return _header_index_map(headers, {
+        "date": ["Дата"],
+        "time": ["Время"],
+        "document": ["Коррекция №", "Документ"],
+        "product": ["Продукт"],
+        "breed": ["Порода"],
+        "condition": ["Состояние"],
+        "thickness": ["Толщина, мм", "Толщина"],
+        "width": ["Ширина, мм", "Ширина"],
+        "length": ["Длина, мм", "Длинна, мм", "Длина", "Длинна"],
+        "was": ["Было, шт"],
+        "became": ["Стало, шт"],
+        "delta": ["Разница, шт"],
+        "delta_volume": ["Разница, м3"],
+        "delta_area": ["Разница, м2"],
+        "delta_linear": ["Разница, мп"],
+        "manager": ["Менеджер"],
+        "reason": ["Причина"],
+    })
+
+
+def correction_sheet_values(store, position_payload, item, now, document_number):
+    headers = store.get_headers(CORRECTION_SHEET_NAME)
+    values = [""] * len(headers)
+    columns = correction_columns(headers)
+    moment = datetime.fromisoformat(now)
+    set_value(values, columns.get("date"), moment.date())
+    set_value(values, columns.get("time"), moment.time())
+    set_value(values, columns.get("document"), document_number)
+    set_value(values, columns.get("product"), lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")))
+    set_value(values, columns.get("breed"), position_payload.get("breed"))
+    set_value(values, columns.get("condition"), position_payload.get("condition"))
+    set_value(values, columns.get("thickness"), item.get("thickness"))
+    set_value(values, columns.get("width"), item.get("width"))
+    set_value(values, columns.get("length"), item.get("length"))
+    set_value(values, columns.get("was"), item.get("was_quantity"))
+    set_value(values, columns.get("became"), item.get("new_quantity"))
+    set_value(values, columns.get("delta"), item.get("delta_quantity"))
+    for measure_kind in ("volume", "area", "linear"):
+        if item.get("delta_" + measure_kind) is not None:
+            set_value(values, columns.get("delta_" + measure_kind), item.get("delta_" + measure_kind))
+    user = position_payload.get("user") or {}
+    set_value(values, columns.get("manager"), user.get("full_name") or user.get("username"))
+    set_value(values, columns.get("reason"), position_payload.get("comment"))
+    return values
+
+
+def apply_correction_operation(store, payload, sync_mode, dirty_notifier=None):
+    """Корекція залишків (адмін-форма й вікно клієнта, 2026-09-06).
+
+    payload: user, comment, positions=[{product, breed, condition,
+    rows[{row_id, thickness, width, length, new_quantity}]}]. Людина вводить
+    лише «Стало, шт»; різницю в штуках і в одиниці виміру рядка рахує
+    програма. Усі перевірки до першого запису, одна транзакція, один документ
+    «Коррекция №N», рядок у КОРРЕКЦИЯ і рух "correction" на кожну позицію.
+    """
+    positions = payload.get("positions") or []
+    if not positions:
+        return {"ok": False, "message": "Не удалось записать коррекцию: нет ни одной позиции."}
+    if not store.get_headers(CORRECTION_SHEET_NAME):
+        return {
+            "ok": False,
+            "message": (
+                "Не удалось записать коррекцию: в таблице ещё нет листа КОРРЕКЦИЯ.\n"
+                "Нажмите «Обновить эксели» в программе, подтвердите добавление листа и повторите."
+            ),
+        }
+    headers, columns, _rows = warehouse_rows(store)
+    now = datetime.now().isoformat(timespec="seconds")
+    user = payload.get("user") or {}
+    common = {key: value for key, value in payload.items() if key != "positions"}
+    prepared = []
+    for position in positions:
+        position_payload = {**common, **position}
+        for item in position.get("rows") or []:
+            row_id = item.get("row_id")
+            row_values = store.get_row(row_id) if row_id is not None else None
+            if not row_values:
+                # Номер рядка міг застаріти (перечитування Excel створює рядки
+                # заново): шукаємо за ознаками (2026-09-07).
+                row_id = find_stock_row_id(store, position_payload, item)
+                row_values = store.get_row(row_id) if row_id is not None else None
+                if row_values:
+                    item = {**item, "row_id": row_id}
+            if not row_values and item.get("new_row"):
+                # Нова позиція з вікна «Новый размер» (2026-09-07): рядок
+                # складу створюється при записі з нуля тією ж «Коррекция №N».
+                row_values = _new_stock_row_values(store, position_payload, item)
+                item = {**item, "row_id": None}
+            if not row_values:
+                return {
+                    "ok": False,
+                    "message": "Не удалось записать коррекцию: позиция не найдена на складе.\nПозиция: %s" % income_item_size(item),
+                }
+            new_quantity = _number_value(item.get("new_quantity"))
+            if new_quantity < 0:
+                return {"ok": False, "message": "Не удалось записать коррекцию: «Стало» не может быть отрицательным."}
+            was_quantity = _number_value(row_value(row_values, columns["balance_qty"]))
+            delta = round(new_quantity - was_quantity, 6)
+            measure_kind = row_measure_kind(position_payload.get("product"), item.get("thickness"), item.get("width"))
+            piece = piece_measure(item.get("thickness"), item.get("width"), item.get("length"), measure_kind) if measure_kind else 0
+            entry = dict(item)
+            entry["was_quantity"] = was_quantity
+            entry["new_quantity"] = new_quantity
+            entry["delta_quantity"] = delta
+            entry["measure_kind"] = measure_kind
+            if measure_kind:
+                entry["delta_" + measure_kind] = round(piece * delta, 6)
+            prepared.append((position_payload, entry, row_values))
+
+    changed = [(p, e, r) for p, e, r in prepared if e["delta_quantity"] != 0]
+    if not changed:
+        return {"ok": False, "message": "Ничего не изменилось: «Стало» совпадает с текущим остатком по всем позициям."}
+
+    with store.conn:
+        store.conn.execute("BEGIN IMMEDIATE")
+        row_values_by_row_id = {}
+        for _position_payload, entry, row_values in changed:
+            if entry.get("row_id") is None:
+                entry["row_id"] = store.add_row("СКЛАД", row_values)
+        for position_payload, entry, row_values in changed:
+            row_values = row_values_by_row_id.setdefault(entry["row_id"], row_values)
+            add_to_row_value(row_values, columns["balance_qty"], entry["delta_quantity"])
+            measure_kind = entry.get("measure_kind")
+            if measure_kind:
+                add_to_row_value(row_values, columns.get(_BALANCE_COLUMN_BY_MEASURE_KIND[measure_kind]), entry["delta_" + measure_kind])
+        for row_id, row_values in row_values_by_row_id.items():
+            store.update_row(row_id, row_values)
+        existing = len(store.fetch_rows(CORRECTION_SHEET_NAME, 100000, 0))
+        document_number = "Коррекция №%d" % _next_document_number(store, CORRECTION_SHEET_NAME, existing)
+        for position_payload, entry, _row_values in changed:
+            insert_sheet_row(store, CORRECTION_SHEET_NAME, correction_sheet_values(store, position_payload, entry, now, document_number), now)
+            measure_kind = entry.get("measure_kind")
+            store.add_stock_movement({
+                "movement_type": "correction",
+                "source": payload.get("source") or "telegram",
+                "telegram_user_id": user.get("id"),
+                "username": user.get("username"),
+                "full_name": user.get("full_name"),
+                "product": lath_product_name(sheet_product_name(position_payload), item.get("thickness"), item.get("width")),
+                "breed": position_payload.get("breed"),
+                "condition": position_payload.get("condition"),
+                "thickness": entry.get("thickness"),
+                "width": entry.get("width"),
+                "length": entry.get("length"),
+                "quantity": entry["delta_quantity"],
+                "volume": entry.get("delta_volume"),
+                "area": entry.get("delta_area"),
+                "linear": entry.get("delta_linear"),
+                "reason": payload.get("comment"),
+                "sheet_row_id": entry.get("row_id"),
+                "original_text": payload.get("original_text"),
+                "created_at": now,
+                "document": document_number,
+                "balance_after": entry["new_quantity"],
+            })
+
+    excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", CORRECTION_SHEET_NAME], dirty_notifier)
+    lines = ["<b>%s</b> записана." % _esc(document_number), ""]
+    for index, (position_payload, entry, _row_values) in enumerate(changed, start=1):
+        head = " / ".join(_esc(part) for part in (display_product_name(position_payload), position_payload.get("breed"), position_payload.get("condition")) if part)
+        delta = entry["delta_quantity"]
+        text = "%d. %s %s: %s → %s шт (%s шт" % (
+            index, head, _esc(income_item_size(entry)), _display_bot_number(entry["was_quantity"]),
+            _display_bot_number(entry["new_quantity"]), signed_bot_number(delta),
+        )
+        measure_kind = entry.get("measure_kind")
+        if measure_kind:
+            text += ", %s %s" % (signed_bot_number(entry["delta_" + measure_kind]), ITEM_MEASURE_UNIT[measure_kind])
+        lines.append(text + ")")
+    skipped = len(prepared) - len(changed)
+    if skipped:
+        lines.append("Без изменений: %d." % skipped)
+    if payload.get("comment"):
+        lines += ["", "Причина: %s" % _esc(payload["comment"])]
+    lines += ["", "✅ Выполнено."]
+    if excel_warning:
+        lines += ["", _esc(excel_warning)]
+    return {"ok": True, "message": "\n".join(lines), "document": document_number, "changed": len(changed)}
+
+
 def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
     headers = store.get_headers(ANTISEPTIC_SHEET_NAME)
     if not headers:
@@ -6558,6 +8928,7 @@ def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
         store.conn.execute("BEGIN IMMEDIATE")
         values = antiseptic_sheet_values(store, payload, now)
         insert_sheet_row(store, ANTISEPTIC_SHEET_NAME, values, now)
+        antiseptic_cols = antiseptic_columns(store.get_headers(ANTISEPTIC_SHEET_NAME))
         user = payload.get("user") or {}
         store.add_stock_movement(
             {
@@ -6568,6 +8939,9 @@ def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
                 "full_name": user.get("full_name"),
                 "product": "Антисептирование",
                 "volume": payload.get("volume"),
+                # Журнал (2026-09-06): антисептик - лише дохід, з номером послуги.
+                "document": (str(row_value(values, antiseptic_cols.get("service_number")) or "").strip() or None),
+                "amount": _sheet_amount(values, antiseptic_cols),
                 "original_text": payload.get("original_text"),
                 "created_at": now,
             }
@@ -6588,6 +8962,11 @@ def apply_antiseptic_operation(store, payload, sync_mode, dirty_notifier=None):
         lines.append(f"Адрес выгрузки: {_esc(address)}")
     if payment_method:
         lines.append(f"Оплата: {_esc(payment_method)}")
+    # Ціна за куб - та сама, що на екрані підтвердження. Антисептирование
+    # завжди рахується об'ємом, тож одиниця тут завжди м3.
+    price_line = price_line_text(payload.get("price_per_unit"), ["volume"])
+    if price_line:
+        lines.append(_esc(price_line))
     # Задача користувача: "сумма має бути завжди знизу, скрізь" - Сумма
     # переїхала в самий кінець (після клієнта/адреси/оплати), той самий
     # порядок, що вже узгоджено для продажу й екрана підтвердження.
@@ -6685,3 +9064,493 @@ def sync_antiseptic_after_operation(sync_mode, store, dirty_notifier=None):
             "Проверьте настройку источника Excel-таблицы в программе."
         )
     return None
+
+
+# ---------------- Відкат операції (рішення користувача, 2026-09-10) ----------------
+# Обрано «Як не було»: операція стирається - склад повертається зворотними
+# дельтами з чисел самого руху, рядки її листа й рухи видаляються; слідом
+# лишається рух «rollback» (власна картка в журналі, без змоги відкату) і
+# запис operation_rolled_back у журналі дій. Коментар необов'язковий.
+# Порожній рядок СКЛАД, який створила сама операція, прибирається (рішення
+# користувача: «хтось випадково каракулі введе, запам'ятає»).
+# Відкатуються: продаж, прихід, списання, обмін, антисептирування.
+# Корекція й сам відкат - ні («відкат відкотити неможливо»).
+
+ROLLBACK_SHEET_BY_KIND = {
+    "sale": SALES_SHEET_NAME,
+    "income": INCOME_SHEET_NAME,
+    "writeoff": WRITEOFF_SHEET_NAME,
+    "exchange": EXCHANGE_SHEET_NAME,
+    "antiseptic": ANTISEPTIC_SHEET_NAME,
+}
+_ROLLBACK_KIND_BY_TYPE = {
+    "sale": "sale", "income": "income", "writeoff": "writeoff",
+    "exchange_out": "exchange", "exchange_in": "exchange", "antiseptic": "antiseptic",
+}
+_ROLLBACK_TYPES_BY_KIND = {
+    "sale": ("sale",), "income": ("income",), "writeoff": ("writeoff",),
+    "exchange": ("exchange_out", "exchange_in"), "antiseptic": ("antiseptic",),
+}
+_ROLLBACK_KIND_LABELS = {
+    "sale": "Продажа", "income": "Приход", "writeoff": "Списание", "exchange": "Обмен",
+    "antiseptic": "Антисептирование",
+}
+# Знак руху відкату відносно складу: що операція зняла - повертається (+),
+# що додала - знімається (−). Антисептик складу не чіпає (None).
+_ROLLBACK_SIGN_BY_TYPE = {"sale": 1, "writeoff": 1, "exchange_out": 1, "income": -1, "exchange_in": -1}
+_ROLLBACK_LOCKED_MESSAGES = {
+    "rollback": "Откат откатить нельзя.",
+    "correction": "Коррекцию откатить нельзя — исправьте её новой коррекцией.",
+}
+
+
+class _RollbackAbort(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def _movement_row_dicts(store, sql, params):
+    cursor = store.conn.execute(sql, params)
+    keys = [column[0] for column in cursor.description]
+    return [dict(zip(keys, values)) for values in cursor.fetchall()]
+
+
+def _header_index(headers, name):
+    target = _normalize_phrase(name)
+    for index, header in enumerate(headers):
+        if header is not None and _normalize_phrase(str(header)) == target:
+            return index
+    return None
+
+
+def _rollback_movement_title(movement):
+    parts = [movement.get("product"), movement.get("breed")]
+    condition = movement.get("condition")
+    if condition and condition != movement.get("product"):
+        parts.append(condition)
+    head = " / ".join(str(part) for part in parts if part)
+    size = plain_item_size(movement) if movement.get("thickness") not in (None, "") else ""
+    return (head + " " + size).strip()
+
+
+def _rollback_load_group(store, movement_ids):
+    """Рухи однієї операції за id з форми. Операція відкатується лише
+    цілком: набір id мусить збігатися з усіма рухами того самого часу,
+    автора, документа й типу."""
+    try:
+        ids = sorted({int(value) for value in (movement_ids or [])})
+    except (TypeError, ValueError):
+        ids = []
+    if not ids:
+        raise _RollbackAbort("Не выбрана операция для отката.")
+    placeholders = ",".join("?" for _ in ids)
+    rows = _movement_row_dicts(
+        store, "SELECT * FROM stock_movements WHERE id IN (%s) ORDER BY id" % placeholders, ids,
+    )
+    if len(rows) != len(ids):
+        raise _RollbackAbort("Часть записей этой операции уже удалена из журнала — откатывать нечего. Обновите журнал.")
+    types = {row.get("movement_type") or "" for row in rows}
+    for locked, message in _ROLLBACK_LOCKED_MESSAGES.items():
+        if locked in types:
+            raise _RollbackAbort(message)
+    kinds = {_ROLLBACK_KIND_BY_TYPE.get(movement_type) for movement_type in types}
+    if len(kinds) != 1 or None in kinds:
+        raise _RollbackAbort("Выбраны записи разных операций — откат делается по одной операции.")
+    kind = kinds.pop()
+    first = rows[0]
+    same_stamp = len({row.get("created_at") for row in rows}) == 1
+    same_document = len({row.get("document") or "" for row in rows}) == 1
+    if not (same_stamp and same_document):
+        raise _RollbackAbort("Выбраны записи разных операций — откат делается по одной операции.")
+    kind_types = _ROLLBACK_TYPES_BY_KIND[kind]
+    siblings = _movement_row_dicts(
+        store,
+        "SELECT id FROM stock_movements WHERE created_at = ? AND coalesce(document, '') = ?"
+        " AND CAST(coalesce(telegram_user_id, '') AS TEXT) = ? AND movement_type IN (%s)"
+        % ",".join("?" for _ in kind_types),
+        [first.get("created_at"), first.get("document") or "", str(first.get("telegram_user_id") or ""), *kind_types],
+    )
+    # Надіслані id - вказівник на операцію, а не її повний склад: у формі
+    # картку могли обрізати фільтр чи межа сторінки. Чуже сюди не пройде
+    # (усе, що поза операцією, - відмова), а решту рухів добираємо самі,
+    # бо операція відкатується лише цілком.
+    sibling_ids = sorted(row["id"] for row in siblings)
+    if set(ids) - set(sibling_ids):
+        raise _RollbackAbort("Выбраны записи разных операций — откат делается по одной операции.")
+    if sibling_ids != ids:
+        rows = _movement_row_dicts(
+            store,
+            "SELECT * FROM stock_movements WHERE id IN (%s) ORDER BY id" % ",".join("?" for _ in sibling_ids),
+            sibling_ids,
+        )
+    return kind, rows
+
+
+def _apply_reverse_delta(values, columns, movement):
+    """Зворотна дельта рядка СКЛАД з чисел руху. Виміри теж повертаються
+    дельтою; update_row потім перерахує їх зі штук, як і в самій операції."""
+    movement_type = movement.get("movement_type") or ""
+    quantity = abs(_number_value(movement.get("quantity")))
+    kind = item_measure_kind(movement)
+    measure = abs(_number_value(movement.get(kind))) if kind else None
+
+    def add(prefix, sign):
+        add_to_row_value(values, columns.get(prefix + "_qty"), sign * quantity)
+        if kind and measure is not None:
+            add_to_row_value(values, columns.get(prefix + "_" + kind), sign * measure)
+
+    if movement_type == "sale":
+        add("sold", -1)
+        add("balance", 1)
+    elif movement_type in ("income", "exchange_in"):
+        add("income", -1)
+        add("balance", -1)
+    elif movement_type in ("writeoff", "exchange_out"):
+        add("balance", 1)
+    else:
+        raise _RollbackAbort("Операцию «%s» откатить нельзя." % JOURNAL_TYPE_LABELS.get(movement_type, movement_type))
+
+
+def _sheet_rows_by_document(store, sheet_name, document):
+    """Запасний пошук рядків листа за клітинкою документа/№ послуги -
+    коли час рядка вже не збігається з часом руху (лист правили)."""
+    document = str(document or "").strip()
+    if not document:
+        return []
+    headers = store.get_headers(sheet_name)
+    index = None
+    for name in ("Документ", "№ документа", "Обмен №", "Коррекция №", "№ услуги", "№ послуги"):
+        index = _header_index(headers, name)
+        if index is not None:
+            break
+    if index is None:
+        return []
+    found = []
+    for row_id, values in store.fetch_all_rows_with_ids(sheet_name):
+        if str(row_value(values, index) or "").strip() == document:
+            found.append(row_id)
+    return found
+
+
+def _plan_rollback(store, movement_ids):
+    """Що саме зробить відкат - без жодного запису. Той самий план читає
+    підтвердження в чаті й сам запис (усередині своєї транзакції)."""
+    kind, rows = _rollback_load_group(store, movement_ids)
+    first = rows[0]
+    ids = [row["id"] for row in rows]
+    created = str(first.get("created_at") or "")
+    try:
+        time_text = datetime.fromisoformat(created).strftime("%H:%M %d.%m.%Y")
+    except ValueError:
+        time_text = created
+    plan = {
+        "kind": kind,
+        "label": _ROLLBACK_KIND_LABELS[kind],
+        "rows": rows,
+        "ids": ids,
+        "document": first.get("document") or "",
+        "created_at": created,
+        "time": time_text,
+        "who": first.get("full_name") or first.get("username") or "",
+        "sheet_name": ROLLBACK_SHEET_BY_KIND[kind],
+        "sheet_row_ids": [],
+        "stock": [],
+        "notes": [],
+    }
+
+    if kind != "antiseptic":
+        headers = store.get_headers("СКЛАД")
+        columns = warehouse_columns(headers)
+        initial_index = _header_index(headers, _WAREHOUSE_QTY_HEADERS[0])
+        by_row = {}
+        remapped = False
+        for movement in rows:
+            row_id = movement.get("sheet_row_id")
+            if row_id is None:
+                raise _RollbackAbort("У записи «%s» нет строки склада — откат невозможен." % _rollback_movement_title(movement))
+            entry = by_row.get(row_id)
+            if entry is None:
+                values = store.get_row(row_id)
+                if not values:
+                    # Після «Обновить эксели» рядки СКЛАД заводяться заново з
+                    # новими id, тож sheet_row_id руху вказує в порожнечу. Той
+                    # самий запасний пошук за ознаками, що вже має корекція.
+                    new_id = find_stock_row_id(store, movement, movement)
+                    values = store.get_row(new_id) if new_id is not None else None
+                    if not values:
+                        raise _RollbackAbort(
+                            "Строка склада для «%s» не найдена: таблицу перечитывали после операции "
+                            "(«Обновить эксели»). Откат невозможен." % _rollback_movement_title(movement)
+                        )
+                    movement["sheet_row_id"] = row_id = new_id
+                    remapped = True
+                    entry = by_row.get(row_id)
+                    if entry is not None:
+                        entry["movements"].append(movement)
+                        _apply_reverse_delta(entry["values"], columns, movement)
+                        continue
+                entry = by_row[row_id] = {"values": list(values), "before": list(values), "movements": []}
+            entry["movements"].append(movement)
+            _apply_reverse_delta(entry["values"], columns, movement)
+        placeholders = ",".join("?" for _ in ids)
+        for row_id, entry in by_row.items():
+            values = entry["values"]
+            balance_before = _number_value(row_value(entry["before"], columns["balance_qty"]))
+            balance_after = _number_value(row_value(values, columns["balance_qty"]))
+            title = _rollback_movement_title(entry["movements"][0])
+            if balance_after < -INCOME_QUANTITY_TOLERANCE:
+                raise _RollbackAbort(
+                    "После этой операции товар «%s» уже уходил со склада: остаток стал бы %s шт. "
+                    "Сначала откатите те операции." % (title, _display_bot_number(balance_after))
+                )
+            initial = _number_value(row_value(values, initial_index)) if initial_index is not None else 0.0
+            empty = abs(initial) < 1e-9 and all(
+                abs(_number_value(row_value(values, columns.get(key)))) < 1e-9
+                for key in ("income_qty", "sold_qty", "balance_qty")
+            )
+            others = store.conn.execute(
+                "SELECT COUNT(*) FROM stock_movements WHERE sheet_row_id = ? AND id NOT IN (%s)" % placeholders,
+                [row_id, *ids],
+            ).fetchone()[0]
+            # Рядок прибирається, лише коли його СТВОРИЛА сама ця операція
+            # (рішення користувача). «Порожній» цього не доводить: нульовий
+            # рядок міг лежати в таблиці й до неї. Після перечитування Excel
+            # id рядків нові, тож і «інших рухів» порахувати чесно не можна -
+            # там не видаляємо нічого.
+            created_here = any(movement.get("created_stock_row") for movement in entry["movements"])
+            plan["stock"].append({
+                "row_id": row_id,
+                "title": title,
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+                "delete": bool(created_here and empty and others == 0 and not remapped),
+                "values": values,
+                "movements": entry["movements"],
+            })
+        if kind == "writeoff":
+            plan["notes"].append("«Причина списания» в строке склада не меняется.")
+
+    # Рядки листа операції: той самий час, що й у рухів (одна змінна now у
+    # кожній apply_*). Рядки, що прийшли з імпорту Excel, мають час імпорту
+    # (sheet_meta.imported_at) - їх виключаємо, інакше імпорт у ту саму
+    # секунду, що й операція, підмішав би весь лист.
+    sheet_ids = [
+        row[0] for row in store.conn.execute(
+            "SELECT id FROM sheet_rows WHERE sheet_name = ? AND updated_at = ?"
+            " AND updated_at != coalesce((SELECT imported_at FROM sheet_meta WHERE sheet_name = ?), '')",
+            (plan["sheet_name"], created, plan["sheet_name"]),
+        ).fetchall()
+    ]
+    if len(sheet_ids) != len(rows):
+        by_document = _sheet_rows_by_document(store, plan["sheet_name"], plan["document"])
+        if len(by_document) == len(rows):
+            sheet_ids = by_document
+        else:
+            raise _RollbackAbort(
+                "Строки листа «%s» этой операции не найдены (таблицу перечитывали или правили после неё). "
+                "Откат невозможен." % plan["sheet_name"]
+            )
+    plan["sheet_row_ids"] = sheet_ids
+    return plan
+
+
+def _rollback_line_text(movement, stock_entry):
+    """Один рядок звіту/підтвердження: позиція, скільки повертається або
+    знімається, залишок після."""
+    movement_type = movement.get("movement_type") or ""
+    if movement_type == "antiseptic":
+        amount = movement.get("amount")
+        document = str(movement.get("document") or "").strip()
+        text = document if document.lower().startswith("услуга") else ("Услуга %s" % document)
+        if amount not in (None, ""):
+            text += " на %s MDL" % _display_bot_number(_number_value(amount))
+        return text.strip()
+    sign = _ROLLBACK_SIGN_BY_TYPE.get(movement_type, 1)
+    quantity = sign * abs(_number_value(movement.get("quantity")))
+    text = "%s: %s шт" % (_rollback_movement_title(movement), signed_bot_number(quantity))
+    kind = item_measure_kind(movement)
+    if kind:
+        text += " (%s %s)" % (signed_bot_number(sign * abs(_number_value(movement.get(kind)))), ITEM_MEASURE_UNIT[kind])
+    if stock_entry is not None:
+        if stock_entry["delete"]:
+            text += " → строка склада будет удалена (была создана этой операцией)"
+        else:
+            text += " → остаток %s → %s шт" % (
+                _display_bot_number(stock_entry["balance_before"]), _display_bot_number(stock_entry["balance_after"]),
+            )
+    return text
+
+
+def _rollback_stock_entry(plan, movement):
+    for entry in plan["stock"]:
+        if entry["row_id"] == movement.get("sheet_row_id"):
+            return entry
+    return None
+
+
+def _rollback_heading(plan):
+    head = "«%s»" % (plan["document"] or plan["label"])
+    return "%s от %s (%s)" % (head, plan["time"], plan["who"] or "—")
+
+
+def rollback_preview(store, movement_ids):
+    """Текст підтвердження для чату: що повернеться, що зникне."""
+    try:
+        plan = _plan_rollback(store, movement_ids)
+    except _RollbackAbort as exc:
+        return {"ok": False, "message": exc.message}
+    lines = ["↶ Откатить %s?" % _rollback_heading(plan), ""]
+    if plan["kind"] == "antiseptic":
+        lines.append(_rollback_line_text(plan["rows"][0], None))
+    else:
+        lines.append("Вернётся на склад:" if plan["kind"] in ("sale", "writeoff") else "Изменится на складе:")
+        for index, movement in enumerate(plan["rows"], start=1):
+            lines.append("%d. %s" % (index, _rollback_line_text(movement, _rollback_stock_entry(plan, movement))))
+    lines.append("")
+    count = len(plan["sheet_row_ids"])
+    lines.append("Из листа %s исчезнет строк: %d." % (plan["sheet_name"], count))
+    lines.extend(plan["notes"])
+    return {"ok": True, "text": "\n".join(lines), "plan": plan}
+
+
+def apply_rollback_operation(store, payload, sync_mode, dirty_notifier=None):
+    """Відкат операції одним записом: склад ← зворотні дельти, рядки листа
+    й рухи операції - геть, рух «rollback» на кожен скасований, журнал дій."""
+    user = payload.get("user") or {}
+    comment = str(payload.get("comment") or "").strip() or None
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with store.conn:
+            store.conn.execute("BEGIN IMMEDIATE")
+            plan = _plan_rollback(store, payload.get("movement_ids") or [])
+            ids = plan["ids"]
+            for entry in plan["stock"]:
+                if entry["delete"]:
+                    # Прямий DELETE, а не store.delete_rows: той має власний
+                    # with self.conn і закомітив би транзакцію достроково.
+                    # warehouse_items зникає каскадом (FOREIGN KEY ... ON DELETE CASCADE).
+                    store.conn.execute("DELETE FROM sheet_rows WHERE id = ?", (entry["row_id"],))
+                else:
+                    store.update_row(entry["row_id"], entry["values"])
+            if plan["sheet_row_ids"]:
+                store.conn.execute(
+                    "DELETE FROM sheet_rows WHERE id IN (%s)" % ",".join("?" for _ in plan["sheet_row_ids"]),
+                    plan["sheet_row_ids"],
+                )
+            store.conn.execute("DELETE FROM stock_movements WHERE id IN (%s)" % ",".join("?" for _ in ids), ids)
+            balance_by_row = {
+                entry["row_id"]: (None if entry["delete"] else entry["balance_after"]) for entry in plan["stock"]
+            }
+            for movement in plan["rows"]:
+                movement_type = movement.get("movement_type") or ""
+                sign = _ROLLBACK_SIGN_BY_TYPE.get(movement_type)
+
+                def signed(value):
+                    if value in (None, "") or sign is None:
+                        return None
+                    return sign * abs(_number_value(value))
+
+                store.add_stock_movement({
+                    "movement_type": "rollback",
+                    "source": payload.get("source") or "telegram",
+                    "telegram_user_id": user.get("id"),
+                    "username": user.get("username"),
+                    "full_name": user.get("full_name"),
+                    "product": movement.get("product"),
+                    "breed": movement.get("breed"),
+                    "condition": movement.get("condition"),
+                    "thickness": movement.get("thickness"),
+                    "width": movement.get("width"),
+                    "length": movement.get("length"),
+                    "quantity": signed(movement.get("quantity")),
+                    "volume": signed(movement.get("volume")),
+                    "area": signed(movement.get("area")),
+                    "linear": signed(movement.get("linear")),
+                    "reason": comment,
+                    "sheet_row_id": movement.get("sheet_row_id"),
+                    "original_text": None,
+                    "created_at": now,
+                    "document": None,
+                    "balance_after": balance_by_row.get(movement.get("sheet_row_id")),
+                    "amount": (-_number_value(movement.get("amount"))) if movement.get("amount") not in (None, "") else None,
+                    "rollback_of": json.dumps({
+                        "type": movement_type,
+                        "type_label": JOURNAL_TYPE_LABELS.get(movement_type, movement_type),
+                        "document": movement.get("document") or "",
+                        "created_at": movement.get("created_at") or "",
+                        "who": movement.get("full_name") or movement.get("username") or "",
+                        "movement_id": movement.get("id"),
+                    }, ensure_ascii=False),
+                })
+    except _RollbackAbort as exc:
+        return {"ok": False, "message": exc.message}
+
+    if plan["kind"] == "antiseptic":
+        excel_warning = sync_antiseptic_after_operation(sync_mode, store, dirty_notifier)
+    else:
+        excel_warning = sync_excel_after_operation(sync_mode, store, ["СКЛАД", plan["sheet_name"]], dirty_notifier)
+
+    plain_lines = ["Откат выполнен: %s" % _rollback_heading(plan)]
+    html_lines = ["<b>Откат выполнен:</b> %s" % _esc(_rollback_heading(plan))]
+    if plan["kind"] == "antiseptic":
+        line = _rollback_line_text(plan["rows"][0], None)
+        plain_lines.append(line)
+        html_lines.append(_esc(line))
+    else:
+        for index, movement in enumerate(plan["rows"], start=1):
+            line = "%d. %s" % (index, _rollback_line_text(movement, _rollback_stock_entry(plan, movement)))
+            plain_lines.append(line)
+            html_lines.append(_esc(line))
+    sheet_line = "Из листа %s удалено строк: %d." % (plan["sheet_name"], len(plan["sheet_row_ids"]))
+    plain_lines.append(sheet_line)
+    html_lines.append(_esc(sheet_line))
+    for note in plan["notes"]:
+        plain_lines.append(note)
+        html_lines.append(_esc(note))
+    if comment:
+        plain_lines.append("Комментарий: %s" % comment)
+        html_lines.append("Комментарий: %s" % _esc(comment))
+    if excel_warning:
+        plain_lines += ["", excel_warning]
+        html_lines += ["", _esc(excel_warning)]
+
+    # Журнал дій - після транзакції: add_action_log має власний with self.conn.
+    store.add_action_log("operation_rolled_back", {
+        "status": "success",
+        "telegram": {
+            "user_id": user.get("id"),
+            "username": user.get("username") or "",
+            "full_name": user.get("full_name") or "",
+        },
+        "incoming_text": "Откат: %s" % _rollback_heading(plan),
+        "reply": {"type": "message", "text": "\n".join(plain_lines)},
+        "rolled_back": {
+            "kind": plan["kind"],
+            "label": plan["label"],
+            "document": plan["document"],
+            "created_at": plan["created_at"],
+            "who": plan["who"],
+            "movement_ids": plan["ids"],
+        },
+        "comment": comment or "",
+        "stock": [
+            {
+                "row_id": entry["row_id"],
+                "title": entry["title"],
+                "balance_before": entry["balance_before"],
+                "balance_after": None if entry["delete"] else entry["balance_after"],
+                "deleted": entry["delete"],
+            }
+            for entry in plan["stock"]
+        ],
+        "sheet": {"name": plan["sheet_name"], "deleted_rows": len(plan["sheet_row_ids"])},
+    })
+    return {
+        "ok": True,
+        "message": "\n".join(html_lines),
+        "kind": plan["kind"],
+        "document": plan["document"],
+        "deleted_movement_ids": plan["ids"],
+        "deleted_stock_rows": [entry["row_id"] for entry in plan["stock"] if entry["delete"]],
+    }

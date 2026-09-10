@@ -27,8 +27,6 @@ ExcelSqliteStore.__init__, інакше запуск gui.py на dev-машин�
 """
 
 import json
-import os
-from pathlib import Path
 
 import paths
 import servers_registry
@@ -37,39 +35,19 @@ _CLOUD_FOLDER_NAME = "AI_Automation_Backups"
 _CLOUD_FILE_NAME = "standard_menu.json"
 
 
-# Задача користувача (2026-08-18, підтверджено на живій машині): цей ПК
-# має ДВІ окремі синхронізовані теки OneDrive під тим самим акаунтом
-# Windows "vladi" — особисту (C:\Users\vladi\OneDrive) і робочу, тенантну
-# (C:\Users\vladi\OneDrive - Diverus, UAB). Змінна середовища "OneDrive"
-# вказує на ОСОБИСТУ (яка теж реально існує), тож просте читання цієї
-# змінної мовчки відкривало не ту теку — не тому, що вона застаріла чи
-# "неправильна", а тому, що на цій машині вона просто вказує на ІНШИЙ,
-# теж легітимний OneDrive. AI_Automation_Backups завжди йде в РОБОЧИЙ
-# (тенантний) OneDrive — пробуємо його ПЕРШИМ, і лише якщо його немає на
-# диску (інша машина без цього тенанту) — падаємо назад на змінну "OneDrive".
-_ONEDRIVE_TENANT_SUFFIX = "OneDrive - Diverus, UAB"
-
-
 # Задача користувача (2026-08-20): "не туди зберегло кнопкою зберегти в
 # хмару" - "Учётная запись OneDrive" (client_app.py) керувала лише
 # servers_registry.py, а бекапи/стандартне меню й далі йшли в тенантний
 # акаунт незалежно від цього поля - плутанина. Тепер email (якщо
 # заданий) працює тут так само, через ТОЙ САМИЙ пошук у реєстрі Windows
 # (servers_registry.find_account_folder) - жодного дублювання логіки.
+# Одна логіка на обидва модулі (2026-08-21). Тут раніше жила ДРУГА,
+# незалежно написана копія того самого пошуку - і вже встигла розійтись з
+# оригіналом: та дивилась на OneDriveCommercial, ця - ні. Дві копії
+# однакового пошуку цьому проєкту вже коштували дня розбору
+# (_find_header_row, warehouse_data.py), тож тепер тут лише виклик.
 def _resolve_onedrive_root(email=None):
-    if email:
-        matched = servers_registry.find_account_folder(email)
-        if matched is not None:
-            return matched
-    username = os.environ.get("USERNAME")
-    tenant_path = Path(f"C:/Users/{username}/{_ONEDRIVE_TENANT_SUFFIX}") if username else None
-    if tenant_path is not None and tenant_path.is_dir():
-        return tenant_path
-    env_value = os.environ.get("OneDrive")
-    env_path = Path(env_value) if env_value else None
-    if env_path is not None and env_path.is_dir():
-        return env_path
-    return tenant_path or env_path
+    return servers_registry._resolve_onedrive_root(email)
 
 
 def cloud_folder_path(email=None):

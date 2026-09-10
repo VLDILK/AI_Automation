@@ -42,9 +42,24 @@
               </tr>
             </thead>
             <tbody id="stock-rows"></tbody>
+            <tfoot id="stock-totals" style="display:none;">
+              <tr>
+                <td colspan="5">Итого</td>
+                <td id="stock-total-quantity"></td>
+                <td id="stock-total-measure"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         <div id="stock-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
+      </div>
+
+      <div id="panel-movement" class="tab-panel" style="display:none;">
+        <div id="movement-period-chips" class="data-chips"></div>
+        <div id="movement-mode-chips" class="data-chips"></div>
+        <div id="movement-category-chips" class="data-chips"></div>
+        <div id="movement-body" class="movement-body"></div>
+        <div id="movement-empty" class="data-empty" style="display:none;">Нет движений за этот период.</div>
       </div>
 
       <div id="panel-sales" class="tab-panel" style="display:none;">
@@ -73,10 +88,18 @@
               </tr>
             </thead>
             <tbody id="sales-rows"></tbody>
+            <tfoot id="sales-totals-row" style="display:none;">
+              <tr>
+                <td colspan="7">Итого<div id="sales-total-note" class="totals-note"></div></td>
+                <td id="sales-total-quantity"></td>
+                <td id="sales-total-measure"></td>
+                <td id="sales-total-amount"></td>
+                <td></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         <div id="sales-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
-        <div id="sales-totals" class="data-totals"></div>
       </div>
 
       <div id="panel-antiseptic" class="tab-panel" style="display:none;">
@@ -96,10 +119,17 @@
               </tr>
             </thead>
             <tbody id="antiseptic-rows"></tbody>
+            <tfoot id="antiseptic-totals-row" style="display:none;">
+              <tr>
+                <td colspan="3">Итого</td>
+                <td id="antiseptic-total-measure"></td>
+                <td id="antiseptic-total-amount"></td>
+                <td></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         <div id="antiseptic-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
-        <div id="antiseptic-totals" class="data-totals"></div>
       </div>
 
       <div id="panel-writeoff" class="tab-panel" style="display:none;">
@@ -126,10 +156,16 @@
               </tr>
             </thead>
             <tbody id="writeoff-rows"></tbody>
+            <tfoot id="writeoff-totals-row" style="display:none;">
+              <tr>
+                <td colspan="6">Итого</td>
+                <td id="writeoff-total-quantity"></td>
+                <td colspan="2"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         <div id="writeoff-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
-        <div id="writeoff-totals" class="data-totals"></div>
       </div>
 
       <div id="panel-income" class="tab-panel" style="display:none;">
@@ -150,14 +186,22 @@
                 <th id="income-condition-filter-trigger" class="size-header">Тип</th>
                 <th id="income-size-filter-trigger" class="size-header">Размер</th>
                 <th data-income-sort="quantity" class="size-header">Штук <span class="sort-arrow"></span></th>
+                <th data-income-sort="measure" class="size-header">Объём <span class="sort-arrow"></span></th>
                 <th id="income-author-filter-trigger" class="size-header">Автор</th>
               </tr>
             </thead>
             <tbody id="income-rows"></tbody>
+            <tfoot id="income-totals-row" style="display:none;">
+              <tr>
+                <td colspan="6">Итого</td>
+                <td id="income-total-quantity"></td>
+                <td id="income-total-measure"></td>
+                <td></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         <div id="income-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
-        <div id="income-totals" class="data-totals"></div>
       </div>
 
       <div id="panel-clients" class="tab-panel" style="display:none;">
@@ -175,10 +219,17 @@
               </tr>
             </thead>
             <tbody id="clients-rows"></tbody>
+            <tfoot id="clients-totals-row" style="display:none;">
+              <tr>
+                <td colspan="2">Итого</td>
+                <td id="clients-total-count"></td>
+                <td id="clients-total-quantity"></td>
+                <td id="clients-total-amount"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
         <div id="clients-empty" class="data-empty" style="display:none;">Ничего не найдено.</div>
-        <div id="clients-totals" class="data-totals"></div>
       </div>
 
       <div id="panel-low-stock" class="tab-panel" style="display:none;">

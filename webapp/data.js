@@ -59,6 +59,10 @@
     sortDir: 1,
     sizeFilter: { thickness: null, width: null, length: null },
     valueFilter: { breed: null, condition: null, product: null, unit: null },
+    movementRows: [],
+    movementPeriod: { key: "month", from: null, to: null },
+    movementCategory: null,
+    movementDate: null,
     tabs: [],
     tabLabels: {},
     activeTab: "stock",
@@ -201,13 +205,7 @@
       if (state.activeCategories.size > 0 && !state.activeCategories.has(row.product)) {
         return false;
       }
-      if (state.sizeFilter.thickness !== null && numberValue(row.thickness) !== state.sizeFilter.thickness) {
-        return false;
-      }
-      if (state.sizeFilter.width !== null && numberValue(row.width) !== state.sizeFilter.width) {
-        return false;
-      }
-      if (state.sizeFilter.length !== null && numberValue(row.length) !== state.sizeFilter.length) {
+      if (!matchesSizeFilter(row, state.sizeFilter)) {
         return false;
       }
       if (state.valueFilter.breed !== null && !state.valueFilter.breed.has(row.breed || "")) {
@@ -226,11 +224,44 @@
     });
   }
 
+  // Рядки складу після всіх фільтрів, КРІМ одного (except): з них беруться
+  // значення для випадного списку цього фільтра - «якщо застосований інший
+  // фільтр в іншому стовпці, це враховується» (рішення користувача 2026-09-06).
+  function visibleRowsExcept(except) {
+    return state.rows.filter(function (row) {
+      if (state.activeCategories.size > 0 && !state.activeCategories.has(row.product)) {
+        return false;
+      }
+      if (except !== "size" && !matchesSizeFilter(row, state.sizeFilter)) {
+        return false;
+      }
+      var fields = ["breed", "condition", "product", "unit"];
+      for (var i = 0; i < fields.length; i++) {
+        var field = fields[i];
+        if (field !== except && state.valueFilter[field] !== null && !state.valueFilter[field].has(row[field] || "")) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  function rowSizeText(row) {
+    return [row.thickness, row.width, row.length]
+      .filter(function (v) { return v !== null && v !== undefined && v !== ""; })
+      .map(formatNumber)
+      .join("x");
+  }
+
   // Задача користувача: "фільтри мають бути всі схожими за їх типами
   // інформації" - той самий трипольний збіг товщина/ширина/довжина, що вже
   // inline перевіряє visibleRows() вище (лише для СКЛАД), тут окремим
   // хелпером для "Списание"/"Низкий остаток".
   function matchesSizeFilter(row, sizeFilterState) {
+    // Розмір цілими «TxWxL» (кілька одразу) - рішення користувача 2026-09-06.
+    if (sizeFilterState.sizes && sizeFilterState.sizes.size > 0) {
+      return sizeFilterState.sizes.has(rowSizeText(row));
+    }
     if (sizeFilterState.thickness !== null && numberValue(row.thickness) !== sizeFilterState.thickness) {
       return false;
     }
@@ -264,10 +295,16 @@
   }
 
   function hasActiveSizeFilter(sizeFilterState) {
+    if (sizeFilterState.sizes && sizeFilterState.sizes.size > 0) {
+      return true;
+    }
     return sizeFilterState.thickness !== null || sizeFilterState.width !== null || sizeFilterState.length !== null;
   }
 
   function activeSizeFilterText(sizeFilterState) {
+    if (sizeFilterState.sizes && sizeFilterState.sizes.size > 0) {
+      return Array.from(sizeFilterState.sizes).map(function (s) { return s.replace(/x/g, "×"); }).join(", ");
+    }
     var parts = [];
     if (sizeFilterState.thickness !== null) parts.push("Толщина " + formatNumber(sizeFilterState.thickness));
     if (sizeFilterState.width !== null) parts.push("Ширина " + formatNumber(sizeFilterState.width));
@@ -303,6 +340,7 @@
       sizeFilterState.thickness = null;
       sizeFilterState.width = null;
       sizeFilterState.length = null;
+      sizeFilterState.sizes = null;
       onClear();
     });
     badge.appendChild(clear);
@@ -388,11 +426,11 @@
   // рядком замість масиву, де .forEach одразу кидав TypeError. Перейменована
   // на distinctStockFieldValues, щоб колізії більше не було - ОБИДВІ
   // поведінки (ця з hasBlank, generic без) лишаються потрібні окремо.
-  function distinctStockFieldValues(field) {
+  function distinctStockFieldValues(field, rows) {
     var seen = {};
     var values = [];
     var hasBlank = false;
-    state.rows.forEach(function (row) {
+    (rows || state.rows).forEach(function (row) {
       var value = row[field] || "";
       if (!value) {
         hasBlank = true;
@@ -416,54 +454,105 @@
   // замість дублювання розмітки. openGenericValueModal - той самий модал,
   // ПАРАМЕТРИЗОВАНИЙ (не завʼязаний на state.rows/VALUE_FIELDS), тому
   // реюзається й для "Клиент" на вкладці "Клиенты" (інше джерело даних).
+  // Рішення користувача (2026-09-06): жодних списків із галочками - закритий
+  // випадний список «Выберите…», під ним «Добавить», нижче вибране рядками
+  // з ✕. Поки список не відкрити, нічого зайвого не видно. Порожній вибір =
+  // усі значення (null).
+  function buildChoiceList(container, values, current, displayFor) {
+    displayFor = displayFor || function (value) { return value === "" ? VALUE_BLANK_LABEL : String(value); };
+    container.innerHTML = "";
+    var chosen = current ? values.filter(function (value) { return current.has(value); }) : [];
+    var select = document.createElement("select");
+    select.className = "choice-select";
+    var addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "choice-add";
+    addButton.textContent = "Добавить";
+    var rows = document.createElement("div");
+    rows.className = "choice-rows";
+    var hint = document.createElement("p");
+    hint.className = "choice-hint";
+    hint.textContent = "Ничего не добавлено — показаны все.";
+
+    function rebuild() {
+      select.innerHTML = "";
+      var placeholder = document.createElement("option");
+      placeholder.value = "__none__";
+      placeholder.textContent = "Выберите…";
+      select.appendChild(placeholder);
+      values.forEach(function (value, index) {
+        if (chosen.indexOf(value) !== -1) {
+          return;
+        }
+        var option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = displayFor(value);
+        select.appendChild(option);
+      });
+      rows.innerHTML = "";
+      chosen.forEach(function (value) {
+        var row = document.createElement("div");
+        row.className = "choice-row";
+        var text = document.createElement("span");
+        text.textContent = displayFor(value);
+        row.appendChild(text);
+        var remove = document.createElement("span");
+        remove.className = "choice-remove";
+        remove.textContent = "✕";
+        remove.addEventListener("click", function () {
+          chosen = chosen.filter(function (v) { return v !== value; });
+          rebuild();
+        });
+        row.appendChild(remove);
+        rows.appendChild(row);
+      });
+      hint.style.display = chosen.length ? "none" : "";
+    }
+
+    addButton.addEventListener("click", function () {
+      if (select.value === "__none__") {
+        return;
+      }
+      var value = values[Number(select.value)];
+      if (value === undefined || chosen.indexOf(value) !== -1) {
+        return;
+      }
+      chosen.push(value);
+      rebuild();
+    });
+    container.appendChild(select);
+    container.appendChild(addButton);
+    container.appendChild(rows);
+    container.appendChild(hint);
+    rebuild();
+    return {
+      result: function () {
+        // Вибране у списку, але ще не додане кнопкою, теж рахується
+        // (рішення користувача 2026-09-07).
+        if (select.value !== "__none__") {
+          var pending = values[Number(select.value)];
+          if (pending !== undefined && chosen.indexOf(pending) === -1) {
+            chosen.push(pending);
+          }
+        }
+        return chosen.length ? new Set(chosen) : null;
+      },
+    };
+  }
+
   function openGenericValueModal(title, values, current, onApply) {
     document.getElementById("value-modal-title").textContent = "Фильтр: " + title;
-    var body = document.getElementById("value-modal-body");
-    body.innerHTML = "";
-    var checkboxes = [];
-
-    var bulkRow = document.createElement("div");
-    bulkRow.className = "value-bulk-row";
-    var selectAllLink = document.createElement("span");
-    selectAllLink.className = "value-bulk-link";
-    selectAllLink.textContent = "Выделить всё";
-    selectAllLink.addEventListener("click", function () {
-      checkboxes.forEach(function (cb) { cb.checked = true; });
-    });
-    var clearAllLink = document.createElement("span");
-    clearAllLink.className = "value-bulk-link";
-    clearAllLink.textContent = "Снять выделение";
-    clearAllLink.addEventListener("click", function () {
-      checkboxes.forEach(function (cb) { cb.checked = false; });
-    });
-    bulkRow.appendChild(selectAllLink);
-    bulkRow.appendChild(clearAllLink);
-    body.appendChild(bulkRow);
-
-    values.forEach(function (value) {
-      var row = document.createElement("label");
-      row.className = "value-option-row";
-      var checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = value;
-      checkbox.checked = current === null || current.has(value);
-      row.appendChild(checkbox);
-      row.appendChild(document.createTextNode(value || VALUE_BLANK_LABEL));
-      body.appendChild(row);
-      checkboxes.push(checkbox);
-    });
+    var chooser = buildChoiceList(document.getElementById("value-modal-body"), values, current);
     document.getElementById("value-modal-apply").onclick = function () {
-      var checked = checkboxes.filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; });
-      var result = checked.length === checkboxes.length ? null : new Set(checked);
       document.getElementById("value-modal").style.display = "none";
-      onApply(result);
+      onApply(chooser.result());
     };
     document.getElementById("value-modal").style.display = "flex";
   }
 
   function openValueModal(field) {
     var config = VALUE_FIELDS[field];
-    openGenericValueModal(config.label, distinctStockFieldValues(field), state.valueFilter[field], function (result) {
+    openGenericValueModal(config.label, distinctStockFieldValues(field, visibleRowsExcept(field)), state.valueFilter[field], function (result) {
       state.valueFilter[field] = result;
       renderStockPanel();
     });
@@ -483,6 +572,39 @@
     });
   }
 
+  // Підсумок рахується з ТОГО САМОГО масиву, який щойно намалював
+  // таблицю - він уже пройшов усі фільтри (чипи продукту, розмір,
+  // одиниця). Окремої "фільтруючої" логіки тут навмисно немає: два
+  // незалежні проходи по фільтрах рано чи пізно розійшлися б, і підсумок
+  // почав би тихо брехати.
+  //
+  // Одиниці не змішуються: у колонці М3/М2/МП поруч живуть 0,645 м3 і
+  // 2112 мп, тож кожна одиниця підсумовується окремо й показується своїм
+  // рядком. Порядок сталий (м3, м2, мп), щоб число не стрибало з місця
+  // на місце між перемальовками.
+
+  function renderStockTotals(rows) {
+    var footer = document.getElementById("stock-totals");
+    if (!footer) {
+      return;
+    }
+    var totalQuantity = 0;
+    var byUnit = {};
+    rows.forEach(function (row) {
+      totalQuantity += numberValue(row.quantity) || 0;
+      var measure = numberValue(row.measure) || 0;
+      if (!measure) {
+        return;
+      }
+      var unit = row.unit || "";
+      byUnit[unit] = (byUnit[unit] || 0) + measure;
+    });
+    renderTableTotals("stock-totals", {
+      "stock-total-quantity": formatNumber(totalQuantity) + " шт",
+      "stock-total-measure": measureTotalLines(byUnit),
+    });
+  }
+
   function renderStockPanel() {
     renderSizeBadge("size-filter-badge", state.sizeFilter, renderStockPanel);
     renderValueBadge();
@@ -497,6 +619,10 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
+      var emptyFooter = document.getElementById("stock-totals");
+      if (emptyFooter) {
+        emptyFooter.style.display = "none";
+      }
       var reasons = [];
       // Реальний баг (аудит коду, 2026-08-14): обидві функції давно
       // перероблені під параметр sizeFilterState (щоб їх могли
@@ -525,6 +651,7 @@
     }
     empty.style.display = "none";
     emptyHint.style.display = "none";
+    renderStockTotals(rows);
     rows.forEach(function (row, index) {
       var tr = document.createElement("tr");
       var size = [row.thickness, row.width, row.length]
@@ -586,175 +713,37 @@
     return values.sort(function (a, b) { return a - b; });
   }
 
-  function openSizeModal(rows, sizeFilterState, onApply) {
-    var body = document.getElementById("size-modal-body");
-    body.innerHTML = "";
-    var pending = {};
-    var fieldEls = {};
-    var applyButton = document.getElementById("size-modal-apply");
-
-    function otherPendingValues(excludeKey) {
-      var result = {};
-      SIZE_FIELDS.forEach(function (field) {
-        if (field.key !== excludeKey) {
-          result[field.key] = pending[field.key].value;
-        }
-      });
-      return result;
-    }
-
-    // Задача користувача (2026-08-14): список і поле - ВЗАЄМОВИКЛЮЧНІ.
-    // Обраний зі списку варіант ГОЛОВНИЙ; поле враховується лише коли для
-    // ЦЬОГО поля список не обраний ("Выбрать"). Список НІКОЛИ не пише своє
-    // значення в поле (лишає його порожнім) - раніше writeIntoInput робив
-    // навпаки, тож "останнє обране" завжди виглядало як ручне введення і
-    // однаково душило сусідні дропдауни постійним значенням старого поля.
-    function effectiveRawValue(fieldKey) {
-      var els = fieldEls[fieldKey];
-      return els.select.value || els.input.value;
-    }
-
-    function refreshApplyState() {
-      var anyInvalid = SIZE_FIELDS.some(function (field) {
-        return pending[field.key].invalid;
-      });
-      applyButton.disabled = anyInvalid;
-    }
-
-    function rebuildSelect(fieldKey) {
-      var select = fieldEls[fieldKey].select;
-      var currentValue = select.value;
-      select.innerHTML = "";
-      var blankOption = document.createElement("option");
-      blankOption.value = "";
-      blankOption.textContent = "Выбрать";
-      select.appendChild(blankOption);
-      var options = distinctValuesFor(rows, fieldKey, otherPendingValues(fieldKey));
-      options.forEach(function (value) {
-        var option = document.createElement("option");
-        option.value = String(value);
-        option.textContent = formatNumber(value);
-        select.appendChild(option);
-      });
-      if (options.some(function (value) { return String(value) === currentValue; })) {
-        select.value = currentValue;
-      }
-    }
-
-    function validate(fieldKey, rawValue) {
-      var els = fieldEls[fieldKey];
-      var trimmed = String(rawValue || "").trim();
-      if (!trimmed) {
-        pending[fieldKey] = { value: null, invalid: false };
-        els.input.classList.remove("invalid");
-        els.error.style.display = "none";
-        refreshApplyState();
+  function distinctSizes(rows) {
+    var seen = {};
+    var items = [];
+    rows.forEach(function (row) {
+      var text = rowSizeText(row);
+      if (!text || seen[text]) {
         return;
       }
-      var num = numberValue(trimmed);
-      var exists = num !== null && distinctValuesFor(rows, fieldKey, otherPendingValues(fieldKey)).indexOf(num) !== -1;
-      pending[fieldKey] = { value: num, invalid: !exists };
-      els.input.classList.toggle("invalid", !exists);
-      els.error.style.display = exists ? "none" : "block";
-      refreshApplyState();
-    }
-
-    // Зміна одного поля перебудовує списки/перевірку ДВОХ інших - каскад
-    // діє в обидва боки (не лише товщина -> ширина -> довжина по порядку).
-    // effectiveRawValue (не голий input.value) - інакше сусіднє поле, чиє
-    // значення зараз узяте зі СПИСКУ (тому його власне текстове поле навмисно
-    // порожнє), тут же обнулилось б назад до pending.value=null.
-    function onFieldChanged(changedKey) {
-      SIZE_FIELDS.forEach(function (field) {
-        if (field.key !== changedKey) {
-          rebuildSelect(field.key);
-          validate(field.key, effectiveRawValue(field.key));
-        }
-      });
-    }
-
-    var fieldsRow = document.createElement("div");
-    fieldsRow.className = "size-fields-row";
-    body.appendChild(fieldsRow);
-
-    SIZE_FIELDS.forEach(function (field) {
-      var current = sizeFilterState[field.key];
-      pending[field.key] = { value: current, invalid: false };
-
-      var wrap = document.createElement("div");
-      wrap.className = "size-field-col";
-      var label = document.createElement("p");
-      label.className = "size-field-label";
-      label.textContent = field.label;
-      wrap.appendChild(label);
-
-      var row = document.createElement("div");
-      row.className = "size-field-row";
-
-      var input = document.createElement("input");
-      input.type = "text";
-      input.value = current === null ? "" : String(current);
-      row.appendChild(input);
-
-      var select = document.createElement("select");
-      row.appendChild(select);
-      wrap.appendChild(row);
-
-      var error = document.createElement("p");
-      error.className = "size-field-error";
-      error.style.display = "none";
-      error.textContent = "Такого размера нет на складе";
-      wrap.appendChild(error);
-
-      fieldEls[field.key] = { input: input, select: select, error: error };
-
-      // Реальний ризик (аудит коду, 2026-08-14): validate()/onFieldChanged()
-      // разом - до 3 повних проходів distinctValuesFor() по rows (кожен -
-      // O(n) скан) ПЛЮС перебудова DOM двох <select> - усе це раніше
-      // запускалось на КОЖНЕ натискання клавіші під час введення числа.
-      // Для складу з тисячами рядків це помітно "гальмувало" ввід. select.
-      // value очищається одразу (дешева, миттєва зміна - сигналізує "тепер
-      // введення вручну"), а сам перерахунок відкладений на коротку паузу
-      // після останнього натискання (debounce), а не на кожен символ.
-      var validateDebounceTimer = null;
-      input.addEventListener("input", function () {
-        select.value = "";
-        if (validateDebounceTimer) {
-          clearTimeout(validateDebounceTimer);
-        }
-        validateDebounceTimer = setTimeout(function () {
-          validate(field.key, input.value);
-          onFieldChanged(field.key);
-        }, 200);
-      });
-      select.addEventListener("change", function () {
-        if (select.value) {
-          // Задача користувача: список НЕ пише в поле - обране зі списку
-          // лишає поле порожнім (не навпаки, як було), поле - лише для
-          // ручного вводу. validate() нижче й так знімає "invalid" з
-          // порожнього поля (rawValue тут - select.value, не поле).
-          input.value = "";
-          validate(field.key, select.value);
-          onFieldChanged(field.key);
-        }
-      });
-
-      fieldsRow.appendChild(wrap);
+      seen[text] = true;
+      items.push({ text: text, t: numberValue(row.thickness) || 0, w: numberValue(row.width) || 0, l: numberValue(row.length) || 0 });
     });
+    items.sort(function (a, b) { return (a.t - b.t) || (a.w - b.w) || (a.l - b.l); });
+    return items.map(function (item) { return item.text; });
+  }
 
-    SIZE_FIELDS.forEach(function (field) {
-      rebuildSelect(field.key);
-      validate(field.key, effectiveRawValue(field.key));
-    });
-
+  // Рішення користувача (2026-09-06): замість трьох полів Толщина/Ширина/
+  // Длина - випадний список цілих розмірів «TxWxL» з наявних рядків
+  // (після інших фільтрів), «Добавить», вибрані рядками з ✕ - можна кілька.
+  function openSizeModal(rows, sizeFilterState, onApply) {
+    var chooser = buildChoiceList(document.getElementById("size-modal-body"), distinctSizes(rows), sizeFilterState.sizes || null,
+      function (value) { return String(value).replace(/x/g, "×"); });
+    var applyButton = document.getElementById("size-modal-apply");
+    applyButton.disabled = false;
     applyButton.onclick = function () {
-      SIZE_FIELDS.forEach(function (field) {
-        sizeFilterState[field.key] = pending[field.key].value;
-      });
+      sizeFilterState.sizes = chooser.result();
+      sizeFilterState.thickness = null;
+      sizeFilterState.width = null;
+      sizeFilterState.length = null;
       document.getElementById("size-modal").style.display = "none";
       onApply();
     };
-
     document.getElementById("size-modal").style.display = "flex";
   }
 
@@ -767,6 +756,19 @@
   // _antiseptic_report_rows/low_stock_warehouse_items), лише період тут
   // фільтрується на клієнті (весь набір рядків завантажується одразу,
   // "весь период"), щоб клік по "Неделя"/"Месяц" не робив зайвий round-trip.
+
+  // Дата у вигляді «дд.мм.гггг» - той самий формат, у якому приходять рядки.
+  function formatRuDate(value) {
+    if (!value) {
+      return "";
+    }
+    var d = value instanceof Date ? value : parseRuDate(value);
+    if (!d) {
+      return String(value);
+    }
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear();
+  }
 
   function parseRuDate(text) {
     var match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text || "");
@@ -943,13 +945,56 @@
     });
   }
 
-  function setTotalsLines(elementId, lines) {
-    var el = document.getElementById(elementId);
-    el.textContent = "";
-    lines.forEach(function (line) {
-      var row = document.createElement("div");
-      row.textContent = line;
-      el.appendChild(row);
+  // Один вигляд підсумку на ВСІХ вкладках (вимога користувача
+  // 2026-08-21: "потрібно щоб однаково все виглядало у всіх вкладках").
+  // Значення розкладаються по клітинках, тобто кожне число стоїть під
+  // своєю колонкою, а сам рядок прилипає до низу області прокрутки.
+  function renderTableTotals(footId, valuesByCellId) {
+    var foot = document.getElementById(footId);
+    if (!foot) {
+      return;
+    }
+    Object.keys(valuesByCellId).forEach(function (cellId) {
+      var cell = document.getElementById(cellId);
+      if (!cell) {
+        return;
+      }
+      cell.textContent = "";
+      var value = valuesByCellId[cellId];
+      var lines = Array.isArray(value) ? value : [value];
+      lines.forEach(function (line) {
+        if (line === null || line === undefined || line === "") {
+          return;
+        }
+        var div = document.createElement("div");
+        div.textContent = line;
+        cell.appendChild(div);
+      });
+    });
+    foot.style.display = "";
+  }
+
+  function hideTableTotals(footId) {
+    var foot = document.getElementById(footId);
+    if (foot) {
+      foot.style.display = "none";
+    }
+  }
+
+  // Одиниці не змішуються НІДЕ: в одній колонці поруч живуть 0,645 м3 і
+  // 2112 мп, тож кожна одиниця підсумовується окремо й показується своїм
+  // рядком. Порядок сталий, щоб число не стрибало між перемальовками.
+  var TOTAL_UNIT_ORDER = ["м3", "м2", "мп"];
+
+  function measureTotalLines(byUnit) {
+    var units = TOTAL_UNIT_ORDER.filter(function (unit) { return byUnit[unit]; });
+    Object.keys(byUnit).forEach(function (unit) {
+      if (byUnit[unit] && units.indexOf(unit) === -1) {
+        units.push(unit);
+      }
+    });
+    return units.map(function (unit) {
+      return formatNumber(byUnit[unit]) + (unit ? " " + unit : "");
     });
   }
 
@@ -994,7 +1039,7 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("sales-totals", []);
+      hideTableTotals("sales-totals-row");
       updateSortArrowsFor("data-sales-sort", state.salesSortKey, state.salesSortDir);
       return;
     }
@@ -1026,16 +1071,19 @@
         clients[row.client] = true;
       }
     });
-    var totalsParts = [formatNumber(totalQuantity) + " шт"];
-    if (totalVolume) totalsParts.push(formatNumber(totalVolume) + " м3");
-    if (totalArea) totalsParts.push(formatNumber(totalArea) + " м2");
-    if (totalLinear) totalsParts.push(formatNumber(totalLinear) + " мп");
-    totalsParts.push(formatNumber(totalAmount) + " MDL");
     var average = rows.length ? Math.round((totalAmount / rows.length) * 100) / 100 : 0;
-    setTotalsLines("sales-totals", [
-      "Итого: " + totalsParts.join(", "),
-      "Средняя сумма продажи: " + formatNumber(average) + " MDL, клиентов: " + Object.keys(clients).length,
-    ]);
+    // Середня сума й кількість клієнтів не лягають у жодну колонку, тож
+    // лишаються другим рядком у клітинці "Итого" - викидати їх заради
+    // симетрії було б гірше, ніж лишити на місці.
+    document.getElementById("sales-total-note").textContent =
+      "средняя " + formatNumber(average) + " MDL · клиентов " + Object.keys(clients).length;
+    renderTableTotals("sales-totals-row", {
+      "sales-total-quantity": formatNumber(totalQuantity) + " шт",
+      "sales-total-measure": measureTotalLines({
+        "м3": totalVolume, "м2": totalArea, "мп": totalLinear,
+      }),
+      "sales-total-amount": formatNumber(totalAmount) + " MDL",
+    });
     updateSortArrowsFor("data-sales-sort", state.salesSortKey, state.salesSortDir);
   }
 
@@ -1059,7 +1107,7 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("antiseptic-totals", []);
+      hideTableTotals("antiseptic-totals-row");
       updateSortArrowsFor("data-antiseptic-sort", state.antisepticSortKey, state.antisepticSortDir);
       return;
     }
@@ -1079,9 +1127,12 @@
       totalVolume += numberValue(row.volume) || 0;
       totalAmount += numberValue(row.total_amount) || 0;
     });
-    setTotalsLines("antiseptic-totals", [
-      "Итого: " + formatNumber(totalVolume) + " м3, " + formatNumber(totalAmount) + " MDL",
-    ]);
+    renderTableTotals("antiseptic-totals-row", {
+      // Антисептирование завжди рахується кубом, незалежно від того, як
+      // продається сам товар.
+      "antiseptic-total-measure": measureTotalLines({ "м3": totalVolume }),
+      "antiseptic-total-amount": formatNumber(totalAmount) + " MDL",
+    });
     updateSortArrowsFor("data-antiseptic-sort", state.antisepticSortKey, state.antisepticSortDir);
   }
 
@@ -1127,7 +1178,7 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("writeoff-totals", []);
+      hideTableTotals("writeoff-totals-row");
       updateSortArrowsFor("data-writeoff-sort", state.writeoffSortKey, state.writeoffSortDir);
       return;
     }
@@ -1149,7 +1200,9 @@
       tbody.appendChild(tr);
       totalQuantity += numberValue(row.quantity) || 0;
     });
-    setTotalsLines("writeoff-totals", ["Итого: " + formatNumber(totalQuantity) + " шт"]);
+    renderTableTotals("writeoff-totals-row", {
+      "writeoff-total-quantity": formatNumber(totalQuantity) + " шт",
+    });
     updateSortArrowsFor("data-writeoff-sort", state.writeoffSortKey, state.writeoffSortDir);
   }
 
@@ -1188,12 +1241,16 @@
     tbody.innerHTML = "";
     if (!rows.length) {
       empty.style.display = "block";
-      setTotalsLines("income-totals", []);
+      hideTableTotals("income-totals-row");
       updateSortArrowsFor("data-income-sort", state.incomeSortKey, state.incomeSortDir);
       return;
     }
     empty.style.display = "none";
     var totalQuantity = 0;
+    // Вимір приходу рахує сервер (income_report_rows) - у самому листі
+    // ПРИХОД МАТЕРИАЛА його немає, а рахувати тут означало б завести ще
+    // одну копію правила "25x50 - це погонні метри".
+    var incomeVolume = 0, incomeArea = 0, incomeLinear = 0;
     rows.forEach(function (row, index) {
       var tr = document.createElement("tr");
       appendRowCells(tr, [
@@ -1204,12 +1261,21 @@
         row.condition || "",
         row.size || "",
         formatNumber(row.quantity),
+        measureCellText(row),
         row.author || "",
       ]);
       tbody.appendChild(tr);
       totalQuantity += numberValue(row.quantity) || 0;
+      incomeVolume += numberValue(row.volume) || 0;
+      incomeArea += numberValue(row.area) || 0;
+      incomeLinear += numberValue(row.linear) || 0;
     });
-    setTotalsLines("income-totals", ["Итого: " + formatNumber(totalQuantity) + " шт"]);
+    renderTableTotals("income-totals-row", {
+      "income-total-quantity": formatNumber(totalQuantity) + " шт",
+      "income-total-measure": measureTotalLines({
+        "м3": incomeVolume, "м2": incomeArea, "мп": incomeLinear,
+      }),
+    });
     updateSortArrowsFor("data-income-sort", state.incomeSortKey, state.incomeSortDir);
   }
 
@@ -1373,12 +1439,12 @@
     tbody.innerHTML = "";
     if (!grouped.length) {
       empty.style.display = "block";
-      setTotalsLines("clients-totals", []);
+      hideTableTotals("clients-totals-row");
       updateSortArrowsFor("data-clients-sort", state.clientsSortKey, state.clientsSortDir);
       return;
     }
     empty.style.display = "none";
-    var totalCount = 0, totalAmount = 0;
+    var totalCount = 0, totalAmount = 0, totalQuantity = 0;
     grouped.forEach(function (bucket, index) {
       var tr = document.createElement("tr");
       appendRowCells(tr, [
@@ -1391,10 +1457,15 @@
       tbody.appendChild(tr);
       totalCount += bucket.count;
       totalAmount += bucket.total_amount;
+      totalQuantity += numberValue(bucket.quantity) || 0;
     });
-    setTotalsLines("clients-totals", [
-      "Итого: " + formatNumber(totalCount) + " прод., " + formatNumber(totalAmount) + " MDL",
-    ]);
+    renderTableTotals("clients-totals-row", {
+      // "Продаж" тут - кількість продажів, а не штук: колонка називається
+      // так само, як у рядках, тож число має стояти саме під нею.
+      "clients-total-count": formatNumber(totalCount),
+      "clients-total-quantity": formatNumber(totalQuantity),
+      "clients-total-amount": formatNumber(totalAmount) + " MDL",
+    });
     updateSortArrowsFor("data-clients-sort", state.clientsSortKey, state.clientsSortDir);
   }
 
@@ -1513,9 +1584,10 @@
   // Задача користувача (2026-08-14): "Приход" - НОВА вкладка, додана в
   // кінець (той самий порядок позиційно відповідає _DATA_BROWSER_TAB_KEYS,
   // telegram_dialog_core.py - там теж додана в кінець списку).
-  var TAB_KEYS = ["stock", "sales", "antiseptic", "writeoff", "clients", "low_stock", "income"];
+  var TAB_KEYS = ["stock", "movement", "sales", "antiseptic", "writeoff", "clients", "low_stock", "income"];
   var TAB_PANEL_IDS = {
     stock: "panel-stock",
+    movement: "panel-movement",
     sales: "panel-sales",
     antiseptic: "panel-antiseptic",
     writeoff: "panel-writeoff",
@@ -1523,10 +1595,275 @@
     low_stock: "panel-low-stock",
     income: "panel-income",
   };
+  // ---- Вкладка «Движение» (ТЗ п.8.4/8.5) ----
+  // Залишок на дату рахується НАЗАД від поточного: беремо теперішній
+  // залишок і віднімаємо всі рухи після цієї дати. Тому цифри правдиві
+  // рівно настільки, наскільки сягає історія рухів.
+  var MEASURE_UNITS = { volume: "м3", area: "м2", linear: "мп" };
+  var MOVEMENT_LINES = [
+    { key: "income", label: "Приход" },
+    { key: "sale", label: "Продажи" },
+    { key: "writeoff", label: "Списание" },
+    { key: "exchange_in", label: "Получено по обмену" },
+    { key: "exchange_out", label: "Отдано по обмену" },
+    { key: "correction", label: "Коррекция" },
+    { key: "rollback", label: "Откат" },
+  ];
+
+  // Категорія = продукт, і лише коли продукт СПРАВДІ ділиться сухістю
+  // (у складі є два різні стани) - «Доска AD» / «Доска KD». «N/A» та інші
+  // заглушки станом не рахуються, тож ОСБ лишається «ОСБ», а Рейка
+  // розділиться сама, щойно з'явиться KD.
+  var CONDITION_PLACEHOLDERS = { "": 1, "n/a": 1, "-": 1, "—": 1, "–": 1, "нет": 1 };
+
+  function meaningfulCondition(row) {
+    var value = String(row.condition || "").trim();
+    return CONDITION_PLACEHOLDERS[value.toLowerCase()] ? "" : value;
+  }
+
+  function splitByConditionMap() {
+    var byProduct = {};
+    state.rows.concat(state.movementRows).forEach(function (row) {
+      var product = row.product || "";
+      var condition = meaningfulCondition(row);
+      if (!product || !condition) {
+        return;
+      }
+      if (!byProduct[product]) {
+        byProduct[product] = {};
+      }
+      byProduct[product][condition] = true;
+    });
+    var split = {};
+    Object.keys(byProduct).forEach(function (product) {
+      if (Object.keys(byProduct[product]).length > 1) {
+        split[product] = true;
+      }
+    });
+    return split;
+  }
+
+  function movementCategory(row, split) {
+    var product = row.product || "";
+    var condition = meaningfulCondition(row);
+    var map = split || state._movementSplit || {};
+    return map[product] && condition ? product + " " + condition : product;
+  }
+
+  function movementCategories() {
+    var seen = {};
+    var list = [];
+    state.rows.concat(state.movementRows).forEach(function (row) {
+      var key = movementCategory(row);
+      if (key && !seen[key]) {
+        seen[key] = true;
+        list.push(key);
+      }
+    });
+    list.sort();
+    return list;
+  }
+
+  function currentTotals() {
+    var totals = {};
+    state.rows.forEach(function (row) {
+      var key = movementCategory(row);
+      if (!key) {
+        return;
+      }
+      if (!totals[key]) {
+        totals[key] = { quantity: 0, measure: 0, unit: row.unit || "" };
+      }
+      totals[key].quantity += numberValue(row.quantity) || 0;
+      totals[key].measure += numberValue(row.measure) || 0;
+      if (!totals[key].unit && row.unit) {
+        totals[key].unit = row.unit;
+      }
+    });
+    return totals;
+  }
+
+  // Дві різні межі, і плутати їх не можна:
+  // • «після дня» - для залишку на КІНЕЦЬ періоду; без верхньої межі
+  //   віднімати нема чого, тож день null означає нуль;
+  // • «від дня» - для залишку на ПОЧАТОК періоду; без нижньої межі це
+  //   початок історії, тож віднімаються ВСІ рухи.
+  function movementSum(category, predicate) {
+    var sum = { quantity: 0, measure: 0 };
+    state.movementRows.forEach(function (row) {
+      if (movementCategory(row) !== category) {
+        return;
+      }
+      var rowDate = parseRuDate(row.date);
+      if (!rowDate || !predicate(rowDate)) {
+        return;
+      }
+      sum.quantity += numberValue(row.quantity) || 0;
+      sum.measure += numberValue(row.measure) || 0;
+    });
+    return sum;
+  }
+
+  function movementsAfterDay(category, day) {
+    if (!day) {
+      return { quantity: 0, measure: 0 };
+    }
+    return movementSum(category, function (rowDate) { return rowDate > day; });
+  }
+
+  function movementsFromDay(category, day) {
+    return movementSum(category, function (rowDate) { return !day || rowDate >= day; });
+  }
+
+  function movementsWithin(category, from, to) {
+    var byType = {};
+    state.movementRows.forEach(function (row) {
+      if (movementCategory(row) !== category) {
+        return;
+      }
+      var rowDate = parseRuDate(row.date);
+      if (!rowDate || (from && rowDate < from) || (to && rowDate > to)) {
+        return;
+      }
+      if (!byType[row.type]) {
+        byType[row.type] = { quantity: 0, measure: 0 };
+      }
+      byType[row.type].quantity += numberValue(row.quantity) || 0;
+      byType[row.type].measure += numberValue(row.measure) || 0;
+    });
+    return byType;
+  }
+
+  function movementAmountText(totals, unit) {
+    var parts = [];
+    if (unit && Math.abs(totals.measure) > 1e-9) {
+      parts.push(formatNumber(Math.round(totals.measure * 1000) / 1000) + " " + unit);
+    }
+    parts.push(formatNumber(Math.round(totals.quantity * 1000) / 1000) + " шт");
+    return parts.join(" · ");
+  }
+
+  function signedAmountText(totals, unit) {
+    var text = movementAmountText({ quantity: Math.abs(totals.quantity), measure: Math.abs(totals.measure) }, unit);
+    return (totals.quantity < 0 || totals.measure < 0 ? "−" : "+") + text;
+  }
+
+  function movementCardElement(category, totals) {
+    var card = document.createElement("div");
+    card.className = "movement-card";
+    var head = document.createElement("div");
+    head.className = "movement-card-head";
+    head.textContent = category;
+    card.appendChild(head);
+    totals.forEach(function (line) {
+      var row = document.createElement("div");
+      row.className = "movement-line" + (line.strong ? " strong" : "");
+      var label = document.createElement("span");
+      label.textContent = line.label;
+      var value = document.createElement("b");
+      value.textContent = line.value;
+      if (line.sign > 0) {
+        value.className = "movement-plus";
+      } else if (line.sign < 0) {
+        value.className = "movement-minus";
+      }
+      row.appendChild(label);
+      row.appendChild(value);
+      card.appendChild(row);
+    });
+    return card;
+  }
+
+  function renderMovementPanel() {
+    state._movementSplit = splitByConditionMap();
+    renderPeriodChips("movement-period-chips", state.movementPeriod, renderMovementPanel);
+
+    var modes = document.getElementById("movement-mode-chips");
+    modes.innerHTML = "";
+    [{ key: "period", label: "Движение за период" }, { key: "date", label: "Остаток на дату…" }].forEach(function (mode) {
+      var chip = document.createElement("span");
+      var active = (mode.key === "date") === !!state.movementDate;
+      chip.className = "data-chip" + (active ? " active" : "");
+      chip.textContent = mode.key === "date" && state.movementDate ? "На дату: " + formatRuDate(state.movementDate) : mode.label;
+      chip.addEventListener("click", function () {
+        if (mode.key === "period") {
+          state.movementDate = null;
+          renderMovementPanel();
+          return;
+        }
+        openRangeModal(function (from) {
+          state.movementDate = from || null;
+          renderMovementPanel();
+        });
+      });
+      modes.appendChild(chip);
+    });
+
+    var categories = movementCategories();
+    var chips = document.getElementById("movement-category-chips");
+    chips.innerHTML = "";
+    [null].concat(categories).forEach(function (category) {
+      var chip = document.createElement("span");
+      chip.className = "data-chip" + (state.movementCategory === category ? " active" : "");
+      chip.textContent = category === null ? "Все" : category;
+      chip.addEventListener("click", function () {
+        state.movementCategory = category;
+        renderMovementPanel();
+      });
+      chips.appendChild(chip);
+    });
+
+    var body = document.getElementById("movement-body");
+    body.innerHTML = "";
+    var totals = currentTotals();
+    var shown = categories.filter(function (category) {
+      return state.movementCategory === null || state.movementCategory === category;
+    });
+    var range = periodRange(state.movementPeriod);
+    shown.forEach(function (category) {
+      var current = totals[category] || { quantity: 0, measure: 0, unit: "" };
+      var unit = current.unit;
+      if (state.movementDate) {
+        var after = movementsAfterDay(category, state.movementDate);
+        body.appendChild(movementCardElement(category, [{
+          label: "Остаток на " + formatRuDate(state.movementDate),
+          value: movementAmountText({ quantity: current.quantity - after.quantity, measure: current.measure - after.measure }, unit),
+          strong: true,
+        }]));
+        return;
+      }
+      var afterEnd = movementsAfterDay(category, range.to);
+      var afterStart = movementsFromDay(category, range.from);
+      var within = movementsWithin(category, range.from, range.to);
+      var lines = [{
+        label: "Остаток на начало" + (range.from ? " " + formatRuDate(range.from) : " истории"),
+        value: movementAmountText({ quantity: current.quantity - afterStart.quantity, measure: current.measure - afterStart.measure }, unit),
+        strong: true,
+      }];
+      MOVEMENT_LINES.forEach(function (line) {
+        var sums = within[line.key];
+        if (!sums || (Math.abs(sums.quantity) < 1e-9 && Math.abs(sums.measure) < 1e-9)) {
+          return;
+        }
+        lines.push({ label: line.label, value: signedAmountText(sums, unit), sign: sums.quantity >= 0 ? 1 : -1 });
+      });
+      lines.push({
+        label: "Остаток на конец" + (range.to ? " " + formatRuDate(range.to) : " (сегодня)"),
+        value: movementAmountText({ quantity: current.quantity - afterEnd.quantity, measure: current.measure - afterEnd.measure }, unit),
+        strong: true,
+      });
+      body.appendChild(movementCardElement(category, lines));
+    });
+    document.getElementById("movement-empty").style.display = shown.length ? "none" : "";
+  }
+
   function switchTab(key) {
     state.activeTab = key;
     TAB_KEYS.forEach(function (tabKey) {
-      document.getElementById(TAB_PANEL_IDS[tabKey]).style.display = tabKey === key ? "block" : "none";
+      // "flex", не "block": інлайновий стиль б'є CSS, а панель мусить
+      // лишатись flex-колонкою - інакше таблиця не розтягнеться на
+      // залишок висоти й прокрутка знову дістанеться всій сторінці.
+      document.getElementById(TAB_PANEL_IDS[tabKey]).style.display = tabKey === key ? "flex" : "none";
     });
     renderSidebar();
   }
@@ -1668,7 +2005,7 @@
       });
     });
     document.getElementById("size-filter-trigger").addEventListener("click", function () {
-      openSizeModal(state.rows, state.sizeFilter, renderStockPanel);
+      openSizeModal(visibleRowsExcept("size"), state.sizeFilter, renderStockPanel);
     });
     document.getElementById("size-modal-close").addEventListener("click", function () {
       closeModal("size-modal");
@@ -1874,6 +2211,7 @@
     state.antisepticRows = ctx.antiseptic_rows || [];
     state.writeoffRows = ctx.writeoff_rows || [];
     state.incomeRows = ctx.income_rows || [];
+    state.movementRows = ctx.movement_rows || [];
     state.lowStockRows = ctx.low_stock_rows || [];
     state.lowStockThreshold = ctx.low_stock_threshold;
     state.canEditLowStockThreshold = !!ctx.can_edit_low_stock_threshold;
@@ -1899,6 +2237,7 @@
     renderAntisepticPanel();
     renderWriteoffPanel();
     renderIncomePanel();
+    renderMovementPanel();
     renderClientsPanel();
     renderLowStockPanel();
     initLowStockThresholdEdit();
@@ -1929,6 +2268,7 @@
     state.antisepticRows = ctx.antiseptic_rows || [];
     state.writeoffRows = ctx.writeoff_rows || [];
     state.incomeRows = ctx.income_rows || [];
+    state.movementRows = ctx.movement_rows || [];
     state.lowStockRows = ctx.low_stock_rows || [];
     state.lowStockThreshold = ctx.low_stock_threshold;
     state.canEditLowStockThreshold = !!ctx.can_edit_low_stock_threshold;
@@ -1940,6 +2280,7 @@
     renderAntisepticPanel();
     renderWriteoffPanel();
     renderIncomePanel();
+    renderMovementPanel();
     renderClientsPanel();
     renderLowStockPanel();
     initLowStockThresholdEdit();

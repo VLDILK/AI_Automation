@@ -25,9 +25,12 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
+
+import secure_http
 import webbrowser
 from tkinter import ttk, messagebox, filedialog, simpledialog, colorchooser
-from datetime import datetime
+from tkinter import font as tkfont
+from datetime import datetime, timedelta, date
 from pathlib import Path
 
 import excel_source
@@ -35,9 +38,14 @@ import github_releases
 import onedrive_sync
 import paths
 import permissions as perm
+import cloudflare_api
 import code_backup
 import config_backup
+import domain_info
 import remote_control_client
+from journal_window import RemoteJournalSource, open_journal_window
+from role_buttons_window import RemoteRoleSource, open_role_buttons_window
+import button_editor
 import servers_registry
 import standard_menu_cloud
 import update_check
@@ -60,6 +68,7 @@ from warehouse_data import (
     list_db_snapshots,
     maybe_create_scheduled_snapshot,
     regenerate_excel_after_restore,
+    repair_warehouse_columns,
     restore_db_snapshot,
     _backup_encryption_password,
     _set_backup_encryption_password,
@@ -71,7 +80,7 @@ from warehouse_data import (
 
 # Задача користувача (2026-08-12): перша версія, з якої тепер відлічуються
 # оновлення (update_check.py) - до цього номер версії ніде не фіксувався.
-__version__ = "1.0.78"
+__version__ = "1.1.45"
 UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 PAGE_SIZE = 100
@@ -111,6 +120,103 @@ RU_MONTHS = [
     "ноября",
     "декабря",
 ]
+
+
+# Редактор кнопок (варіант 01, 2026-09-05): спільна панель button_editor
+# показує "телефон" і властивості; домашка редагує ЖИВЕ дерево клієнта через
+# тунель, тож джерело читає кеш останнього fetch і шле дії віддалено.
+# Кожна дія - у фоні (_push_custom_button_action); після успіху дерево
+# перечитується, і лише тоді панель перемальовується (then).
+# Прокрутка не йде вище стелі (правило користувача 2026-09-07: «якщо
+# вертикальний скрол додається - то НІКОЛИ не має скролитись вверх, що
+# робить порожній простір у вікні між текстом і тим що над ним»). Дві
+# функції на всі власні прокрутки домашки: область прокрутки не менша за
+# видиму частину (короткий вміст не «пливе» вниз) і колесо, затиснуте з
+# обох боків.
+def _visible_canvas_height(canvas):
+    # Рамка й підсвітка з'їдають кілька пікселів: без цього видима частина
+    # виходить меншою за область прокрутки, і вміст можна зрушити на 1-2 px
+    # угору - та сама порожнеча зверху, лише дрібна.
+    inset = 0
+    for option in ("highlightthickness", "borderwidth"):
+        try:
+            inset += 2 * int(float(canvas.cget(option) or 0))
+        except (ValueError, TypeError):
+            pass
+    return max(canvas.winfo_height() - inset, 1)
+
+
+def _scroll_region_with_ceiling(canvas):
+    box = canvas.bbox("all") or (0, 0, 1, 1)
+    canvas.configure(scrollregion=(0, 0, box[2], max(box[3], _visible_canvas_height(canvas))))
+
+
+def _wheel_blocked(canvas, event):
+    first, last = canvas.yview()
+    if event.delta > 0 and first <= 1e-6:
+        return True
+    if event.delta < 0 and last >= 1 - 1e-6:
+        return True
+    return False
+
+
+class _RemoteButtonSource(button_editor.ButtonSource):
+    def __init__(self, app):
+        self.app = app
+
+    def _cache(self):
+        return self.app._custom_buttons_cache or []
+
+    def rows(self, parent_id):
+        return [
+            (row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
+            for row in self._cache() if row[1] == parent_id
+        ]
+
+    def get(self, node_id):
+        for row in self._cache():
+            if row[0] == node_id:
+                return row
+        return None
+
+    def actions(self):
+        return [(action["code"], action["label"]) for action in CUSTOM_BUTTON_ACTIONS]
+
+    def operations(self):
+        return self.app._operation_link_catalog()
+
+    def label_collides(self, label, exclude_id=None):
+        # Збіги перевіряє сам клієнт (409) - помилка прийде текстом.
+        return False
+
+    def add(self, parent_id, label, layout):
+        result = remote_control_client.add_remote_custom_button(
+            label, "", None, parent_id=parent_id, layout=layout, operation_id=None,
+        )
+        return result.get("id") if isinstance(result, dict) else None
+
+    def update(self, node_id, label, message_text, action_code, layout, operation_id):
+        remote_control_client.update_remote_custom_button(
+            node_id, label, message_text, action_code, layout=layout, operation_id=operation_id,
+        )
+
+    def move(self, node_id, new_index):
+        row = self.get(node_id)
+        if not row:
+            return
+        remote_control_client.update_remote_custom_button(
+            node_id, row[2], row[3] or "", row[4], layout=row[7], operation_id=row[8], position_index=new_index,
+        )
+
+    def delete(self, node_id):
+        remote_control_client.delete_remote_custom_button(node_id)
+
+    def set_enabled(self, node_id, enabled):
+        remote_control_client.set_remote_custom_button_enabled(node_id, enabled)
+
+    def apply(self, action, then):
+        self.app._button_editor_pending_then = then
+        self.app._push_custom_button_action(action)
 
 
 class ExcelViewerApp:
@@ -190,13 +296,20 @@ class ExcelViewerApp:
     _LAST_SEEN_WIDTH = 16
     _SEMANTIC_FG_COLORS = {
         "white", "#d1242f", "#1a7f37", "#0969da", "#2F7BD9", "#255FA8",
+        "#24292f",  # текст сірого чіпа «Не распознано» в журналі дій
         "#1D9E75", "#B23B3B", "red", "green", "darkgreen",
         "#8a5a00",  # бейдж "виняток" (одиниця виміру) - лишається впізнаваним у обох темах
+        "#B0B8C0", "#DFE6EE",  # текст на "телефоні" редактора кнопок
     } | {fg for _bg, fg in _ROLE_CHIP_COLORS.values()}
     _SEMANTIC_BG_COLORS = {bg.lower() for bg, _fg in _ROLE_CHIP_COLORS.values()} | {
         "#fff3d6",
+        # Чіпи статусу в журналі дій: помилка і «не розпізнано». Зелений
+        # (#dafbe1) і жовтий (#fff3d6) уже в наборі вище.
+        "#ffebe9", "#eaeef2",
         "#ddf4ff",  # бейдж "gui" (журнал оновлень)
         "#dafbe1",  # бейдж "client" (журнал оновлень)
+        # "Телефон" у редакторі кнопок (button_editor.py) - кольори Telegram.
+        "#17212b", "#182533", "#2b5278", "#3d6e9e", "#3a4a5a", "#2f7bd9",
     }
 
     def _theme(self):
@@ -437,6 +550,9 @@ class ExcelViewerApp:
         self.display_settings.set("dark_mode", self._dark_mode)
         self.root.configure(bg=self._theme()["bg"])
         self._apply_theme()
+        # Підсвітку обраного рядка журналу дій тема щойно стерла (будь-який
+        # Frame повертається до свого фону) - малюємо її наново.
+        self._restore_action_log_selection()
 
     # Задача користувача: "скрізь зроби їх видимими кнопками, бо зараз не
     # видно що це те, на що можна натиснути" — стандартний tk.Button з
@@ -629,10 +745,17 @@ class ExcelViewerApp:
         # "мигтіти" адресою форми під час звичайних перепідключень бота).
         self.webapp_server = WebappServer(
             db_path=self.db_path,
+            get_onedrive_email=lambda: self._onedrive_shared_email(),
             get_token=lambda: self._read_telegram_token()[0],
-            get_fresh_context=lambda store, is_admin: (
-                self.telegram_worker._webapp_data_browser_context(store, is_admin)
+            get_fresh_context=lambda store, is_admin, telegram_id=None: (
+                self.telegram_worker._webapp_data_browser_context(
+                    store, is_admin, telegram_id=telegram_id
+                )
                 if self.telegram_worker else None
+            ),
+            get_journal_page=lambda store, filters: (
+                self.telegram_worker._admin_journal_page(store, filters)
+                if self.telegram_worker else {"entries": [], "has_more": False}
             ),
         )
         self.cloudflared_process = None
@@ -721,31 +844,16 @@ class ExcelViewerApp:
     # просто тому, що це один SQLite-файл, без потреби ділити сам об'єкт
     # з'єднання між потоками.
     def _start_background_data_load(self):
+        """Домашка чужих таблиць не читає (рішення користувача 2026-09-07:
+        «взагалі забери читання чужих екселів, хай клієнти цим займаються»).
+        У фоні лишився тільки плановий знімок власної бази."""
         def worker():
-            excel_error = None
-            try:
-                thread_store = ExcelSqliteStore(self.db_path)
-                try:
-                    self._load_excel_into_store(thread_store)
-                finally:
-                    thread_store.close()
-            except Exception as exc:
-                # Реальний баг (аудит коду, 2026-08-15): лише RuntimeError
-                # ловився тут раніше, але openpyxl.load_workbook (усередині
-                # _load_excel_into_store -> excel_source.open_workbook) кидає
-                # BadZipFile/InvalidFileException на пошкоджений файл і
-                # PermissionError, якщо Excel тримає його відкритим - жоден з
-                # них не RuntimeError. Без широкого except виняток вилітав би
-                # з воркера ДО self.root.after(0, ..._finish_startup...) -
-                # UI ніколи не будувався б, застосунок висів би назавжди на
-                # безрамковому splash-вікні без жодної помилки на екрані.
-                excel_error = exc
             snapshot_error = None
             try:
                 maybe_create_scheduled_snapshot(self.db_path)
             except Exception as exc:
                 snapshot_error = exc
-            self.root.after(0, lambda: self._finish_startup(excel_error, snapshot_error))
+            self.root.after(0, lambda: self._finish_startup(None, snapshot_error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -766,6 +874,43 @@ class ExcelViewerApp:
             messagebox.showwarning(
                 self._t("Резервные копии"),
                 self._t("Не удалось создать автоматический снимок базы данных: {error}").format(error=snapshot_error),
+            )
+        # Про правку самої таблиці користувача мовчати не можна: програма
+        # змінила його файл. Показуємо РІВНО один раз - повторний старт
+        # нічого не дописує, бо колонки вже на місці.
+        plan = getattr(self, "_warehouse_repair_plan", None)
+        if plan:
+            messagebox.showinfo(
+                self._t("Таблиця Excel"),
+                self._t(
+                    "У листі СКЛАД бракувало колонок — програма дописала їх сама:\n{headers}\n\n"
+                    "Заповнено значень: {cells} (порахованих із кількості штук).\n"
+                    "Перед зміною зроблено резервну копію таблиці."
+                ).format(headers="\n".join("• " + header for header in plan["headers"]),
+                         cells=plan["filled_cells"]),
+            )
+        lath_marked = getattr(self, "_lath_rows_marked", 0)
+        if lath_marked:
+            messagebox.showinfo(
+                self._t("Таблиця Excel"),
+                self._t(
+                    "У листі СКЛАД позначено рядки рейки: {count} — «(рейка)» у продукті, одиниця «мп»."
+                ).format(count=lath_marked),
+            )
+        measures_filled = getattr(self, "_measures_filled", 0)
+        if measures_filled:
+            messagebox.showinfo(
+                self._t("Таблиця Excel"),
+                self._t("У листі СКЛАД дораховано одиниць виміру з кількості штук: {count}.").format(count=measures_filled),
+            )
+        repair_error = getattr(self, "_warehouse_repair_error", None)
+        if repair_error is not None:
+            messagebox.showwarning(
+                self._t("Таблиця Excel"),
+                self._t(
+                    "Не вдалося привести лист СКЛАД до потрібного формату: {error}\n\n"
+                    "Програма працює далі, але позиції в погонных метрах можуть показувати 0 мп."
+                ).format(error=repair_error),
             )
         self._update_db_snapshot_heartbeat()
         self.root.after(1800000, self._schedule_db_backup_tick)
@@ -844,8 +989,6 @@ class ExcelViewerApp:
         # й command_alias_editor вище (task #244), поширений і на вікна
         # деталей журналів - "Детально" двічі на той самий запис відкривало
         # ДРУГЕ незалежне вікно. Той самий dict-keyed патерн, за log_id.
-        self._work_log_detail_windows = {}
-        self._action_log_detail_windows = {}
         # Задача користувача (2026-08-15): "синхронізація" - Персонал/
         # Журнали дій тепер тягнуть РЕАЛЬНІ дані client_app.py через тунель
         # (read-only, remote_control_client.fetch_remote_action_log/
@@ -855,16 +998,12 @@ class ExcelViewerApp:
         self._remote_action_log_rows = {}
 
         self._build_main_menu()
-        self._build_layout()
-        self._build_sheet_buttons()
+        # Домашка не має власних даних і таблиць (рішення користувача
+        # 2026-09-07) - екран «Дані / Таблиця» більше не будується.
         self._build_settings_view()
         self._build_commands_view()
         self._build_custom_buttons_view()
         self._build_payment_methods_view()
-
-        sheet_names = self.store.sheet_names()
-        if sheet_names:
-            self.show_sheet(sheet_names[0])
 
         self._update_telegram_settings_labels()
         # self._start_telegram_from_settings(silent=True) - свідомо
@@ -880,19 +1019,6 @@ class ExcelViewerApp:
         if self._on_ready:
             self._on_ready()
 
-    def _load_excel_into_store(self, store=None):
-        # Задача користувача: "автоматична перевірка при приєднанні нової
-        # таблиці чи є ця вкладка, якщо нема - програма має створити сама" -
-        # ОКРЕМИЙ прохід (не data_only=True, як читання для імпорту нижче -
-        # інакше збереження стерло б формули на інших листах, коментар у
-        # ensure_workbook_has_required_sheets) ПЕРЕД імпортом, щоб
-        # СПИСАНИЕ вже існувало на момент import_workbook нижче.
-        ensure_workbook_has_required_sheets()
-        workbook = excel_source.open_workbook(data_only=True)
-        try:
-            (store or self.store).import_workbook(workbook, READ_ONLY_SHEETS)
-        finally:
-            workbook.close()
 
     def _build_main_menu(self):
         self.main_menu_frame = tk.Frame(self.root)
@@ -928,14 +1054,12 @@ class ExcelViewerApp:
         # bg/fg/highlight-параметрах. tk.Label замість tk.Button повністю
         # усуває будь-яке нативне промальовування кнопки Windows - лишається
         # голий прямокутник, який сам контролює кожен піксель.
-        self.check_update_button = tk.Label(
-            self.main_menu_frame,
-            text="⟳",
-            font=("Segoe UI", 12),
-            cursor="hand2",
-        )
-        self.check_update_button.bind("<Button-1>", lambda _event: self._manual_check_for_update())
-        self.check_update_button.place(relx=1.0, x=-16, y=52, anchor="ne", width=32, height=32)
+        # Задача користувача (2026-09-05): "з домашки видали кнопку оновлення"
+        # - ручна перевірка "⟳" з головного екрана прибрана: домашку
+        # перезбирає й перезапускає ШІ напряму, кнопка лише займала кут.
+        # _manual_check_for_update лишається для планової перевірки; кнопка
+        # "Оновлення" вище й далі зʼявляється сама, коли є що ставити.
+        self.check_update_button = None
 
         # Задача користувача (2026-08-15): "не має видвати спливаюче
         # вікно-повідомлення... просто тихесенько під кнопкою" - текст під
@@ -946,7 +1070,7 @@ class ExcelViewerApp:
             textvariable=self.update_check_result_text,
             font=("Segoe UI", 9), fg="gray40",
             wraplength=220, justify="right",
-        ).place(relx=1.0, x=-16, y=88, anchor="ne")
+        ).place(relx=1.0, x=-16, rely=1.0, y=-8, anchor="se")
 
         # Задача користувача: "додай на головне меню... датчик" статусу
         # віддаленого сервера (client_app.py) - дзеркально до update_button
@@ -960,132 +1084,65 @@ class ExcelViewerApp:
         # прибрано (розділ "Дистанційне керування" туди вже не веде, звідти
         # прибрано разом із переходом на автоматичне з'єднання) - лише
         # пасивний індикатор, без переходу.
-        self.main_menu_status_label = tk.Label(
-            self.main_menu_frame,
-            textvariable=self.telegram_status_text,
-            font=("Segoe UI", 10),
-            fg="gray40",
-        )
-        self.main_menu_status_label.place(relx=0.0, x=16, y=12, anchor="nw")
+        self.known_clients_frame = tk.Frame(self.main_menu_frame)
+        self.known_clients_frame.place(relx=0.0, x=16, y=12, anchor="nw")
+        tk.Label(
+            self.known_clients_frame,
+            text=self._t("Известные клиенты"),
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+        self.known_clients_rows = tk.Frame(self.known_clients_frame)
+        self.known_clients_rows.pack(fill="x")
+        self._refresh_known_clients()
 
         # Задача користувача (2026-08-18): "кнопку зміни теми перенес
         # праворуч... і перероби на тумблер" - справжній повзунок-перемикач
         # (Canvas, не tk.Button). Задача користувача (наступного дня):
         # "тумблер теми змісти нижче на 150 пікселів" - тепер нижче "⟳"
         # (check_update_button, y=52), а не над ним.
-        theme_toggle_row = tk.Frame(self.main_menu_frame)
-        theme_toggle_row.place(relx=1.0, x=-16, y=162, anchor="ne")
-        self.theme_toggle_label = tk.Label(
-            theme_toggle_row, text=self._t("Тёмная тема"), font=("Segoe UI", 9),
-        )
-        self.theme_toggle_label.pack(side="left", padx=(0, 6))
-        self.theme_toggle_switch = tk.Canvas(
-            theme_toggle_row, width=44, height=22, highlightthickness=0, bd=0, cursor="hand2",
-        )
-        self.theme_toggle_switch.bind("<Button-1>", lambda _event: self._on_theme_toggle())
-        self.theme_toggle_switch.pack(side="left")
-        self._draw_theme_toggle_switch()
+        # Задача користувача (2026-09-05): "тумблер перемикання теми -
+        # перенеси у налаштування... справа вверху, над кнопкою Команди" -
+        # тепер він будується в _build_settings_view (_build_theme_toggle).
 
+        # Задача користувача (2026-09-05): "перенеси ці кнопки праворуч, і
+        # зміни їх стиль" - обраний стиль 01 із пʼяти: плоскі кнопки з
+        # іконкою і текстом ліворуч, рівна колонка праворуч під кнопкою
+        # "Оновлення" (та зʼявляється в тому ж куті на y=12, коли є що
+        # ставити). Заголовок "Головне меню" прибрано на пряме прохання.
+        # Кольори фону/тексту лишаються за _apply_theme (тема), тут - лише
+        # форма: тонка рамка, вирівнювання, іконка. "Вихід" - семантичний
+        # червоний, який тема не перефарбовує (_SEMANTIC_FG_COLORS).
+        # Задача користувача (2026-09-05): "прибери кнопку сервери, вона
+        # більше не потрібна. її ролі виконують інші кнопки" - пункт
+        # "Сервери" прибрано; саме вікно (open_servers_dialog) лишається
+        # для місць, що на нього ще посилаються.
         menu_panel = tk.Frame(self.main_menu_frame)
-        menu_panel.pack(expand=True)
+        menu_panel.place(relx=1.0, x=-16, y=56, anchor="ne")
+        menu_items = [
+            ("\u2699", "Налаштування", self.show_settings, None),
+            ("\u25a4", "Журнали", self.show_journals, None),
+            ("\U0001F464", "Персонал", self.show_personnel, None),
+            ("\u25a6", "Редактор кнопок", self.show_custom_buttons, None),
+            ("\u21ea", "Публікація оновлень", self.open_publish_updates_dialog, None),
+            ("\u26d3", "Тунель", self.open_tunnel_dialog, None),
+            ("\u23fb", "Вихід", self.on_close, "#d1242f"),
+        ]
+        for icon, label, handler, semantic_fg in menu_items:
+            button = tk.Button(
+                menu_panel, text=f"{icon}   {self._t(label)}", anchor="w", width=26,
+                relief="solid", bd=1, padx=12, pady=6, font=("Segoe UI", 10),
+                cursor="hand2", command=handler,
+            )
+            if semantic_fg:
+                button.configure(fg=semantic_fg)
+            button.pack(fill="x", pady=(0, 6))
 
-        title = tk.Label(menu_panel, text=self._t("Головне меню"), font=("Segoe UI", 18, "bold"))
-        title.pack(pady=(0, 24))
-
-        settings_button = tk.Button(
-            menu_panel,
-            text=self._t("Налаштування"),
-            width=28,
-            height=2,
-            command=self.show_settings,
-        )
-        settings_button.pack(pady=8)
-
-        journals_button = tk.Button(
-            menu_panel,
-            text=self._t("Журнали"),
-            width=28,
-            height=2,
-            command=self.show_journals,
-        )
-        journals_button.pack(pady=8)
-
-        # Задача користувача: "винеси кнопку керування персоналом до
-        # головного меню. при відкритті керув. персоналом - має відкриватись
-        # окреме вікно" - той самий tk.Toplevel-патерн, що й "Журнали" вище.
-        personnel_button = tk.Button(
-            menu_panel,
-            text=self._t("Персонал"),
-            width=28,
-            height=2,
-            command=self.show_personnel,
-        )
-        personnel_button.pack(pady=8)
-
-        custom_buttons_button = tk.Button(
-            menu_panel,
-            text=self._t("Редактор кнопок"),
-            width=28,
-            height=2,
-            command=self.show_custom_buttons,
-        )
-        custom_buttons_button.pack(pady=8)
-
-        sync_excel_button = tk.Button(
-            menu_panel,
-            text=self._t("Обновити Excel"),
-            width=28,
-            height=2,
-            command=self.sync_excel_manually,
-        )
-        sync_excel_button.pack(pady=8)
-
-        # Задача користувача (2026-08-19): "винеси кнопку публікації
-        # оновлень на головний екран, замість зарезервованої кнопки" -
-        # той самий "В разработке"-слот, що вже колись зайняла "Персонал"
-        # (коментар вище), тепер займає ця кнопка - перенесена сюди з
-        # side_panel (нижче), не продубльована.
-        publish_updates_button = tk.Button(
-            menu_panel,
-            text=self._t("Публікація оновлень"),
-            width=28,
-            height=2,
-            command=self.open_publish_updates_dialog,
-        )
-        publish_updates_button.pack(pady=8)
-
-        # Задача користувача (2026-08-19): "потрібно бачити всі сервера що
-        # доступні. всі тестові... і всі не тестові" - той самий "головне
-        # меню, спливаюче вікно" підхід, що й "Публікація оновлень" вище.
-        servers_button = tk.Button(
-            menu_panel,
-            text=self._t("Сервери"),
-            width=28,
-            height=2,
-            command=self.open_servers_dialog,
-        )
-        servers_button.pack(pady=8)
-
-        exit_button = tk.Button(
-            menu_panel,
-            text=self._t("Вихід"),
-            width=28,
-            height=2,
-            command=self.on_close,
-        )
-        exit_button.pack(pady=8)
-
-        # Задача користувача (2026-08-17): "додай знизу версію програми" -
-        # той самий "ver. X" напис, що вже є в client_app.py (main_frame,
-        # side="bottom") - тут той самий трюк, лише на main_menu_frame
-        # (зовнішній, на всю висоту вікна), а не на menu_panel (внутрішній,
-        # центрований по вертикалі) - інакше напис опинився б одразу під
-        # "Вихід" замість справжнього нижнього краю вікна.
         version_label = tk.Label(
             self.main_menu_frame, text=f"ver. {__version__}",
             font=("Segoe UI", 8), fg="#8c959f",
         )
-        version_label.pack(side="bottom", pady=(0, 8))
+        version_label.place(x=16, rely=1.0, y=-8, anchor="sw")
 
     # ---------- перевірка оновлень (раз в 5 хв) ----------
     # Реальний баг (аудит коду, 2026-08-14): update_manifest_path навмисно
@@ -1243,6 +1300,7 @@ class ExcelViewerApp:
             try:
                 target = github_releases.download_and_extract_release(
                     entry["release"], destination, target_name="AI_Automation_Home",
+                    token=self._read_github_publish_token() or None,
                 )
             except (RuntimeError, OSError) as exc:
                 # Реальна знахідка (аудит коду, 2026-08-16): download_and_
@@ -1383,7 +1441,6 @@ class ExcelViewerApp:
     def _show_only(self, frame, view_name):
         for child in (
             self.main_menu_frame,
-            self.table_frame,
             self.settings_frame,
             self.commands_frame,
             self.custom_buttons_frame,
@@ -1394,20 +1451,7 @@ class ExcelViewerApp:
         self.current_view = view_name
 
     def show_main_menu(self):
-        if self.edit_mode and self.has_unsaved_changes:
-            if not messagebox.askyesno(
-                self._t("Незбережені зміни"),
-                self._t("Повернутися до меню без збереження змін?"),
-            ):
-                return
-            if not self._discard_current_sheet_changes():
-                return
-            self._exit_edit_mode()
-            self.show_sheet(self.current_sheet)
         self._show_only(self.main_menu_frame, "main")
-
-    def show_table(self):
-        self._show_only(self.table_frame, "table")
 
     def show_settings(self):
         self._update_telegram_settings_labels()
@@ -1440,14 +1484,22 @@ class ExcelViewerApp:
         window = tk.Toplevel(self.root)
         window.title(self._t("Журнали"))
         window.protocol("WM_DELETE_WINDOW", lambda: self._close_journals_window(window))
-        window.bind("<Escape>", lambda event: self._close_journals_window(window))
+        # Правило користувача (2026-09-05): Esc - ОДИН крок назад. З журналу
+        # дій він повертає до переліку журналів (те саме, що кнопка «Назад»),
+        # і лише з самого переліку закриває вікно.
+        window.bind("<Escape>", lambda event: self._journals_escape(window))
         self.journals_window = window
 
         self._build_journals_hub_view(window)
         self._build_action_log_view(window)
-        self._build_work_log_view(window)
         self._show_journals_view("hub")
         self._center_window(window, width=820, height=560)
+
+    def _journals_escape(self, window):
+        if getattr(self, "action_log_frame", None) is not None and self.action_log_frame.winfo_manager():
+            self._show_journals_view("hub")
+            return
+        self._close_journals_window(window)
 
     def _close_journals_window(self, window):
         window.destroy()
@@ -1458,24 +1510,22 @@ class ExcelViewerApp:
         # кидало б TclError у відкладеному callback'у (_apply_action_log_rows),
         # той самий клас бага, що вже виправлений для Персоналу нижче.
         self.action_log_list_frame = None
+        self.action_log_detail_frame = None
+        self._action_log_row_widgets = {}
+        self._action_log_selected_id = None
 
     def _show_journals_view(self, view_name):
-        for frame in (self.journals_hub_frame, self.action_log_frame, self.work_log_frame):
+        for frame in (self.journals_hub_frame, self.action_log_frame):
             frame.pack_forget()
         if view_name == "action_log":
             self._refresh_action_log()
             self.action_log_frame.pack(fill="both", expand=True)
-        elif view_name == "work_log":
-            self._refresh_work_log()
-            self.work_log_frame.pack(fill="both", expand=True)
         else:
             self.journals_hub_frame.pack(fill="both", expand=True)
 
     def show_action_log(self):
         self._show_journals_view("action_log")
 
-    def show_work_log(self):
-        self._show_journals_view("work_log")
 
     def show_commands(self):
         self._refresh_commands()
@@ -1536,83 +1586,22 @@ class ExcelViewerApp:
         elif getattr(self, "current_view", "main") != "main":
             self.show_main_menu()
 
-    def _build_layout(self):
-        self.table_frame = tk.Frame(self.root)
-
-        top_bar = tk.Frame(self.table_frame)
-        top_bar.pack(side="top", fill="x", padx=8, pady=6)
-
-        back_button = tk.Button(top_bar, text=self._t("← Назад"), command=self.show_main_menu)
-        back_button.pack(side="left")
-
-        title = tk.Label(top_bar, text=self._t("Дані / Таблиця"), font=("Segoe UI", 12, "bold"))
-        title.pack(side="left", padx=12)
-
-        self.refresh_table_button = tk.Button(
-            top_bar,
-            text=self._t("Оновити"),
-            command=self.refresh_current_sheet,
-        )
-        self.refresh_table_button.pack(side="left", padx=(0, 8))
-
-        table_body = tk.Frame(self.table_frame)
-        table_body.pack(side="top", fill="both", expand=True)
-
-        # ліва панель (кнопки вкладок), без скролу
-        left_container = tk.Frame(table_body, width=180)
-        left_container.pack(side="left", fill="y")
-        left_container.pack_propagate(False)
-
-        self.buttons_frame = tk.Frame(left_container)
-        self.buttons_frame.pack(side="top", fill="both", expand=True)
-
-        # права панель — таблиця + панель редагування знизу
-        right_container = tk.Frame(table_body)
-        right_container.pack(side="left", fill="both", expand=True)
-
-        self.tree = ttk.Treeview(right_container, show="headings")
-        # Задача користувача (2026-08-14, скріншот обрізаних заголовків
-        # "Толщина, мм"/"Ширина, мм"/"Длина, мм"): "зроби окремо
-        # налаштовувану [ширину кожного стовпця]" - show_sheet() раніше
-        # примусово ставив width=120 УСІМ стовпцям на кожен switch_sheet/
-        # рефреш, тож навіть перетягнута вручну межа стовпця миттю
-        # скидалась назад. ButtonRelease-1 - той самий подієвий гачок, що
-        # й Treeview вже використовує для клітинок нижче; порівняння зі
-        # збереженим станом ПЕРЕД записом - щоб не писати settings.json на
-        # кожен звичайний клік по рядку, лише коли ширина справді змінилась.
-        self.tree.bind("<ButtonRelease-1>", self._save_current_column_widths, add="+")
-        self.tree.bind("<Button-1>", self._on_tree_header_click, add="+")
-        vsb = ttk.Scrollbar(right_container, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(right_container, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
-        bottom_frame = tk.Frame(right_container)
-        bottom_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6)
-
-        right_container.rowconfigure(0, weight=1)
-        right_container.columnconfigure(0, weight=1)
-
-        self.edit_button = tk.Button(bottom_frame, text=self._t("Редагувати"), command=self.toggle_edit_mode)
-        self.edit_button.pack(side="left", padx=4)
-
-        self.add_row_button = tk.Button(bottom_frame, text=self._t("Додати рядок"), command=self.add_row)
-        self.delete_row_button = tk.Button(bottom_frame, text=self._t("Видалити рядок"), command=self.delete_row)
-        self.save_button = tk.Button(bottom_frame, text=self._t("Зберегти зміни"), command=self.save_changes)
-
-        self.next_page_button = tk.Button(bottom_frame, text=self._t("Далі"), command=self.next_page)
-        self.next_page_button.pack(side="right", padx=4)
-
-        self.page_label = tk.Label(bottom_frame, text="")
-        self.page_label.pack(side="right", padx=8)
-
-        self.prev_page_button = tk.Button(bottom_frame, text=self._t("Назад"), command=self.previous_page)
-        self.prev_page_button.pack(side="right", padx=4)
 
     # --- Екран налаштувань: режим ШИ, формат дати, довідка ---
+    def _build_theme_toggle(self, parent):
+        theme_toggle_row = tk.Frame(parent)
+        theme_toggle_row.pack(anchor="e", pady=(0, 12))
+        self.theme_toggle_label = tk.Label(
+            theme_toggle_row, text=self._t("Тёмная тема"), font=("Segoe UI", 9),
+        )
+        self.theme_toggle_label.pack(side="left", padx=(0, 6))
+        self.theme_toggle_switch = tk.Canvas(
+            theme_toggle_row, width=44, height=22, highlightthickness=0, bd=0, cursor="hand2",
+        )
+        self.theme_toggle_switch.bind("<Button-1>", lambda _event: self._on_theme_toggle())
+        self.theme_toggle_switch.pack(side="left")
+        self._draw_theme_toggle_switch()
+
     def _build_settings_view(self):
         self.settings_frame = tk.Frame(self.root)
 
@@ -1646,6 +1635,13 @@ class ExcelViewerApp:
         tk.Label(
             active_server_section, text=self._t("Активний сервер"), font=("Segoe UI", 10, "bold"), anchor="w",
         ).pack(anchor="w")
+        # Зауваження користувача (2026-09-05): "я не бачу кому я пошту
+        # прикріплюю чи чию дивлюсь" - підпис, чиї саме дані показує домашка.
+        tk.Label(
+            active_server_section,
+            text=self._t("Домашка показує дані, журнали, персонал і кнопки саме цього клієнта."),
+            font=("Segoe UI", 9), fg="#8c959f", anchor="w", justify="left", wraplength=620,
+        ).pack(anchor="w")
         self.active_server_list_frame = tk.Frame(active_server_section)
         self.active_server_list_frame.pack(anchor="w", fill="x", pady=(4, 0))
         self._active_server_var = tk.StringVar(value=remote_control_client.active_hostname())
@@ -1662,210 +1658,46 @@ class ExcelViewerApp:
             width=28,
             command=self.open_onedrive_account_dialog,
         )
-        onedrive_account_button.pack(anchor="w", pady=(0, 12))
-
-        choose_token_button = tk.Button(
+        onedrive_account_button.pack(anchor="w", pady=(0, 2))
+        tk.Label(
             main_settings,
-            text=self._t("Додати шлях до ТГ-ключа"),
+            text=self._t("Обліковий запис цього компʼютера — для резервних копій і реєстру клієнтів. До клієнтів не стосується."),
+            font=("Segoe UI", 9), fg="#8c959f", anchor="w", justify="left", wraplength=620,
+        ).pack(anchor="w", pady=(0, 12))
+
+        # Задача користувача (2026-08-21): "ключі зроби змогу або файлом
+        # .тхт, або в строку ввести". Поле мусить бути з ОБОХ боків: ключ
+        # спільний, і якщо його змінити лише на клієнті, програми просто
+        # перестануть одна одну впізнавати.
+        remote_key_button = tk.Button(
+            main_settings,
+            text=self._t("Ключ управления"),
             width=28,
-            height=2,
-            command=self.choose_telegram_token_file,
+            command=self.open_remote_key_dialog,
         )
-        choose_token_button.pack(anchor="w", pady=(0, 12))
+        remote_key_button.pack(anchor="w", pady=(0, 12))
 
-        token_file_label = tk.Label(
-            main_settings,
-            textvariable=self.telegram_file_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-        )
-        token_file_label.pack(anchor="w", fill="x", pady=(0, 16))
+        # Задача користувача (2026-09-05): "із налаштувань це теж прибери.
+        # клієнти самі цю інформацію мають налаштовувати" - шлях до ключа
+        # Telegram, "Підключити/Зупинити Telegram", статус сервера й кнопки
+        # форми (Mini App) прибрано з домашки: бот і форма живуть на
+        # клієнті, там і їхні налаштування. Змінні стану (telegram_status_
+        # text та ін.) лишаються - їх оновлюють таймери, і вони ще потрібні
+        # іншим екранам. Тут лишається лише те, що потрібно самій домашці:
+        # активний сервер, обліковий запис OneDrive, ключ керування.
+        self.telegram_status_label = None
 
-        # Задача користувача (2026-08-15): "налаштувати керування із
-        # старої програми до нової... в старій має бути показник онлайну
-        # сервера" - ці самі 2 рядки (status_label/heartbeat_label) і ці
-        # самі 2 кнопки лишаються на тому самому місці, що й були - тепер
-        # показують стан ВІДДАЛЕНОГО сервера (client_app.py, інший ПК,
-        # _remote_control_tick нижче) і шлють йому команди замість
-        # локального запуску (_on_remote_start_bot_clicked/_on_remote_
-        # stop_bot_clicked, remote_control_client.py).
-        connect_button = tk.Button(
-            main_settings,
-            text=self._t("Підключити Telegram"),
-            width=28,
-            command=lambda: self._on_remote_command_clicked("start_bot"),
-        )
-        connect_button.pack(anchor="w", pady=(0, 8))
+        # Задача користувача (2026-09-05): тумблер теми - тут, справа вгорі,
+        # над кнопкою "Команди" (раніше висів на головному екрані).
+        self._build_theme_toggle(side_panel)
 
-        stop_button = tk.Button(
-            main_settings,
-            text=self._t("Зупинити Telegram"),
-            width=28,
-            command=lambda: self._on_remote_command_clicked("stop_bot"),
-        )
-        stop_button.pack(anchor="w", pady=(0, 16))
+        # Задача користувача (2026-09-05): "ці всі кнопки не потрібні більше,
+        # видали їх" - Команди, Способи оплати, Формат отображения, Формат
+        # кнопок, Оформлення форми Telegram, Режим обработки запросов,
+        # Системные команды чат-бота, Вирівняти таблицю, Перевірка залишків.
+        # Самі екрани й методи лишаються в коді (open_*/show_*), без кнопок.
+        self.align_table_button = None
 
-        status_label = tk.Label(
-            main_settings,
-            textvariable=self.telegram_status_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-        )
-        status_label.pack(anchor="w", fill="x", pady=(0, 2))
-        self.telegram_status_label = status_label
-
-        # Ненав'язливий рядок - коли востаннє реально приходив статус від
-        # ВІДДАЛЕНОГО сервера (_remote_control_tick, кожні 15с), а не
-        # застиглий текст, що міг лишитись давно.
-        heartbeat_label = tk.Label(
-            main_settings,
-            textvariable=self.telegram_heartbeat_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-            fg="gray40",
-        )
-        heartbeat_label.pack(anchor="w", fill="x", pady=(0, 18))
-
-        # Задача користувача (2026-08-08): окремі, явні кнопки увімк/вимк/
-        # перезапуск форми (Telegram Mini App) внизу зліва Налаштувань,
-        # незалежно від підключення самого бота — pack(side="bottom") у
-        # цьому ж лівому стовпці (main_settings) притискає їх до самого
-        # низу вікна, а не одразу під heartbeat_label.
-        webapp_form_frame = tk.Frame(main_settings)
-        webapp_form_frame.pack(side="bottom", fill="x", anchor="w")
-
-        webapp_form_status_label = tk.Label(
-            webapp_form_frame,
-            textvariable=self.webapp_status_text,
-            anchor="w",
-            justify="left",
-            wraplength=620,
-            fg="gray40",
-        )
-        webapp_form_status_label.pack(anchor="w", fill="x", pady=(8, 0))
-
-        webapp_form_buttons = tk.Frame(webapp_form_frame)
-        webapp_form_buttons.pack(anchor="w")
-
-        start_webapp_form_button = tk.Button(
-            webapp_form_buttons,
-            text=self._t("Увімкнути форму (Mini App)"),
-            command=lambda: self._on_remote_command_clicked("start_form"),
-        )
-        start_webapp_form_button.pack(side="left", padx=(0, 8))
-
-        stop_webapp_form_button = tk.Button(
-            webapp_form_buttons,
-            text=self._t("Вимкнути форму (Mini App)"),
-            command=lambda: self._on_remote_command_clicked("stop_form"),
-        )
-        stop_webapp_form_button.pack(side="left", padx=(0, 8))
-
-        restart_webapp_form_button = tk.Button(
-            webapp_form_buttons,
-            text=self._t("Перезапустити форму (Mini App)"),
-            command=lambda: self._on_remote_command_clicked("restart_form"),
-        )
-        restart_webapp_form_button.pack(side="left")
-
-        commands_button = tk.Button(
-            side_panel,
-            text=self._t("Команди"),
-            width=20,
-            height=2,
-            command=self.show_commands,
-        )
-        commands_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        payment_methods_button = tk.Button(
-            side_panel,
-            text=self._t("Способи оплати"),
-            width=20,
-            height=2,
-            command=self.show_payment_methods,
-        )
-        payment_methods_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        display_format_button = tk.Button(
-            side_panel,
-            text=self._t("Формат отображения"),
-            width=20,
-            height=2,
-            command=self.open_display_format_dialog,
-        )
-        display_format_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        button_style_button = tk.Button(
-            side_panel,
-            text=self._t("Формат кнопок"),
-            width=20,
-            height=2,
-            command=self.open_button_style_dialog,
-        )
-        button_style_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        webapp_style_button = tk.Button(
-            side_panel,
-            text=self._t("Оформлення форми Telegram"),
-            width=20,
-            height=2,
-            command=self.open_webapp_style_dialog,
-        )
-        webapp_style_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        request_mode_button = tk.Button(
-            side_panel,
-            text=self._t("Режим обработки запросов"),
-            width=20,
-            height=2,
-            command=self.open_request_processing_mode_dialog,
-        )
-        request_mode_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        # Задача користувача (2026-08-19): "додай кнопку системні команди
-        # чат-боту... галочки на ввімкнення" - /status, /sheets, /first,
-        # /chatid (DEBUG_TOOLS-команди, telegram_dialog_core.py) - можна
-        # вимкнути поштучно, без зміни коду.
-        system_commands_button = tk.Button(
-            side_panel,
-            text=self._t("Системные команды чат-бота"),
-            width=20,
-            height=2,
-            command=self.open_system_commands_dialog,
-        )
-        system_commands_button.pack(anchor="n", fill="x", pady=(0, 12))
-
-        # Задача користувача (2026-08-16): "сховай це поки і скрізь це
-        # відключи це важливо" - кнопка "Таблиця Excel" (вибір локального/
-        # онлайн джерела) прибрана з UI. Єдина точка виклику
-        # open_excel_source_dialog в усьому файлі (перевірено грепом) -
-        # прибираючи саме цю кнопку, диспетчер лишається структурно
-        # недосяжним "скрізь", без потреби чіпати сам метод чи
-        # excel_source_status_text. Тимчасово ("поки") - лишено як
-        # закоментований блок нижче для швидкого повернення.
-        # excel_source_button = tk.Button(
-        #     side_panel, text=self._t("Таблиця Excel"), width=20, height=2,
-        #     command=self.open_excel_source_dialog,
-        # )
-        # excel_source_button.pack(anchor="n", fill="x")
-        # excel_source_status_label = tk.Label(
-        #     side_panel, textvariable=self.excel_source_status_text, anchor="w",
-        #     justify="left", wraplength=200, fg="gray40", font=("Segoe UI", 8),
-        # )
-        # excel_source_status_label.pack(anchor="n", fill="x", pady=(2, 12))
-
-        align_table_button = tk.Button(
-            side_panel,
-            text=self._t("Вирівняти таблицю"),
-            width=20,
-            height=2,
-            command=self.align_excel_table,
-        )
-        align_table_button.pack(anchor="n", fill="x", pady=(0, 12))
-        self.align_table_button = align_table_button
 
         # Задача користувача (2026-08-15): "тепер змінюй це на автоматичне
         # з'єднання між программами" - раніше тут була кнопка "Дистанційне
@@ -1896,19 +1728,6 @@ class ExcelViewerApp:
         )
         db_snapshot_heartbeat_label.pack(anchor="n", fill="x", pady=(2, 0))
 
-        # Задача користувача (2026-08-08, реальний баг живого тестування):
-        # розбіжність "кількість, шт" vs "фізичний вимір" (м3/м2/мп) для
-        # рядка складу вирішується ТІЛЬКИ тут, у GUI — "переходимо загально
-        # на програму де це можливо і зручно робити" (пряма вказівка
-        # користувача, не в бот-чаті).
-        mismatch_check_button = tk.Button(
-            side_panel,
-            text=self._t("Перевірка залишків (шт/кубатура)"),
-            width=20,
-            height=2,
-            command=self.open_quantity_measure_mismatch_dialog,
-        )
-        mismatch_check_button.pack(anchor="n", fill="x", pady=(12, 0))
 
     def _build_journals_hub_view(self, parent):
         self.journals_hub_frame = tk.Frame(parent)
@@ -1934,6 +1753,19 @@ class ExcelViewerApp:
         menu_panel = tk.Frame(self.journals_hub_frame)
         menu_panel.pack(expand=True)
 
+        # Задача користувача (2026-09-06): журнал операцій - той самий, що
+        # в клієнті й у формі адміністратора (journal_window.py), дані живого
+        # клієнта через тунель; тут, і лише тут, записи можна видаляти.
+        # «Журнал дій» (технічний журнал повідомлень боту) лишається окремо.
+        operations_journal_button = tk.Button(
+            menu_panel,
+            text=self._t("Журнал операцій"),
+            width=28,
+            height=2,
+            command=self._open_operations_journal_window,
+        )
+        operations_journal_button.pack(pady=8)
+
         action_log_button = tk.Button(
             menu_panel,
             text=self._t("Журнал дій"),
@@ -1943,17 +1775,36 @@ class ExcelViewerApp:
         )
         action_log_button.pack(pady=8)
 
-        work_log_button = tk.Button(
-            menu_panel,
-            text=self._t("Журнал виконаних робіт"),
-            width=28,
-            height=2,
-            command=self.show_work_log,
+
+    # Задача користувача (2026-09-07): «журнал дій у домашці онови, щоб
+    # було читабельно, зараз там ніби консоль якась». З п'яти показаних
+    # виглядів обрано четвертий: список ліворуч, подробиці праворуч,
+    # спливаючого вікна «Детально» на цьому екрані більше немає.
+    #
+    # Колір статусу - смисловий, з тих наборів, які _apply_theme НЕ
+    # перефарбовує (див. _SEMANTIC_FG_COLORS/_SEMANTIC_BG_COLORS вище),
+    # тому чіп лишається впізнаваним і в темній темі.
+    _ACTION_LOG_STATUS_STYLE = {
+        "success": ("#dafbe1", "#1a7f37"),
+        "waiting": ("#fff3d6", "#8a5a00"),
+        "error": ("#ffebe9", "#d1242f"),
+        "cancelled": ("#eaeef2", "#24292f"),
+        "unknown": ("#eaeef2", "#24292f"),
+    }
+    _ACTION_LOG_DEFAULT_STATUS_STYLE = ("#eaeef2", "#24292f")
+    # Ширина лівого переліку. Достатньо для «Сообщение Telegram» і часу в
+    # одному рядку; решта вікна лишається подробицям.
+    _ACTION_LOG_LIST_WIDTH = 320
+
+    def _action_log_status_style(self, status):
+        return self._ACTION_LOG_STATUS_STYLE.get(
+            str(status or ""), self._ACTION_LOG_DEFAULT_STATUS_STYLE
         )
-        work_log_button.pack(pady=8)
 
     def _build_action_log_view(self, parent):
         self.action_log_frame = tk.Frame(parent)
+        self._action_log_row_widgets = {}
+        self._action_log_selected_id = None
 
         top_bar = tk.Frame(self.action_log_frame)
         top_bar.pack(side="top", fill="x", padx=8, pady=6)
@@ -1973,61 +1824,134 @@ class ExcelViewerApp:
         # лишені непрацюючими проти власної порожньої локальної бази.
         tk.Label(
             top_bar,
-            text=self._t("Перегляд лише для читання - дані тягнуться напряму з client_app.py."),
-            fg="#666666",
-        ).pack(side="left", padx=8)
+            text=self._t("Только чтение · данные client_app.py"),
+            fg="#8c959f",
+        ).pack(side="right")
 
-        content = tk.Frame(self.action_log_frame)
-        content.pack(side="top", fill="both", expand=True, padx=20, pady=20)
+        body = tk.Frame(self.action_log_frame)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=(0, 14))
 
-        header = tk.Frame(content)
-        header.pack(fill="x", pady=(0, 8))
+        # Перелік має сталу ширину (pack_propagate(False)), інакше довгий
+        # рядок тексту всередині розсував би його на пів вікна.
+        list_side = tk.Frame(body, width=self._ACTION_LOG_LIST_WIDTH, highlightthickness=1,
+                             highlightbackground="#8c959f")
+        list_side.pack(side="left", fill="y")
+        list_side.pack_propagate(False)
+        self.action_log_list_frame = self._create_scrollable_list(list_side)
 
-        for text, width in (
-            ("Пользователь", 20),
-            ("Действие", 18),
-            ("Статус", 16),
-            ("Время", 22),
-            ("Кратко", 46),
-            ("Действия", 18),
-        ):
-            tk.Label(header, text=text, width=width, anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left")
+        detail_side = tk.Frame(body)
+        detail_side.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        self.action_log_detail_frame = self._create_scrollable_list(detail_side)
 
-        self.action_log_list_frame = self._create_scrollable_list(content)
+    def _action_log_detail_placeholder(self, text):
+        frame = getattr(self, "action_log_detail_frame", None)
+        if frame is None:
+            return
+        self._clear_frame(frame)
+        tk.Label(frame, text=self._t(text), anchor="w", fg="#8c959f").pack(anchor="w", fill="x", pady=4)
+        self._apply_theme(frame)
 
-    def _build_work_log_view(self, parent):
-        self.work_log_frame = tk.Frame(parent)
+    def _paint_action_log_row(self, log_id, selected):
+        """Позначка обраного рядка. Викликається наново після кожного
+        _apply_theme: тема перефарбовує будь-який Frame назад у свій фон,
+        тож підсвітку доводиться класти зверху, а не покладатись на неї."""
+        widgets = getattr(self, "_action_log_row_widgets", {}).get(log_id)
+        if not widgets:
+            return
+        theme = self._theme()
+        row = widgets["row"]
+        if not row.winfo_exists():
+            return
+        background = theme["select_bg"] if selected else theme["bg"]
+        row.configure(bg=background)
+        for child in widgets["painted"]:
+            if child.winfo_exists():
+                child.configure(bg=background)
+        widgets["mark"].configure(text="▌" if selected else " ", fg="#0969da")
 
-        top_bar = tk.Frame(self.work_log_frame)
-        top_bar.pack(side="top", fill="x", padx=8, pady=6)
+    def _restore_action_log_selection(self):
+        """Після зміни теми підсвітка обраного рядка малюється заново."""
+        selected = getattr(self, "_action_log_selected_id", None)
+        for log_id in list(getattr(self, "_action_log_row_widgets", {})):
+            self._paint_action_log_row(log_id, log_id == selected)
 
-        back_button = tk.Button(top_bar, text=self._t("← Назад"), command=lambda: self._show_journals_view("hub"))
-        back_button.pack(side="left")
+    def _select_action_log_row(self, log_id):
+        previous = getattr(self, "_action_log_selected_id", None)
+        if previous is not None and previous != log_id:
+            self._paint_action_log_row(previous, False)
+        self._action_log_selected_id = log_id
+        self._paint_action_log_row(log_id, True)
+        self._render_action_log_detail(log_id)
 
-        title = tk.Label(top_bar, text=self._t("Журнал виконаних робіт"), font=("Segoe UI", 12, "bold"))
-        title.pack(side="left", padx=12)
+    def _render_action_log_detail(self, log_id):
+        frame = getattr(self, "action_log_detail_frame", None)
+        if frame is None:
+            return
+        row = self._remote_action_log_rows.get(log_id)
+        if not row:
+            self._action_log_detail_placeholder("Запись не найдена.")
+            return
+        self._clear_frame(frame)
 
-        refresh_button = tk.Button(top_bar, text=self._t("Обновити"), command=self._refresh_work_log)
-        refresh_button.pack(side="left", padx=8)
+        log_id, action_type, details_json, created_at = row
+        details = self._parse_action_log_details(details_json)
+        telegram = details.get("telegram") or {}
+        summary = self._action_log_summary(action_type, details)
+        chip_bg, chip_fg = self._action_log_status_style(details.get("status"))
 
-        clear_button = tk.Button(top_bar, text=self._t("Очистити журнал"), command=self.clear_work_log)
-        clear_button.pack(side="left", padx=4)
+        # Заголовок - людина (рішення користувача 2026-09-07), дія й статус
+        # рядком нижче.
+        person, who_details = self._action_log_person(telegram)
+        head = tk.Frame(frame)
+        head.pack(anchor="w", fill="x")
+        tk.Label(head, text=person, font=("Segoe UI", 14, "bold"), anchor="w").pack(side="left")
+        tk.Label(head, text="#%s" % log_id, fg="#8c959f", anchor="e").pack(side="right")
+        if who_details:
+            tk.Label(frame, text=who_details, fg="#8c959f", anchor="w").pack(anchor="w", fill="x")
 
-        content = tk.Frame(self.work_log_frame)
-        content.pack(side="top", fill="both", expand=True, padx=20, pady=20)
+        deed = tk.Frame(frame)
+        deed.pack(anchor="w", fill="x", pady=(8, 0))
+        tk.Label(deed, text=summary["action"], font=("Segoe UI", 11, "bold"), anchor="w").pack(side="left")
+        tk.Label(
+            deed, text=" %s " % summary["status"], bg=chip_bg, fg=chip_fg,
+            font=("Segoe UI", 9), padx=6,
+        ).pack(side="left", padx=10)
 
-        header = tk.Frame(content)
-        header.pack(fill="x", pady=(0, 8))
+        def field(caption, value, fg=None):
+            if value in (None, ""):
+                return
+            line = tk.Frame(frame)
+            line.pack(anchor="w", fill="x", pady=(9, 0))
+            tk.Label(
+                line, text=self._t(caption), width=16, anchor="nw", fg="#8c959f",
+                font=("Segoe UI", 9),
+            ).pack(side="left")
+            label = tk.Label(line, text=str(value), anchor="w", justify="left", wraplength=520)
+            if fg:
+                label.configure(fg=fg)
+            label.pack(side="left", fill="x", expand=True)
 
-        for text, width in (
-            ("Дата", 20),
-            ("Назва", 30),
-            ("Коротко", 50),
-            ("Дії", 18),
-        ):
-            tk.Label(header, text=self._t(text), width=width, anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left")
+        field("Время", self._format_action_log_time(created_at))
+        field("Пришло", details.get("incoming_text"))
+        field("Ответ бота", self._action_log_reply_label(details.get("reply") or {}))
+        field("Ошибка", details.get("error"), fg="#d1242f")
+        duration = details.get("duration_ms")
+        if duration not in (None, ""):
+            field("Обработка", "%s мс" % duration)
 
-        self.work_log_list_frame = self._create_scrollable_list(content)
+        # Технічні дані - унизу й дрібним: адміну вони потрібні рідко, але
+        # коли потрібні, іншого місця подивитись їх уже немає.
+        tk.Label(
+            frame, text=self._t("Технические данные"), anchor="w", fg="#8c959f",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", fill="x", pady=(16, 3))
+        tk.Label(
+            frame,
+            text=json.dumps(details, ensure_ascii=False, indent=2),
+            anchor="w", justify="left", fg="#666666", font=("Consolas", 9),
+        ).pack(anchor="w", fill="x")
+        self._apply_theme(frame)
+
 
     # Редактор кнопок — показує ВЕСЬ список/дерево вже створених кнопок
     # (зліва, скролиться) + прев'ю обраної кнопки (справа). Кожен рядок:
@@ -2135,35 +2059,18 @@ class ExcelViewerApp:
         notebook.add(actions_tab, text=self._t("Дії"))
         self._build_actions_view(actions_tab)
 
-        list_side = tk.Frame(content)
-        list_side.pack(side="left", fill="both", expand=True, padx=(0, 16))
-
-        tk.Label(
-            list_side,
-            text=self._t("Кнопки, які ви додасте тут, з'являться в головному меню бота в Telegram."),
-            wraplength=520,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 12))
-
-        self.add_root_button = tk.Button(
-            list_side,
-            text=self._t("+ Додати кореневу кнопку"),
-            width=26,
-            command=lambda: self.add_custom_button_dialog(None),
-            fg="#1a7f37",
-            **self._chip_button_style(),
-        )
-        self.add_root_button.pack(anchor="w", pady=(0, 8))
-
-        self.custom_buttons_list_frame = self._create_scrollable_list(list_side)
-
-        preview_side = tk.Frame(content, width=260, relief="groove", borderwidth=1)
-        preview_side.pack(side="right", fill="y")
-        preview_side.pack_propagate(False)
-
-        tk.Label(preview_side, text=self._t("Прев'ю"), font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
-        self.custom_button_preview_frame = tk.Frame(preview_side)
-        self.custom_button_preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        # Задача користувача (2026-09-05): "потрібно переробити налаштовування
+        # кнопок... виглядає досить криво та нелогічно" - варіант 01 із пʼяти:
+        # телефон + властивості (button_editor.py, спільно з клієнтом).
+        theme = self._theme()
+        colors = {
+            "bg": theme["bg"], "card": theme["panel_bg"], "entry": theme["entry_bg"],
+            "fg": theme["fg"], "muted": theme["muted_fg"], "border": theme["border"], "accent": "#2F7BD9",
+        }
+        self._button_editor_pending_then = None
+        self.button_editor = button_editor.ButtonEditorPanel(content, _RemoteButtonSource(self), colors)
+        self.custom_buttons_list_frame = None
+        self.custom_button_preview_frame = None
 
     # Той самий фон-потік + _run_on_main_thread + guard-прапорець, що вже й
     # _on_role_menu_selected вище (не блокувати вікно на весь мережевий
@@ -2228,7 +2135,10 @@ class ExcelViewerApp:
             return
         folder = standard_menu_cloud.cloud_folder_path(self._onedrive_shared_email())
         if folder is None:
-            text = self._t("OneDrive не найден на этом компьютере")
+            # Найчастіша причина тепер не "OneDrive не встановлено", а
+            # "пошта не вказана" - текст має вести до потрібної кнопки, а
+            # не звинувачувати систему.
+            text = self._t("не используется — не указана «Учётная запись OneDrive»")
         else:
             text = str(folder / "standard_menu.json")
         self._standard_menu_cloud_path_var.set(
@@ -2240,7 +2150,11 @@ class ExcelViewerApp:
         if folder is None:
             messagebox.showerror(
                 self._t("Редактор кнопок"),
-                self._t("OneDrive не найден на этом компьютере."),
+                self._t(
+                    "Облачная папка не используется: не указана «Учётная запись OneDrive».\n\n"
+                    "Укажите email аккаунта OneDrive в настройках — без него всё хранится "
+                    "только на этом компьютере."
+                ),
             )
             return
         try:
@@ -2511,12 +2425,6 @@ class ExcelViewerApp:
     # дерево напряму з client_app.py через remote_control_client.
     # fetch_remote_custom_buttons).
     def _refresh_custom_buttons(self):
-        self._clear_frame(self.custom_buttons_list_frame)
-        tk.Label(self.custom_buttons_list_frame, text=self._t("Завантаження..."), anchor="w").pack(
-            anchor="w", fill="x", pady=4
-        )
-        self._apply_theme(self.custom_buttons_list_frame)
-
         self._custom_buttons_refresh_generation += 1
         generation = self._custom_buttons_refresh_generation
 
@@ -2527,12 +2435,20 @@ class ExcelViewerApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_custom_buttons_rows(self, rows, generation=None):
-        if getattr(self, "custom_buttons_list_frame", None) is None:
-            return
         if generation is not None and generation != self._custom_buttons_refresh_generation:
             return
         self._custom_buttons_cache = rows
-        self._render_custom_buttons_tree()
+        server_text = self._t("Дані: {value}").format(value=self._active_server_display_name())
+        if rows is None:
+            server_text += " — " + self._t("немає зв'язку з клієнтом")
+        self._custom_buttons_active_server_text.set(server_text)
+        editor = getattr(self, "button_editor", None)
+        if editor is not None:
+            editor.refresh()
+        pending = getattr(self, "_button_editor_pending_then", None)
+        self._button_editor_pending_then = None
+        if pending:
+            pending()
 
     # rows у кеші - 9-елементні (id, parent_id, label, message_text,
     # action_code, section, enabled, layout, operation_id), як їх віддає
@@ -2628,11 +2544,15 @@ class ExcelViewerApp:
         row_frame = tk.Frame(self.custom_buttons_list_frame, bg=bg)
         row_frame.pack(fill="x", pady=1, padx=(depth * 24, 0))
 
-        display_label = label + (f" ({side})" if side else "")
+        # Задача користувача (2026-09-05): прихована кнопка має бути видна
+        # як прихована і тут, а не лише в редакторі клієнта.
+        display_label = label + (f" ({side})" if side else "") + ("" if enabled else " " + self._t("(прихована)"))
+        label_style = {} if enabled else {"fg": "#9aa1ab"}
         tk.Button(
             row_frame, text=display_label, anchor="center", bg=bg, font=("Segoe UI", 9),
             width=24,
             command=lambda nid=node_id: self.select_custom_button(nid),
+            **label_style,
         ).pack(side="left")
 
         # Задача користувача: "іконки замість тексту" (обраний варіант A) -
@@ -2640,6 +2560,16 @@ class ExcelViewerApp:
         tk.Button(
             row_frame, text="✕", width=3, fg="#d1242f",
             command=lambda nid=node_id, lbl=label: self.delete_custom_button_confirm(nid, lbl),
+            **self._chip_button_style(),
+        ).pack(side="right")
+        # Задача користувача (2026-09-05): "ставити статус прихованої в
+        # самому редакторі кнопок" - варіант 01 із пʼяти: 👁 у рядку, один
+        # клік. Синя - показана (клік ховає), сіра - прихована (клік показує).
+        # Домашка міняє живе дерево клієнта через тунель - дія set_enabled.
+        tk.Button(
+            row_frame, text="\U0001F441", width=3, font=("Segoe UI Emoji", 9),
+            fg=("#2f7bd9" if enabled else "#9aa1ab"),
+            command=lambda nid=node_id, shown=enabled: self._toggle_remote_custom_button_visibility(nid, not shown),
             **self._chip_button_style(),
         ).pack(side="right")
         tk.Button(
@@ -2657,6 +2587,11 @@ class ExcelViewerApp:
         child_sides = self._half_pair_sides(child_rows)
         for child_row in child_rows:
             self._render_custom_button_row(child_row, depth=depth + 1, side=child_sides.get(child_row[0]))
+
+    def _toggle_remote_custom_button_visibility(self, node_id, enabled):
+        self._push_custom_button_action(
+            lambda: remote_control_client.set_remote_custom_button_enabled(node_id, enabled),
+        )
 
     def select_custom_button(self, node_id):
         self.custom_buttons_selected_id = node_id
@@ -2974,6 +2909,7 @@ class ExcelViewerApp:
 
             def finish():
                 if error:
+                    self._button_editor_pending_then = None
                     messagebox.showerror(self._t("Редактор кнопок"), error)
                     return
                 if on_success:
@@ -3099,6 +3035,10 @@ class ExcelViewerApp:
         # спосіб перечитати актуальні дані без виходу з екрана.
         refresh_button = tk.Button(top_bar, text=self._t("Обновити"), command=self._refresh_personnel)
         refresh_button.pack(side="left", padx=8)
+        # Задача користувача (2026-09-06): «Кнопки ролей» однаково в клієнті
+        # й у домашці - те саме вікно (role_buttons_window.py), дані живого
+        # клієнта через тунель, кожна дія шлеться одразу.
+        tk.Button(top_bar, text=self._t("Кнопки ролей"), command=self._open_role_buttons_window).pack(side="left")
 
         # Задача користувача (2026-08-20): "чиї дані в персоналі показують"
         # - однозначно видно, ЯКИЙ сервер зараз обраний, без потреби йти
@@ -3336,7 +3276,7 @@ class ExcelViewerApp:
         canvas.pack(side="left", fill="both", expand=True)
 
         def update_scroll_region(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            _scroll_region_with_ceiling(canvas)
             content_height = list_frame.winfo_reqheight()
             canvas_height = canvas.winfo_height()
             if content_height > canvas_height:
@@ -3351,7 +3291,7 @@ class ExcelViewerApp:
             update_scroll_region()
 
         def on_mousewheel(event):
-            if scrollbar.winfo_manager():
+            if scrollbar.winfo_manager() and not _wheel_blocked(canvas, event):
                 canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def unbind_mousewheel(event=None):
@@ -3473,7 +3413,7 @@ class ExcelViewerApp:
     # _onedrive_account_status_text вище.
     def _active_server_display_name(self):
         hostname = remote_control_client.active_hostname()
-        if hostname == paths.CLOUDFLARED_TUNNEL_HOSTNAME:
+        if hostname == paths.cloudflared_tunnel_hostname():
             return self._t("Стандартний")
         servers = servers_registry.read_servers(self._onedrive_shared_email())
         for name, server in servers.items():
@@ -3484,10 +3424,16 @@ class ExcelViewerApp:
     def _onedrive_account_status_text(self):
         email = (self.settings.get("onedrive_shared_email") or "").strip()
         if not email:
-            return self._t("Email не указан — используется угадывание по названию папки.")
+            return self._t(
+                "Email не указан — данные хранятся только на этом компьютере. "
+                "В облако ничего не пишется: ни список серверов, ни копии."
+            )
         resolved = servers_registry.find_account_folder(email)
         if resolved is None:
-            return self._t("Такой аккаунт OneDrive на этом компьютере не найден: {email}").format(email=email)
+            return self._t(
+                "Такой аккаунт OneDrive на этом компьютере не найден: {email}. "
+                "Пока не найден — данные хранятся только локально."
+            ).format(email=email)
         return self._t("Найдено: {path}").format(path=resolved)
 
     # Задача користувача (2026-08-20): той самий механізм, що вже й у
@@ -3495,13 +3441,100 @@ class ExcelViewerApp:
     # теки. Обидві сторони (клієнт і ця, домашня программа) мають
     # НАЛАШТУВАТИСЬ на ОДИН і той самий акаунт, інакше кожна читає/пише
     # свою окрему теку і жодна не бачить іншу.
-    def open_onedrive_account_dialog(self):
+    def open_remote_key_dialog(self):
         window = tk.Toplevel(self.root)
-        window.title(self._t("Учётная запись OneDrive"))
-        window.geometry("460x260")
+        window.title(self._t("Ключ управления"))
         window.transient(self.root)
         window.grab_set()
 
+        top = tk.Frame(window)
+        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        tk.Label(
+            top, text=self._t("Ключ управления"), font=("Segoe UI", 13, "bold"), anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            top,
+            text=self._t(
+                "Этим ключом домашняя программа подтверждает клиенту, что это она. "
+                "ВАЖНО: значение должно совпадать с полем «Ключ управления» на клиентской "
+                "машине — иначе программы перестанут видеть друг друга. "
+                "Пусто — действует ключ, вшитый в программу."
+            ),
+            anchor="w", justify="left", wraplength=420, fg="#555555",
+        ).pack(anchor="w", pady=(4, 0))
+
+        body = tk.Frame(window)
+        body.pack(side="top", fill="x", padx=18, pady=8)
+
+        key_var = tk.StringVar(value=paths.read_override_file(paths.REMOTE_CONTROL_TOKEN_FILE))
+        key_entry = tk.Entry(body, textvariable=key_var, width=40, show="•")
+        key_entry.pack(anchor="w", fill="x")
+
+        status_var = tk.StringVar()
+        tk.Label(
+            body, textvariable=status_var, anchor="w", justify="left", wraplength=420, fg="#555555",
+        ).pack(anchor="w", fill="x", pady=(8, 0))
+
+        def describe():
+            saved = paths.read_override_file(paths.REMOTE_CONTROL_TOKEN_FILE)
+            if saved:
+                status_var.set(
+                    self._t("Сохранено ({count} символов) в system/remote_control_token.txt").format(
+                        count=len(saved))
+                )
+            else:
+                status_var.set(self._t("Файла нет — действует ключ, вшитый в программу."))
+
+        def on_key_changed(*_args):
+            # Той самий принцип, що й у токенів GitHub/Cloudflare: зберігаємо
+            # одразу, без кнопки "Зберегти" - забути натиснути тут коштувало
+            # б обірваного зв'язку.
+            paths.write_override_file(paths.REMOTE_CONTROL_TOKEN_FILE, key_var.get())
+            describe()
+
+        key_var.trace_add("write", on_key_changed)
+        describe()
+
+        def attach_file():
+            file_path = filedialog.askopenfilename(
+                title=self._t("Виберіть .txt із ключем"),
+                filetypes=[("Текстові файли", "*.txt"), ("Усі файли", "*.*")],
+            )
+            if not file_path:
+                return
+            try:
+                lines = Path(file_path).read_text(encoding="utf-8-sig").splitlines()
+            except (OSError, UnicodeDecodeError) as exc:
+                messagebox.showerror(
+                    self._t("Ключ управления"),
+                    self._t("Не вдалось прочитати файл: {error}").format(error=exc),
+                )
+                return
+            # Кладемо ВМІСТ, а не шлях - інакше значення залежало б від того,
+            # чи лежить той файл на місці й чи його не змінили.
+            key_var.set(next((line.strip() for line in lines if line.strip()), ""))
+
+        buttons = tk.Frame(window)
+        buttons.pack(side="top", fill="x", padx=18, pady=(4, 16))
+        tk.Button(buttons, text=self._t("Прикріпити файл..."), command=attach_file).pack(side="left")
+        tk.Button(buttons, text=self._t("Закрити"), command=window.destroy).pack(side="right")
+
+        window.bind("<Escape>", lambda event: window.destroy())
+        self._center_window(window, 480, 300)
+
+    # Зауваження користувача (2026-09-05, знімок): "щось не показує пошту
+    # введену... маю бачити пошту". Причина: поле зберігалось лише при
+    # виході з нього чи Enter - "Закрыть" одразу після набору нічого не
+    # писало, і в settings.json ключа не було взагалі. Тепер акаунти
+    # OneDrive цього ПК читаються з Windows (servers_registry.
+    # list_account_folders) і обираються КЛІКОМ - зберігається одразу,
+    # обране позначене ✓ і показує свою теку. Ручне поле лишається для
+    # адреси, якої в списку нема, і зберігається також при "Закрыть".
+    def open_onedrive_account_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Учётная запись OneDrive"))
+        window.transient(self.root)
+        window.grab_set()
         top = tk.Frame(window)
         top.pack(side="top", fill="x", padx=18, pady=(16, 8))
         tk.Label(
@@ -3510,46 +3543,93 @@ class ExcelViewerApp:
         tk.Label(
             top,
             text=self._t(
-                "Email аккаунта OneDrive для общих данных: реестр серверов, "
-                "резервные копии, стандартное меню. Пусто — угадывание по "
-                "названию папки, как раньше. Должен совпадать с тем же "
-                "полем на клиентских машинах."
+                "Какой аккаунт OneDrive этого компьютера использовать для общих данных: "
+                "реестр клиентов, резервные копии, стандартное меню. На клиентах должен "
+                "быть указан тот же аккаунт."
             ),
-            anchor="w", justify="left", wraplength=420, fg="#555555",
+            anchor="w", justify="left", wraplength=470, fg="#8c959f",
         ).pack(anchor="w", pady=(4, 0))
 
         body = tk.Frame(window)
-        body.pack(side="top", fill="x", padx=18, pady=8)
-
-        email_var = tk.StringVar(value=self.settings.get("onedrive_shared_email") or "")
-        email_entry = tk.Entry(body, textvariable=email_var, width=40)
-        email_entry.pack(anchor="w", fill="x")
-
+        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
+        choices = tk.Frame(body)
+        choices.pack(anchor="w", fill="x")
+        choice_var = tk.StringVar(value=(self.settings.get("onedrive_shared_email") or "").strip())
+        manual_var = tk.StringVar(value="")
         status_var = tk.StringVar(value=self._onedrive_account_status_text())
-        status_label = tk.Label(
-            body, textvariable=status_var, anchor="w", justify="left", wraplength=420, fg="#555555",
-        )
-        status_label.pack(anchor="w", fill="x", pady=(8, 0))
 
-        def on_email_changed(*_args):
-            self.settings.set("onedrive_shared_email", email_var.get().strip())
+        def current_email():
+            return (self.settings.get("onedrive_shared_email") or "").strip()
+
+        def save(value):
+            self.settings.set("onedrive_shared_email", (value or "").strip())
+            choice_var.set(current_email())
             status_var.set(self._onedrive_account_status_text())
+            render_choices()
 
-        email_entry.bind("<FocusOut>", on_email_changed)
-        email_entry.bind("<Return>", on_email_changed)
+        def render_choices():
+            for child in choices.winfo_children():
+                child.destroy()
+            accounts = servers_registry.list_account_folders()
+            current = current_email().lower()
+            options = [(email, folder) for email, folder in accounts] + [("", None)]
+            for email, folder in options:
+                selected = (email.lower() == current) if email else (current == "")
+                text = email if email else self._t("Не использовать облако (данные только на этом компьютере)")
+                radio = tk.Radiobutton(
+                    choices, text=("\u2713 " + text) if selected else text,
+                    font=("Segoe UI", 9, "bold" if selected else "normal"),
+                    variable=choice_var, value=email, anchor="w", selectcolor="#2F7BD9",
+                    command=lambda e=email: save(e),
+                )
+                if selected:
+                    radio.configure(fg="#2F7BD9")
+                radio.pack(anchor="w")
+                if folder is not None:
+                    tk.Label(
+                        choices, text=str(folder), font=("Segoe UI", 8), fg="#8c959f", anchor="w",
+                    ).pack(anchor="w", padx=(24, 0))
+            if current and not any(email.lower() == current for email, _folder in accounts):
+                tk.Label(
+                    choices,
+                    text=self._t("Указан {email}, но такого аккаунта на этом компьютере нет.").format(email=current_email()),
+                    font=("Segoe UI", 9), fg="#d1242f", anchor="w", justify="left", wraplength=470,
+                ).pack(anchor="w", pady=(4, 0))
+            self._apply_theme(choices)
+
+        render_choices()
+
+        tk.Label(
+            body, text=self._t("Другой адрес (если его нет в списке):"), anchor="w", fg="#8c959f",
+        ).pack(anchor="w", pady=(10, 2))
+        manual_entry = tk.Entry(body, textvariable=manual_var, width=44)
+        manual_entry.pack(anchor="w", fill="x")
+
+        def flush_manual(*_args):
+            value = manual_var.get().strip()
+            if value and value.lower() != current_email().lower():
+                save(value)
+                manual_var.set("")
+
+        manual_entry.bind("<Return>", flush_manual)
+        manual_entry.bind("<FocusOut>", flush_manual)
+
+        tk.Label(
+            body, textvariable=status_var, anchor="w", justify="left", wraplength=470, fg="#8c959f",
+        ).pack(anchor="w", fill="x", pady=(10, 0))
+
+        def close():
+            flush_manual()
+            window.destroy()
 
         bottom = tk.Frame(window)
         bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
-        tk.Button(bottom, text=self._t("Закрыть"), width=14, command=window.destroy).pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy())
-        self._center_window(window, width=460, height=260)
+        tk.Button(bottom, text=self._t("Закрыть"), width=14, command=close).pack(side="right")
+        window.bind("<Escape>", lambda event: close())
+        window.protocol("WM_DELETE_WINDOW", close)
+        self._center_window(window, width=520, height=400)
+        self._apply_theme(window)
 
-    # Задача користувача (2026-08-19): "додай кнопку системні команди
-    # чат-боту... галочки на ввімкнення... кнопка зберегти яка закриває
-    # вікно і зберігає команди" - той самий read-then-write через
-    # remote_control_client, що вже й "Способи оплати"/редактор кнопок -
-    # домашня программа сама нічого не зберігає локально, лише тягне й
-    # штовхає стан client_app.py.
     _SYSTEM_COMMANDS_INFO = (
         ("status", "Статус базы", "Показывает количество листов и строк в кэше."),
         ("sheets", "Список листов", "Показывает названия всех листов Excel."),
@@ -3684,7 +3764,7 @@ class ExcelViewerApp:
         scrollbar.pack(side="right", fill="y")
 
         def update_scroll_region(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            _scroll_region_with_ceiling(canvas)
             canvas.itemconfigure(window_id, width=canvas.winfo_width())
 
         list_frame.bind("<Configure>", update_scroll_region)
@@ -3823,7 +3903,6 @@ class ExcelViewerApp:
             # оплати вище, які вже коректно оновлюються).
             if getattr(self, "journals_window", None) is not None and self.journals_window.winfo_exists():
                 self._refresh_action_log()
-                self._refresh_work_log()
             for command_id, entry in list(self._command_alias_editor_windows.items()):
                 editor, alias_title, list_frame = entry
                 if editor.winfo_exists():
@@ -3933,13 +4012,15 @@ class ExcelViewerApp:
         controls_scrollbar.pack(side="right", fill="y")
 
         def _update_controls_scroll_region(event=None):
-            controls_canvas.configure(scrollregion=controls_canvas.bbox("all"))
+            _scroll_region_with_ceiling(controls_canvas)
 
         def _resize_controls_window(event):
             controls_canvas.itemconfigure(controls_window_id, width=event.width)
             _update_controls_scroll_region()
 
         def _on_controls_mousewheel(event):
+            if _wheel_blocked(controls_canvas, event):
+                return
             controls_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def _unbind_controls_mousewheel(event=None):
@@ -4188,7 +4269,7 @@ class ExcelViewerApp:
             font=("Segoe UI", 8, "bold"),
         ).pack(fill="x", padx=12, pady=(10, 2))
         _entry_preview_group3_buttons = []
-        for button_text in (self._t("Сохранить как шаблон"), self._t("Продолжить продажу")):
+        for button_text in (self._t("Продолжить продажу"),):
             button_wrap = tk.Frame(entry_preview_inner, bg=PREVIEW_BORDER, padx=1, pady=1)
             button_wrap.pack(fill="x", padx=12, pady=2)
             button_label = tk.Label(
@@ -4230,13 +4311,15 @@ class ExcelViewerApp:
         entry_scrollbar.pack(side="right", fill="y")
 
         def _update_entry_scroll_region(event=None):
-            entry_canvas.configure(scrollregion=entry_canvas.bbox("all"))
+            _scroll_region_with_ceiling(entry_canvas)
 
         def _resize_entry_window(event):
             entry_canvas.itemconfigure(entry_window_id, width=event.width)
             _update_entry_scroll_region()
 
         def _on_entry_mousewheel(event):
+            if _wheel_blocked(entry_canvas, event):
+                return
             entry_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def _unbind_entry_mousewheel(event=None):
@@ -4422,10 +4505,50 @@ class ExcelViewerApp:
     def open_quantity_measure_mismatch_dialog(self):
         mismatches = self.store.find_quantity_measure_mismatches()
         if not mismatches:
-            messagebox.showinfo(
-                self._t("Перевірка залишків"),
-                self._t("Розбіжностей кількість/кубатура не знайдено."),
-            )
+            # Три РІЗНІ причини порожнього результату, які раніше зливались
+            # в один заспокійливий текст. Найгірша з них - перша: людина
+            # читає "розбіжностей немає" як "перевірено, усе гаразд", хоча
+            # програма не бачила жодного рядка складу.
+            scan = getattr(self.store, "_last_mismatch_scan", None) or {}
+            if not scan.get("rows"):
+                # Шлях показуємо ПРЯМО в тексті: вибір таблиці в інтерфейсі
+                # прихований (за вказівкою користувача від 2026-08-16), тож
+                # відсилати "подивіться в налаштуваннях" було б відсиланням
+                # у нікуди - саме цю помилку тут і виправлено.
+                mode = self.settings.get("excel_source_mode") or "local"
+                if mode == "local":
+                    source = self.settings.get("excel_local_path") or str(FILE_PATH)
+                    where = self._t(
+                        "Шлях змінюється у файлі system/settings.json, ключ excel_local_path. "
+                        "Після зміни програму треба перезапустити — таблиця читається на старті."
+                    )
+                else:
+                    source = self._t("онлайн-джерело: {name}").format(
+                        name=self.settings.get("excel_online_file_name") or "—")
+                    where = self._t("Джерело налаштоване як онлайн.")
+                messagebox.showwarning(
+                    self._t("Перевірка залишків"),
+                    self._t(
+                        "У цій програмі немає даних складу — перевіряти нічого.\n\n"
+                        "Зараз підключено:\n{source}\n\n"
+                        "У цьому файлі жодного рядка складу. {where}"
+                    ).format(source=source, where=where),
+                )
+            elif scan.get("skipped_no_measure_column"):
+                messagebox.showwarning(
+                    self._t("Перевірка залишків"),
+                    self._t(
+                        "Перевірено рядків: {rows}. Розбіжностей не знайдено, АЛЕ {skipped} рядків "
+                        "пропущено: у таблиці немає колонки виміру (Остаток, мп / м3 / м2) для їхнього "
+                        "типу товару. Поки колонки немає, метри й кубатура для них не рахуються взагалі."
+                    ).format(rows=scan.get("rows"), skipped=scan.get("skipped_no_measure_column")),
+                )
+            else:
+                messagebox.showinfo(
+                    self._t("Перевірка залишків"),
+                    self._t("Перевірено рядків: {rows}. Розбіжностей не знайдено.").format(
+                        rows=scan.get("rows")),
+                )
             return
 
         window = tk.Toplevel(self.root)
@@ -4618,301 +4741,6 @@ class ExcelViewerApp:
         window.bind("<Escape>", lambda event: window.destroy())
         self._center_window(window, width=460, height=340)
 
-    # Задача користувача: "додай змогу додавати таблицю ексель до роботи.
-    # можна як локальний так і онлайн. потрібно вибрати або або" + "мені
-    # потрібно щоб це було просто для користувача у программі" — два радіо
-    # (взаємовиключно), локально: звичайний filedialog; онлайн: один раз
-    # "Увійти через Microsoft" (device-code, MSAL кешує токен — наступні
-    # запуски входу не питають) + вставка посилання на файл ("Копіювати
-    # посилання" в OneDrive/SharePoint). Реальна робота з Excel іде через
-    # excel_source.py (open_workbook/save_workbook) — цей діалог лише пише
-    # обраний режим/дані в settings.json.
-    def open_excel_source_dialog(self):
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Таблиця Excel"))
-        window.transient(self.root)
-        window.grab_set()
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=18, pady=(16, 8))
-        tk.Label(top, text=self._t("Таблиця Excel"), font=("Segoe UI", 13, "bold"), anchor="w").pack(anchor="w")
-        tk.Label(
-            top,
-            text=self._t(
-                "Оберіть, звідки програма читає й куди зберігає таблицю — локальний файл на "
-                "цьому ПК, або файл на OneDrive/SharePoint."
-            ),
-            anchor="w", fg="#555555", justify="left", wraplength=520,
-        ).pack(anchor="w", pady=(4, 0))
-
-        body = tk.Frame(window)
-        body.pack(side="top", fill="both", expand=True, padx=18, pady=8)
-
-        mode_var = tk.StringVar(value=self.settings.get("excel_source_mode"))
-        local_path_state = {"value": self.settings.get("excel_local_path")}
-
-        # Задача користувача (2026-08-14): "давай тепер зробимо коли новий
-        # підключаємо файл щоб питало підтвердження" — питання ЛИШЕ коли
-        # це справді ЗМІНА вже підключеного файлу (excel_source.
-        # is_real_source_switch), а не найперше підключення.
-        _SOURCE_SWITCH_WARNING = self._t(
-            "Ви підключаєте інший файл. Нумерація документів, підказки "
-            "«останні використані», вивчені імена клієнтів і історія рухів "
-            "(приход/продажа/списання/антисептирування) стосуються лише "
-            "файлу, який був підключений раніше, і почнуться заново для "
-            "нового файлу. Сам вміст таблиць це не зачіпає. Продовжити?"
-        )
-
-        mode_row = tk.Frame(body)
-        mode_row.pack(fill="x", pady=(0, 12))
-
-        local_frame = tk.Frame(body)
-        online_frame = tk.Frame(body)
-
-        def refresh_mode():
-            if mode_var.get() == "local":
-                online_frame.pack_forget()
-                local_frame.pack(fill="x")
-            else:
-                local_frame.pack_forget()
-                online_frame.pack(fill="x")
-
-        tk.Radiobutton(
-            mode_row, text=self._t("Локально"), variable=mode_var, value="local", command=refresh_mode,
-        ).pack(side="left")
-        tk.Radiobutton(
-            mode_row, text=self._t("Онлайн (OneDrive/SharePoint)"), variable=mode_var, value="online",
-            command=refresh_mode,
-        ).pack(side="left", padx=(16, 0))
-
-        local_path_label = tk.Label(local_frame, anchor="w", justify="left", wraplength=480, fg="#333333")
-        local_path_label.pack(anchor="w", pady=(0, 8))
-
-        def refresh_local_label():
-            path = local_path_state["value"]
-            local_path_label.configure(
-                text=self._t("Обрано: {value}").format(value=path)
-                if path else self._t("Типовий файл програми (test_sklad.xlsx).")
-            )
-
-        def choose_local_file():
-            initial_dir = self.settings.get("last_file_dialog_dir") or "C:\\"
-            if not Path(initial_dir).exists():
-                initial_dir = "C:\\"
-            selected_file = filedialog.askopenfilename(
-                title=self._t("Оберіть Excel-файл"),
-                initialdir=initial_dir,
-                filetypes=(("Excel files", "*.xlsx"), ("All files", "*.*")),
-            )
-            if not selected_file:
-                return
-            selected_path = Path(selected_file)
-            local_path_state["value"] = str(selected_path)
-            self.settings.set("last_file_dialog_dir", str(selected_path.parent))
-            refresh_local_label()
-
-        tk.Button(local_frame, text=self._t("Оберіть файл"), command=choose_local_file).pack(anchor="w")
-        refresh_local_label()
-
-        online_status_var = tk.StringVar()
-
-        def refresh_online_status():
-            if self.settings.get("excel_online_file_name"):
-                online_status_var.set(excel_source.current_source_label())
-            else:
-                online_status_var.set(self._t("Не підключено."))
-
-        tk.Label(
-            online_frame, textvariable=online_status_var, anchor="w", justify="left", wraplength=480,
-            fg="#333333",
-        ).pack(anchor="w", pady=(0, 10))
-
-        def reset_onedrive_sign_in_state():
-            self._onedrive_sign_in_in_progress = False
-            if sign_in_button.winfo_exists():
-                sign_in_button.config(state="normal")
-
-        def show_device_code_popup(flow, cache):
-            code_window = tk.Toplevel(window)
-            code_window.title(self._t("Вхід через Microsoft"))
-            code_window.transient(window)
-            # Свіжий пере-аудит (2026-08-02): виявлено при написанні тесту на
-            # Notable #8 - виджет-опція pady (не .pack()'ова) не приймає
-            # кортеж (це вже ЗОВНІШНІЙ відступ, а не текстовий padding) -
-            # TclError "bad screen distance" на кожному РЕАЛЬНОМУ показі
-            # цього попапу (ніколи не траплялось раніше, бо CLIENT_ID ще
-            # плейсхолдер - фіча ніколи не доходила до реального виклику).
-            # Кортеж переїжджає в .pack(pady=...), де асиметричний відступ
-            # дійсно підтримується.
-            tk.Label(
-                code_window, text=self._t("Код: {value}").format(value=flow["user_code"]),
-                font=("Segoe UI", 14, "bold"), padx=20,
-            ).pack(pady=(20, 8))
-            tk.Label(code_window, text=flow["verification_uri"], padx=20).pack()
-            tk.Button(
-                code_window, text=self._t("Відкрити сторінку входу"),
-                command=lambda: webbrowser.open(flow["verification_uri"]),
-            ).pack(pady=12)
-            tk.Label(code_window, text=self._t("Очікування входу..."), padx=20).pack(pady=(0, 16))
-            self._center_window(code_window, width=360, height=220)
-
-            def wait_for_login():
-                try:
-                    _token, username = onedrive_sync.complete_device_flow(flow, cache)
-                except Exception as exc:
-                    error_text = str(exc)
-                    self._run_on_main_thread(lambda: (
-                        reset_onedrive_sign_in_state(), code_window.destroy(), messagebox.showerror(
-                            self._t("Таблиця Excel"), error_text,
-                        ),
-                    ))
-                    return
-
-                # Свіжий пере-аудит (2026-08-02, Notable #8): settings.set(...)
-                # раніше викликався напряму з фонового потоку, на відміну від
-                # сусіднього connect_link()'s worker(), що вже коректно
-                # переносить збереження в root.after(0, ...) - вирівняно.
-                def apply():
-                    self.settings.set("excel_online_account", username)
-                    reset_onedrive_sign_in_state()
-                    code_window.destroy()
-                    refresh_online_status()
-
-                self._run_on_main_thread(apply)
-
-            threading.Thread(target=wait_for_login, daemon=True).start()
-
-        def sign_in():
-            # Свіжий пере-аудит (New-Minor #5): без цього гварда повторний
-            # клік поки перший вхід ще триває запускав би ДРУГИЙ одночасний
-            # device-flow - реальний потік роботи ширший за сам цей потік
-            # (show_device_code_popup/wait_for_login запускає ДРУГИЙ, довший
-            # фоновий потік), тож прапорець/кнопка скидаються на КОЖНІЙ
-            # термінальній гілці всього флоу, не лише тут.
-            if self._onedrive_sign_in_in_progress:
-                return
-            self._onedrive_sign_in_in_progress = True
-            sign_in_button.config(state="disabled")
-
-            def worker():
-                try:
-                    flow, cache = onedrive_sync.start_device_flow()
-                except Exception as exc:
-                    error_text = str(exc)
-                    self._run_on_main_thread(lambda: (
-                        reset_onedrive_sign_in_state(),
-                        messagebox.showerror(self._t("Таблиця Excel"), error_text),
-                    ))
-                    return
-                self._run_on_main_thread(lambda: show_device_code_popup(flow, cache))
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        sign_in_button = tk.Button(online_frame, text=self._t("Увійти через Microsoft"), command=sign_in)
-        sign_in_button.pack(anchor="w", pady=(0, 12))
-
-        link_row = tk.Frame(online_frame)
-        link_row.pack(fill="x", pady=(0, 8))
-        tk.Label(link_row, text=self._t("Посилання на файл:"), anchor="w").pack(side="left")
-        link_entry = tk.Entry(link_row, width=40)
-        link_entry.pack(side="left", padx=(8, 0), fill="x", expand=True)
-
-        def connect_link():
-            share_url = link_entry.get().strip()
-            if not share_url:
-                return
-
-            # Аудит коду: resolve_share_link — реальний HTTP-запит до Microsoft
-            # Graph, раніше виконувався напряму в головному потоці й міг на мить
-            # "підвісити" вікно — той самий фоновий-потік патерн, що вже є в
-            # sign_in() вище.
-            # Свіжий пере-аудит (2026-08-02, Notable #8): get_access_token_
-            # silent() (теж мережевий виклик — MSAL оновлює прострочений
-            # токен через token-endpoint) раніше лишався СИНХРОННИМ прямо тут,
-            # ПЕРЕД стартом фонового потоку — той самий клас "підвисання",
-            # який цей фікс мав закрити. Обидва мережеві виклики (токен +
-            # resolve_share_link) тепер разом усередині ОДНОГО фонового
-            # потоку — половинчастий фікс (лише одне з двох у фоні) створив
-            # би або те саме зависання, або гонку "потік стартував, але
-            # результат читається одразу й синхронно після старту".
-            def worker():
-                try:
-                    token, _username = onedrive_sync.get_access_token_silent()
-                    if not token:
-                        self._run_on_main_thread(
-                            lambda: messagebox.showerror(
-                                self._t("Таблиця Excel"), self._t("Спочатку увійдіть через Microsoft.")
-                            ),
-                        )
-                        return
-                    drive_id, item_id, file_name = onedrive_sync.resolve_share_link(token, share_url)
-                except Exception as exc:
-                    error_text = str(exc)
-                    self._run_on_main_thread(lambda: messagebox.showerror(self._t("Таблиця Excel"), error_text))
-                    return
-
-                def apply():
-                    new_identity = f"online:{drive_id}:{item_id}"
-                    if excel_source.is_real_source_switch(new_identity):
-                        if not messagebox.askyesno(self._t("Таблиця Excel"), _SOURCE_SWITCH_WARNING):
-                            return
-                    self.settings.set("excel_online_drive_id", drive_id)
-                    self.settings.set("excel_online_item_id", item_id)
-                    self.settings.set("excel_online_file_name", file_name)
-                    refresh_online_status()
-
-                self._run_on_main_thread(apply)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        tk.Button(online_frame, text=self._t("Підключити файл"), command=connect_link).pack(anchor="w")
-
-        def sign_out():
-            onedrive_sync.sign_out()
-            self.settings.set("excel_online_account", "")
-            self.settings.set("excel_online_drive_id", "")
-            self.settings.set("excel_online_item_id", "")
-            self.settings.set("excel_online_file_name", "")
-            refresh_online_status()
-
-        tk.Button(online_frame, text=self._t("Відключити"), command=sign_out).pack(anchor="w", pady=(12, 0))
-
-        refresh_online_status()
-        refresh_mode()
-
-        bottom = tk.Frame(window)
-        bottom.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
-
-        def save_source():
-            new_mode = mode_var.get()
-            if new_mode == "online":
-                new_identity = (
-                    f"online:{self.settings.get('excel_online_drive_id') or ''}:"
-                    f"{self.settings.get('excel_online_item_id') or ''}"
-                )
-            else:
-                new_identity = f"local:{local_path_state['value'] or ''}"
-            if excel_source.is_real_source_switch(new_identity):
-                if not messagebox.askyesno(self._t("Таблиця Excel"), _SOURCE_SWITCH_WARNING):
-                    return
-            self.settings.set("excel_local_path", local_path_state["value"] or "")
-            self.settings.set("excel_source_mode", new_mode)
-            # Реальний привід (2026-08-14): показуємо ОДРАЗУ, який шлях
-            # реально збережено - незалежно від того, чи вже стався реімпорт
-            # (той вимагає перезапуску окремо, повідомлення нижче про це й
-            # попереджає). Так користувач одразу бачить: сам вибір файлу
-            # зберігся правильно, а не губиться десь по дорозі.
-            self.excel_source_status_text.set(excel_source.current_source_label())
-            window.destroy()
-            messagebox.showinfo(
-                self._t("Таблиця Excel"),
-                self._t("Перезапустіть програму, щоб застосувати нове джерело таблиці."),
-            )
-
-        tk.Button(bottom, text=self._t("Зберегти"), width=14, command=save_source).pack(side="right", padx=(8, 0))
-        tk.Button(bottom, text=self._t("Відмінити"), width=14, command=window.destroy).pack(side="right")
-        window.bind("<Escape>", lambda event: window.destroy())
-        self._center_window(window, width=560, height=480)
 
     # Задача користувача (2026-08-15): "давай налаштуємо публікацію
     # 'client' оновлень через gui.py" - раніше update_manifest_path не мав
@@ -4972,6 +4800,31 @@ class ExcelViewerApp:
     # (структура репозиторію: <корінь>/dist/AI_Automation_Home/), інакше
     # git-історія просто недоступна (немає сенсу падати з помилкою - це
     # лише додатковий, необов'язковий контекст для публікації).
+    def _assert_build_is_fresh(self, exe_path, source_path):
+        """Кидає RuntimeError, якщо .exe зібраний РАНІШЕ, ніж востаннє
+        змінювався файл із номером версії. Див. інцидент 2026-08-20:
+        client-v0.3.1 отримав збірку 0.3.0."""
+        exe_path, source_path = Path(exe_path), Path(source_path)
+        if not exe_path.exists():
+            raise RuntimeError(
+                self._t("Не знайдено зібраний файл {path} - публікувати нічого.").format(path=exe_path)
+            )
+        if not source_path.exists():
+            return
+        built_at = exe_path.stat().st_mtime
+        changed_at = source_path.stat().st_mtime
+        if changed_at > built_at:
+            raise RuntimeError(
+                self._t(
+                    "{source} змінювався ПІСЛЯ збірки ({changed} проти {built}) - у пакеті лежить стара "
+                    "версія програми, хоч тег буде новий. Перезберіть через build_exe.py і спробуйте знову."
+                ).format(
+                    source=source_path.name,
+                    changed=datetime.fromtimestamp(changed_at).strftime("%d.%m %H:%M"),
+                    built=datetime.fromtimestamp(built_at).strftime("%d.%m %H:%M"),
+                )
+            )
+
     def _project_git_root(self):
         for candidate in (BASE_DIR, BASE_DIR.parent.parent):
             if (candidate / ".git").exists():
@@ -5229,15 +5082,56 @@ class ExcelViewerApp:
                 hostname = self._active_server_var.get()
                 remote_control_client.set_active_server(hostname)
                 self.settings.set("active_remote_server_hostname", hostname)
+                # Перемалювати список: позначка ✓ і жирний шрифт
+                # мають перейти на нову обрану (див. mark нижче).
+                self._refresh_active_server_list()
+
+            # Зауваження користувача (2026-09-05, знімок): "не показують
+            # візуально який увімкнений" - індикатор Radiobutton у темній
+            # темі Tk не видно. Позначка робиться ТЕКСТОМ і кольором:
+            # "✓ ", жирний шрифт і синій (семантичний, тема не чіпає).
+            def mark(text, value):
+                selected = value == current_hostname
+                return {
+                    "text": ("\u2713 " + text) if selected else text,
+                    "font": ("Segoe UI", 9, "bold" if selected else "normal"),
+                    "fg": "#2F7BD9" if selected else None,
+                    "selectcolor": "#2F7BD9",
+                }
 
             # Задача користувача (2026-08-20): "додай ще мені змогу вибрати
             # стандартний (той який не прописується в строці)" - той самий
             # синтетичний пункт, що й у "Сервері", завжди доступний
             # незалежно від того, чи хтось зареєструвався.
-            tk.Radiobutton(
-                frame, text=self._t("Стандартний (без реєстрації)"), variable=self._active_server_var,
-                value=paths.CLOUDFLARED_TUNNEL_HOSTNAME, anchor="w", command=on_pick,
-            ).pack(anchor="w")
+            # На відміну від попапу "Сервери" (де два рядки на одну адресу
+            # КОРИСНІ - це два незалежні опитування), тут список не
+            # спостерігає, а ВИБИРАЄ: два радіо-пункти з однаковим value
+            # ламають сам вибір - Tk підсвічує обидва як обрані, і
+            # незрозуміло, що вибрано. Тому адреса за замовчуванням завжди
+            # рівно один пункт, а імена зареєстрованих серверів, які сидять
+            # на тій самій адресі, дописуються в його ж підпис - жодна
+            # машина не зникає зі списку.
+            standard_hostname = paths.cloudflared_tunnel_hostname()
+            same_address = sorted(
+                name for name, server in servers.items()
+                if (server.get("hostname") or "") == standard_hostname
+            )
+            standard_text = self._t("Стандартний (без реєстрації)")
+            if same_address:
+                standard_text = "%s - %s" % (standard_text, ", ".join(same_address))
+            standard_style = mark(standard_text, standard_hostname)
+            standard_radio = tk.Radiobutton(
+                frame, text=standard_style["text"], font=standard_style["font"],
+                selectcolor=standard_style["selectcolor"], variable=self._active_server_var,
+                value=standard_hostname, anchor="w", command=on_pick,
+            )
+            if standard_style["fg"]:
+                standard_radio.configure(fg=standard_style["fg"])
+            standard_radio.pack(anchor="w")
+            servers = {
+                name: server for name, server in servers.items()
+                if (server.get("hostname") or "") != standard_hostname
+            }
 
             if not servers:
                 tk.Label(
@@ -5246,10 +5140,15 @@ class ExcelViewerApp:
             else:
                 for name, server in sorted(servers.items()):
                     kind_label = self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний"))
-                    tk.Radiobutton(
-                        frame, text=f"{name} ({kind_label})", variable=self._active_server_var,
+                    style = mark(f"{name} ({kind_label})", server["hostname"])
+                    radio = tk.Radiobutton(
+                        frame, text=style["text"], font=style["font"], selectcolor=style["selectcolor"],
+                        variable=self._active_server_var,
                         value=server["hostname"], anchor="w", command=on_pick,
-                    ).pack(anchor="w")
+                    )
+                    if style["fg"]:
+                        radio.configure(fg=style["fg"])
+                    radio.pack(anchor="w")
             self._apply_theme(frame)
 
         def worker():
@@ -5291,8 +5190,8 @@ class ExcelViewerApp:
         window = tk.Toplevel(self.root)
         window.title(self._t("Сервери"))
         window.configure(bg=self._SRV_BG)
-        window.transient(self.root)
-        window.grab_set()
+        # Ні transient, ні grab_set: вікно самостійне - має власну кнопку на
+        # панелі задач, не згортається разом із головним і не блокує його.
 
         card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=14)
         card.pack(fill="both", expand=True)
@@ -5329,8 +5228,7 @@ class ExcelViewerApp:
         servers_list = tk.Frame(card, bg=self._SRV_BG)
         servers_list.pack(fill="x")
 
-        def make_server_row(parent, name, server, dot_var, version_var, deletable=True):
-            is_active = server["hostname"] == remote_control_client.active_hostname()
+        def make_server_row(parent, name, server, dot_var, version_var, node_var, is_active, deletable=True):
             row_bg = self._SRV_ROW_ACTIVE_BG if is_active else self._SRV_ROW_BG
             row = tk.Frame(
                 parent, bg=row_bg, highlightthickness=1,
@@ -5339,11 +5237,27 @@ class ExcelViewerApp:
                 padx=8, pady=6, cursor="hand2",
             )
             row.pack(fill="x", pady=2)
+            # Реальний баг (2026-08-20): два рядки списку показували ТУ САМУ
+            # машину, бо ДВА різні client_app.py трималися однієї адреси
+            # тунелю - із самого рядка це було не видно. Другий, приглушений
+            # рядок під іменем каже, ХТО насправді відповів (platform.node()
+            # зі /control/status), і лише тоді, коли це НЕ той, кого рядок
+            # обіцяє - інакше порожньо, щоб не дублювати ім'я двічі. Місце
+            # під нього зарезервоване ЗАВЖДИ (label спакований одразу, лише
+            # текст порожній) - рядок не має підстрибувати, коли відповідь
+            # приходить із мережі.
+            name_column = tk.Frame(row, bg=row_bg)
+            name_column.pack(side="left", fill="x", expand=True)
             name_label = tk.Label(
-                row, text=(f"✓ {name}" if is_active else name), anchor="w",
+                name_column, text=(f"✓ {name}" if is_active else name), anchor="w",
                 font=("Segoe UI", 10, "bold" if is_active else "normal"), bg=row_bg, fg=self._SRV_TEXT,
             )
-            name_label.pack(side="left", fill="x", expand=True)
+            name_label.pack(anchor="w", fill="x")
+            node_label = tk.Label(
+                name_column, textvariable=node_var, anchor="w", font=("Segoe UI", 8),
+                bg=row_bg, fg=self._SRV_MUTED,
+            )
+            node_label.pack(anchor="w", fill="x")
             badge_bg, badge_fg = self._SRV_BADGE.get(server["kind"], self._SRV_BADGE["main"])
             badge = tk.Label(
                 row, text=self._t(self._SERVER_KIND_LABELS.get(server["kind"], "Основний")), font=("Segoe UI", 8),
@@ -5359,9 +5273,14 @@ class ExcelViewerApp:
             def switch_to_this(event=None):
                 remote_control_client.set_active_server(server["hostname"])
                 self.settings.set("active_remote_server_hostname", server["hostname"])
+                # Самої адреси не досить, щоб потім відновити "✓": кілька
+                # рядків можуть мати ОДНУ адресу (дві машини за одним
+                # тунелем), і без імені рядка позначка стрибала б на
+                # перший-ліпший із них замість натиснутого.
+                self.settings.set("active_remote_server_row", name)
                 refresh_list()
 
-            for clickable in (row, name_label):
+            for clickable in (row, name_column, name_label, node_label):
                 clickable.bind("<Button-1>", switch_to_this)
 
             if deletable:
@@ -5390,14 +5309,42 @@ class ExcelViewerApp:
                         if status is None:
                             state["dot_var"].set("○")
                             state["version_var"].set(self._t("нет связи"))
+                            state["node_var"].set(state["default_subline"])
                         else:
                             state["dot_var"].set("●")
-                            state["version_var"].set(status.get("version") or "?")
+                            # Задача користувача (2026-08-20): "неоновлений
+                            # так і показувати як без версії чи стара
+                            # версія". Поля "version" немає взагалі лише в
+                            # клієнтах, старших за той реліз, де його
+                            # додали - тобто порожньо тут означає не збій, а
+                            # конкретний факт: відповіла стара збірка.
+                            # Коротке "старая" - бо колонка фіксовані 7
+                            # символів (55px), а "старая версия" займає 83px
+                            # і обрізалась би посеред слова.
+                            state["version_var"].set(
+                                (status.get("version") or "").strip() or self._t("старая")
+                            )
+                            # Порожньо, коли відповіла та сама машина, що й у
+                            # назві рядка - підпис потрібен лише там, де вони
+                            # РОЗІЙШЛИСЬ (або де рядок узагалі не називає
+                            # машини, як синтетичний "Стандартний"). Старі
+                            # клієнти поля "node" ще не шлють - теж порожньо.
+                            node = (status.get("node") or "").strip()
+                            state["node_var"].set(
+                                node if node and node != state["name"] else state["default_subline"]
+                            )
                     self._run_on_main_thread(apply)
 
             threading.Thread(target=worker, daemon=True).start()
 
+        # Розмір і місце виставляються РІВНО ОДИН раз - коли список уперше
+        # показав вміст. Далі вікно нікуди не переїжджає: пересунули чи
+        # розтягнули - так і лишиться, "Оновити" його більше не чіпає.
+        placement = {"done": False}
+
         def resize_to_content():
+            if placement["done"]:
+                return
             window.update_idletasks()
             width = 360
             height = min(window.winfo_reqheight(), 520)
@@ -5423,17 +5370,70 @@ class ExcelViewerApp:
                 # реєстрі - синтетичний рядок дає доступ до дефолтної
                 # адреси (paths.CLOUDFLARED_TUNNEL_HOSTNAME) незалежно від
                 # того, чи хтось узагалі коли-небудь зареєструвався.
-                standard_server = {"hostname": paths.CLOUDFLARED_TUNNEL_HOSTNAME, "kind": "standard", "version": ""}
-                standard_dot_var = tk.StringVar(value="…")
-                standard_version_var = tk.StringVar(value="…")
-                make_server_row(
-                    servers_list, self._t("Стандартний"), standard_server,
-                    standard_dot_var, standard_version_var, deletable=False,
-                )
-                rows_state.append({
-                    "hostname": standard_server["hostname"],
-                    "dot_var": standard_dot_var, "version_var": standard_version_var,
-                })
+                # Реальна скарга (2026-08-20, одразу після спроби прибрати
+                # цей рядок як "дубль"): "тепер перестав бачити неоновлений
+                # стандартний". Дедуплікація за адресою була ПОМИЛКОЮ саме
+                # тут: два рядки справді вели на одну адресу, але за нею
+                # стоять ДВІ РІЗНІ машини (робочий клієнт, який досі на
+                # старій версії й НІКОЛИ себе не реєструє, і оновлений
+                # тестовий) - Cloudflare щоразу обирає бекенд наново. Тобто
+                # синтетичний рядок був єдиною ручкою до неоновленої
+                # машини, і прибирати його не можна НІКОЛИ: він тут не
+                # "запасний варіант на випадок порожнього реєстру", а
+                # постійний спостерігач за адресою за замовчуванням. Два
+                # рядки на одну адресу - це ДВА незалежні опитування, тобто
+                # вдвічі більше шансів упіймати стару машину; хто саме
+                # відповів, видно з підпису під іменем.
+                standard_server = {
+                    "hostname": paths.cloudflared_tunnel_hostname(), "kind": "standard", "version": "",
+                }
+                display_rows = [(self._t("Стандартний"), standard_server, False)]
+                for name, server in sorted(servers.items()):
+                    display_rows.append((name, server, True))
+
+                # Реальний баг (2026-08-20, скріншот): "показує 2 вибраних...
+                # вони ніби злиті" - обидва рядки стояли з "✓" і синьою
+                # рамкою ОДНОЧАСНО. Причина: is_active рахувався з самої
+                # АДРЕСИ, а вона в обох рядків однакова, тож активними
+                # ставали обидва. Тепер "✓" дістається рівно одному рядку -
+                # тому, який людина справді натиснула (ім'я лежить у
+                # settings), а якщо його в списку вже нема - першому за
+                # порядком. Самі рядки лишаються обидва: за однією адресою
+                # реально сидять дві різні машини, і це не помилка списку.
+                active_hostname = remote_control_client.active_hostname()
+                same_as_active = [
+                    name for name, server, _ in display_rows if server["hostname"] == active_hostname
+                ]
+                preferred_row = self.settings.get("active_remote_server_row") or ""
+                if preferred_row in same_as_active:
+                    active_row_name = preferred_row
+                elif same_as_active:
+                    active_row_name = same_as_active[0]
+                else:
+                    active_row_name = ""
+
+                seen_hostnames = set()
+                for name, server, deletable in display_rows:
+                    hostname = server["hostname"]
+                    # Другий і наступні рядки з ТІЄЮ САМОЮ адресою кажуть про
+                    # це прямо: без підпису два однакові рядки виглядають як
+                    # збій програми, а не як реальний стан (дві машини за
+                    # одним тунелем). Живий підпис машини (node) має
+                    # пріоритет і перекриває цей текст, коли приходить.
+                    default_subline = self._t("та сама адреса") if hostname in seen_hostnames else ""
+                    seen_hostnames.add(hostname)
+                    dot_var = tk.StringVar(value="…")
+                    version_var = tk.StringVar(value="…")
+                    node_var = tk.StringVar(value=default_subline)
+                    make_server_row(
+                        servers_list, name, server, dot_var, version_var, node_var,
+                        is_active=(name == active_row_name), deletable=deletable,
+                    )
+                    rows_state.append({
+                        "hostname": hostname, "name": name, "dot_var": dot_var,
+                        "version_var": version_var, "node_var": node_var,
+                        "default_subline": default_subline,
+                    })
 
                 if not servers:
                     tk.Label(
@@ -5441,16 +5441,9 @@ class ExcelViewerApp:
                         text=self._t("Інших серверів ще не видно.\nКожен client_app.py сам з'являється тут протягом 2 хв після старту."),
                         anchor="w", justify="left", wraplength=330, bg=self._SRV_BG, fg=self._SRV_MUTED,
                     ).pack(anchor="w", pady=8)
-                else:
-                    for name, server in sorted(servers.items()):
-                        dot_var = tk.StringVar(value="…")
-                        version_var = tk.StringVar(value="…")
-                        make_server_row(servers_list, name, server, dot_var, version_var)
-                        rows_state.append(
-                            {"hostname": server["hostname"], "dot_var": dot_var, "version_var": version_var}
-                        )
                 refresh_statuses(rows_state)
                 resize_to_content()
+                placement["done"] = True
 
             refresh_list.generation = getattr(refresh_list, "generation", 0) + 1
             generation = refresh_list.generation
@@ -5462,13 +5455,24 @@ class ExcelViewerApp:
             threading.Thread(target=worker, daemon=True).start()
 
         bottom = tk.Frame(card, bg=self._SRV_BG)
-        bottom.pack(side="top", fill="x", pady=(10, 0))
+        # Знизу, а не "наступним зверху": вікно більше не росте під вміст,
+        # тож при переповненні за край має виїжджати список, а не кнопки.
+        bottom.pack(side="bottom", fill="x", pady=(10, 0))
         tk.Button(
             bottom, text=self._t("Оновити"), command=refresh_list,
             bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
             activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
             highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
         ).pack(side="left")
+        # Задача користувача (2026-08-20): "створи там окрему кнопку" -
+        # звідси, з того самого місця, де людина й помітила, що дві машини
+        # злились в один рядок.
+        tk.Button(
+            bottom, text=self._t("Тунель"), command=self.open_tunnel_dialog,
+            bg=self._SRV_ROW_BG, fg="#9EC5F2", activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, padx=14, pady=6,
+        ).pack(side="left", padx=(6, 0))
         tk.Button(
             bottom, text=self._t("Закрити"), command=window.destroy,
             bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
@@ -5484,6 +5488,1159 @@ class ExcelViewerApp:
         # світлу/темну тему програми.
         resize_to_content()
         refresh_list()
+
+    # ---------- Вікно "Тунель" ----------
+    # Задача користувача (2026-08-20): "хочу інформацію про тунель бачити в
+    # домашці... створи там окрему кнопку, розширь вікно... а ще можливо
+    # термін закінчення дії там вивести? а також додати змогу приєднувати чи
+    # від'єднувати куплені посилання".
+    #
+    # Чому ОКРЕМЕ вікно, а не всередині "Сервери": той діалог людина свого
+    # часу вивіряла до 360px ("срам, давай як хотів я 1 в 1"), а таблиця
+    # конекторів туди не влазить. Тут - власна ширина, "Сервери" лишається
+    # незмінним.
+    #
+    # Вікно НАВМИСНО поділене на дві половини за вимогами доступу:
+    #   - "Хто відповідає" і "Домени" працюють ЗАВЖДИ, без токена й на
+    #     будь-якій машині (самоопитування адреси + публічний RDAP);
+    #   - "Конектори" й керування адресами вимагають токена Cloudflare.
+    # Без цього поділу вікно без токена було б просто порожнім - а так воно
+    # й далі відповідає на головне питання "чи злиті машини прямо зараз".
+    _TUNNEL_WIDTH = 720
+    _TUNNEL_PROBE_ATTEMPTS = 12
+
+    def _read_cloudflare_token(self):
+        if paths.CLOUDFLARE_TOKEN_PATH.exists():
+            try:
+                return paths.CLOUDFLARE_TOKEN_PATH.read_text(encoding="utf-8").strip()
+            except OSError:
+                return ""
+        return ""
+
+    def _write_cloudflare_token(self, token):
+        """Той самий шлях, що й у токена GitHub (_write_github_publish_token):
+        system/ уже в .gitignore, тож у репозиторій не потрапляє, а запис іде
+        через .tmp + os.replace - обрив посеред збереження не лишає
+        напівзаписаного токена."""
+        paths.CLOUDFLARE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        token = (token or "").strip()
+        if not token:
+            paths.CLOUDFLARE_TOKEN_PATH.unlink(missing_ok=True)
+            return
+        tmp_path = paths.CLOUDFLARE_TOKEN_PATH.with_name(paths.CLOUDFLARE_TOKEN_PATH.name + ".tmp")
+        tmp_path.write_text(token, encoding="utf-8")
+        os.replace(tmp_path, paths.CLOUDFLARE_TOKEN_PATH)
+
+    # Tk не вміє заокруглених кутів у жодного віджета. Значок-"пігулку"
+    # робимо картинкою: PIL малює заокруглений прямокутник (з 4-кратним
+    # згладжуванням, інакше кути "драбинкою"), а сам ТЕКСТ малює Tk поверх
+    # неї через compound="center" - тобто шрифт лишається рідним, як у
+    # решті програми, і нічого не треба міряти в PIL.
+    # Картинку композитимо одразу на колір ТЛА рядка, а не лишаємо
+    # прозорість: так кути виглядають правильно на будь-якій версії Tk.
+    # Якщо PIL раптом недоступний (у зібраному .exe теоретично можливо) -
+    # мовчки лишається звичайний квадратний Label, вікно не ламається.
+    def _rounded_badge(self, parent, text, fill_color, text_color, behind_color, font=("Segoe UI", 8)):
+        photo = None
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+
+            cache = getattr(self, "_tunnel_badge_cache", None)
+            if cache is None:
+                cache = self._tunnel_badge_cache = {}
+            measure_font = tkfont.Font(font=font)
+            width = measure_font.measure(text) + 14
+            height = measure_font.metrics("linespace") + 6
+            key = (width, height, fill_color, behind_color)
+            photo = cache.get(key)
+            if photo is None:
+                scale = 4
+                image = Image.new("RGB", (width * scale, height * scale), behind_color)
+                ImageDraw.Draw(image).rounded_rectangle(
+                    (0, 0, width * scale - 1, height * scale - 1),
+                    radius=4 * scale, fill=fill_color,
+                )
+                photo = ImageTk.PhotoImage(image.resize((width, height), Image.LANCZOS))
+                cache[key] = photo
+        except Exception:
+            photo = None
+        if photo is None:
+            return tk.Label(parent, text=text, bg=fill_color, fg=text_color, font=font, padx=5)
+        label = tk.Label(
+            parent, image=photo, text=text, compound="center", fg=text_color,
+            bg=behind_color, font=font, borderwidth=0, highlightthickness=0,
+        )
+        label.image = photo
+        return label
+
+    def _tunnel_section_title(self, parent, text, pady=(14, 4)):
+        label = tk.Label(
+            parent, text=text, bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 9), anchor="w",
+        )
+        label.pack(fill="x", pady=pady)
+        return label
+
+    # Таблиці тут - grid, а не pack: у прототипі заголовки колонок
+    # розповзались із рядками на кілька пікселів саме тому, що заголовок
+    # без рамки, а рядок із рамкою в 1px. grid із однаковими вагами
+    # колонок тримає їх рівно.
+    def _tunnel_table(self, parent, columns):
+        table = tk.Frame(parent, bg=self._SRV_BG)
+        table.pack(fill="x")
+        header = tk.Frame(table, bg=self._SRV_BG)
+        header.pack(fill="x", pady=(0, 2))
+        for index, (title, weight, minwidth) in enumerate(columns):
+            tk.Label(
+                header, text=title, bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8), anchor="w",
+            ).grid(row=0, column=index, sticky="w", padx=(7, 0))
+            header.grid_columnconfigure(index, weight=weight, minsize=minwidth)
+        table.columns = columns
+        return table
+
+    def _tunnel_table_row(self, table, cells, bg=None):
+        bg = bg or self._SRV_ROW_BG
+        row = tk.Frame(
+            table, bg=bg, highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_BORDER,
+        )
+        row.pack(fill="x", pady=1)
+        for index, (weight, minwidth) in enumerate((column[1], column[2]) for column in table.columns):
+            row.grid_columnconfigure(index, weight=weight, minsize=minwidth)
+        for index, cell in enumerate(cells):
+            if callable(cell):
+                widget = cell(row, bg)
+            else:
+                text, color = cell
+                widget = tk.Label(
+                    row, text=text, bg=bg, fg=color, font=("Segoe UI", 9), anchor="w",
+                )
+            widget.grid(row=0, column=index, sticky="w", padx=(6, 0), pady=4)
+        return row
+
+    def open_tunnel_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title(self._t("Тунель"))
+        window.configure(bg=self._SRV_BG)
+        # Самостійне вікно - див. "Сервери" вище: не згортається разом із
+        # головним і має власну кнопку на панелі задач.
+
+        card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=12)
+        card.pack(fill="both", expand=True)
+
+        tk.Label(
+            card, text=self._t("Тунель"), font=("Segoe UI", 13, "bold"), anchor="w",
+            bg=self._SRV_BG, fg=self._SRV_TEXT,
+        ).pack(fill="x")
+        subtitle_var = tk.StringVar(value=remote_control_client.active_hostname())
+        tk.Label(
+            card, textvariable=subtitle_var, anchor="w", font=("Segoe UI", 8),
+            bg=self._SRV_BG, fg=self._SRV_MUTED,
+        ).pack(fill="x", pady=(1, 10))
+
+        # ---- Доступ до Cloudflare ----
+        access = tk.Frame(
+            card, bg=self._SRV_BG, highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_BORDER, padx=8, pady=7,
+        )
+        access.pack(fill="x")
+        access_title = tk.Label(
+            access, text=self._t("Доступ до Cloudflare"), bg=self._SRV_BG, fg=self._SRV_TEXT,
+            font=("Segoe UI", 9), anchor="w",
+        )
+        access_title.pack(fill="x")
+        # Блок доступу має ДВА вигляди (макет, стани 1 і 2): доки токена
+        # нема або його міняють - розгорнуте поле з підказкою; щойно
+        # прийнято - один рядок із хвостиком токена, переліком того, що
+        # реально перевірено, і кнопкою "Замінити". Обидва живуть тут
+        # одночасно, показується рівно один.
+        expanded = tk.Frame(access, bg=self._SRV_BG)
+        expanded.pack(fill="x")
+        field_row = tk.Frame(expanded, bg=self._SRV_BG)
+        field_row.pack(fill="x", pady=(6, 0))
+        token_var = tk.StringVar(value=self._read_cloudflare_token())
+        token_entry = tk.Entry(
+            field_row, textvariable=token_var, bg="#15181B", fg=self._SRV_TEXT, insertbackground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9), show="•",
+        )
+        token_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        status_row = tk.Frame(expanded, bg=self._SRV_BG)
+        status_row.pack(fill="x", pady=(6, 0))
+        status_icon_var = tk.StringVar(value="")
+        status_text_var = tk.StringVar(
+            value=self._t("Потрібні права: Zone:DNS:Edit на цю зону та Account:Cloudflare Tunnel:Read.")
+        )
+        status_icon = tk.Label(status_row, textvariable=status_icon_var, bg=self._SRV_BG, fg=self._SRV_MUTED,
+                               font=("Segoe UI", 10, "bold"))
+        status_icon.pack(side="left")
+        status_label = tk.Label(status_row, textvariable=status_text_var, bg=self._SRV_BG, fg=self._SRV_MUTED,
+                                font=("Segoe UI", 8), anchor="w", justify="left")
+        status_label.pack(side="left", padx=(4, 0), fill="x", expand=True)
+
+        # Довга підказка (які саме права додати токену) раніше обрізалась
+        # краєм вікна - людина бачила half-речення. Переносимо по фактичній
+        # ширині рядка, а не по вгаданому числу.
+        def _wrap_status(event):
+            width = max(event.width - 24, 120)
+            if status_label.cget("wraplength") != width:
+                status_label.configure(wraplength=width)
+
+        status_row.bind("<Configure>", _wrap_status)
+
+        # Tk не має "placeholder" у Entry, тому робимо його руками: сірий
+        # текст, поки поле порожнє й не у фокусі. Головна пастка - textvariable:
+        # вставлений підказковий текст ІНАКШЕ полетів би у trace і зберігся
+        # б на диск як справжній токен. Тому кожне читання йде через
+        # current_token(), а сам trace виходить одразу, поки підказка на місці.
+        placeholder_text = self._t("вставте токен або прикріпіть файл")
+        state = {
+            "token": token_var.get(), "token_ok": False, "generation": 0, "verify_after": None,
+            "placeholder": False, "permissions": "",
+        }
+
+        def current_token():
+            return "" if state["placeholder"] else token_var.get().strip()
+
+        def show_placeholder():
+            if current_token():
+                return
+            state["placeholder"] = True
+            token_entry.configure(show="", fg="#5E656E")
+            token_var.set(placeholder_text)
+
+        def hide_placeholder(event=None):
+            if not state["placeholder"]:
+                return
+            state["placeholder"] = False
+            token_var.set("")
+            token_entry.configure(show="•", fg=self._SRV_TEXT)
+
+        token_entry.bind("<FocusIn>", hide_placeholder)
+        token_entry.bind("<FocusOut>", lambda event: show_placeholder())
+
+        collapsed = tk.Frame(access, bg=self._SRV_BG)
+        collapsed_tail_var = tk.StringVar()
+        collapsed_perms_var = tk.StringVar()
+        tk.Label(
+            collapsed, text=self._t("Доступ до Cloudflare"), bg=self._SRV_BG, fg=self._SRV_TEXT,
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            collapsed, textvariable=collapsed_tail_var, bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(10, 0))
+
+        def show_expanded():
+            collapsed.pack_forget()
+            expanded.pack(fill="x")
+            access_title.pack(fill="x", before=expanded)
+            token_entry.focus_set()
+
+        def show_collapsed():
+            expanded.pack_forget()
+            access_title.pack_forget()
+            collapsed.pack(fill="x")
+
+        tk.Button(
+            collapsed, text=self._t("Замінити"), command=show_expanded,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=10, pady=2,
+            font=("Segoe UI", 8),
+        ).pack(side="right")
+        collapsed_perms = tk.Label(
+            collapsed, textvariable=collapsed_perms_var, bg="#1E3A2A", fg="#7FD3A4", font=("Segoe UI", 8),
+            padx=6,
+        )
+        collapsed_perms.pack(side="right", padx=(0, 8))
+
+        def set_status(icon, icon_color, text, text_color, border):
+            status_icon_var.set(icon)
+            status_icon.configure(fg=icon_color)
+            status_text_var.set(text)
+            status_label.configure(fg=text_color)
+            access.configure(highlightbackground=border, highlightcolor=border)
+            token_entry.configure(highlightbackground=border)
+
+        def verify_token_now():
+            token = current_token()
+            state["token"] = token
+            if not token:
+                state["token_ok"] = False
+                set_status(
+                    "", self._SRV_MUTED,
+                    self._t("Потрібні права: Zone:DNS:Edit на цю зону та Account:Cloudflare Tunnel:Read."),
+                    self._SRV_MUTED, self._SRV_BORDER,
+                )
+                refresh()
+                return
+            set_status("", self._SRV_MUTED, self._t("Перевіряю токен..."), self._SRV_MUTED, self._SRV_ACCENT)
+            generation = state["generation"] = state["generation"] + 1
+
+            def worker():
+                ok, error = cloudflare_api.verify_token(token)
+                probe = cloudflare_api.probe_permissions(token) if ok else None
+
+                def apply():
+                    if generation != state["generation"] or not window.winfo_exists():
+                        return
+                    if not ok:
+                        state["token_ok"] = False
+                        # Помилка ФОРМИ - наша власна, до Cloudflare справа
+                        # не доходила; підписувати її "Cloudflare відповів"
+                        # означало б збивати з пантелику.
+                        set_status("✕", "#E06A4A", error or self._t("Токен не прийнято."),
+                                   self._SRV_WARN_TEXT, self._SRV_WARN_BORDER)
+                    elif not probe or not probe.get("zones_ok") or not probe.get("tunnels_ok"):
+                        # Токен дійсний, але читання не проходить - окремий
+                        # стан від "недійсний": дії різні, і без розділення
+                        # це виглядало б як загадковий збій десь пізніше.
+                        state["token_ok"] = True
+                        missing = []
+                        if not (probe or {}).get("zones_ok"):
+                            missing.append("Zone:Read/DNS")
+                        if not (probe or {}).get("tunnels_ok"):
+                            missing.append("Account:Tunnel:Read")
+                        set_status(
+                            "!", "#FAC775",
+                            self._t("Токен дійсний, але бракує прав: {missing}").format(
+                                missing=", ".join(missing)),
+                            "#FAC775", "#7A5A10",
+                        )
+                    else:
+                        state["token_ok"] = True
+                        set_status(
+                            "✓", self._SRV_ONLINE,
+                            self._t("Токен прийнято · читання зон і тунелів перевірено · зон видно: {count} "
+                                    "· збережено в system/cloudflare_token.txt").format(
+                                count=probe.get("zones_count", 0)),
+                            "#7FD3A4", "#2A5C40",
+                        )
+                        # Значок перелічує лише те, що РЕАЛЬНО перевірено
+                        # читанням. Права на запис у DNS перевірити наперед
+                        # неможливо (окремий дозвіл, якого токен на себе
+                        # зазвичай не має), тож обіцяти "DNS:Edit" тут було б
+                        # неправдою - воно підтвердиться на першому приєднанні.
+                        collapsed_perms_var.set(self._t("Zone:Read · Tunnel:Read"))
+                        collapsed_tail_var.set("•" * 16 + " " + token[-4:])
+                        show_collapsed()
+                    refresh()
+
+                self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def on_token_typed(*_args):
+            if state["placeholder"]:
+                return
+            # Зберігаємо ОДРАЗУ (той самий принцип, що й у токена GitHub -
+            # нічого не губиться, навіть якщо вікно закрити не перевіривши),
+            # а перевірку відкладаємо на секунду після останньої літери,
+            # щоб не бити по API на кожен символ.
+            self._write_cloudflare_token(current_token())
+            if state["verify_after"] is not None:
+                try:
+                    window.after_cancel(state["verify_after"])
+                except tk.TclError:
+                    pass
+            state["verify_after"] = window.after(1000, verify_token_now)
+
+        token_var.trace_add("write", on_token_typed)
+
+        def attach_token_file():
+            file_path = filedialog.askopenfilename(
+                title=self._t("Виберіть файл із токеном Cloudflare"),
+                filetypes=[("Текстові файли", "*.txt"), ("Усі файли", "*.*")],
+            )
+            if not file_path:
+                return
+            try:
+                token_text = Path(file_path).read_text(encoding="utf-8-sig").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                messagebox.showerror(self._t("Тунель"), self._t("Не вдалось прочитати файл: {error}").format(error=exc))
+                return
+            token_var.set(token_text)
+
+        tk.Button(
+            field_row, text=self._t("Прикріпити файл..."), command=attach_token_file,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=12, pady=4,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(6, 0))
+
+        bottom = tk.Frame(card, bg=self._SRV_BG)
+        # Ряд кнопок пакується ПЕРШИМ і притискається до низу. Порядок тут
+        # принциповий: вікно більше не росте під вміст, тож якщо вміст
+        # переросте висоту, за край має виїжджати середина таблиці, а не
+        # "Обновить" із "Закрити".
+        bottom.pack(side="bottom", fill="x", pady=(14, 0))
+
+        # Вміст на Canvas - інакше все, що не влізло у вікно фіксованої
+        # висоти, було б просто недосяжним.
+        content_area = tk.Frame(card, bg=self._SRV_BG)
+        content_area.pack(side="top", fill="both", expand=True)
+        scrollbar = tk.Scrollbar(
+            content_area, orient="vertical", bg=self._SRV_ROW_BG, troughcolor=self._SRV_BG,
+            activebackground=self._SRV_ROW_ACTIVE_BG, borderwidth=0, elementborderwidth=1,
+            highlightthickness=0, width=12,
+        )
+        canvas = tk.Canvas(content_area, bg=self._SRV_BG, highlightthickness=0, bd=0)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.configure(command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        body = tk.Frame(canvas, bg=self._SRV_BG)
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def sync_scroll(event=None):
+            _scroll_region_with_ceiling(canvas)
+            # Смуга з'являється лише коли є що гортати - постійна смуга у
+            # вікні, яке зазвичай уміщається, лише заважає.
+            needed = body.winfo_reqheight() > canvas.winfo_height()
+            if needed and not scrollbar.winfo_ismapped():
+                scrollbar.pack(side="right", fill="y", before=canvas)
+            elif not needed and scrollbar.winfo_ismapped():
+                scrollbar.pack_forget()
+
+        body.bind("<Configure>", sync_scroll)
+        canvas.bind(
+            "<Configure>",
+            lambda event: (canvas.itemconfigure(body_id, width=event.width), sync_scroll()),
+        )
+
+        def on_wheel(event):
+            if body.winfo_reqheight() <= canvas.winfo_height() or _wheel_blocked(canvas, event):
+                return
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind("<Enter>", lambda event: window.bind_all("<MouseWheel>", on_wheel))
+        canvas.bind("<Leave>", lambda event: window.unbind_all("<MouseWheel>"))
+        window.bind("<Destroy>", lambda event: window.unbind_all("<MouseWheel>"), add="+")
+
+        state["autosize"] = True
+        state["settled"] = 0
+
+        def resize_to_content(settled=False):
+            """settled=True означає "секція домалювалась остаточно". Коли
+            відзвітують усі три - підгонка вимикається назавжди, і далі
+            вікном керує тільки людина."""
+            if state.get("autosize"):
+                window.update_idletasks()
+                width = self._TUNNEL_WIDTH
+                # Canvas сам по собі не тягнеться під вміст, тож висоту йому
+                # задаємо явно - рівно стільки, скільки треба вмісту, але не
+                # більше за екран. Далі вікно рахує свою висоту вже від неї.
+                canvas.configure(
+                    height=min(body.winfo_reqheight(), window.winfo_screenheight() - 260)
+                )
+                window.update_idletasks()
+                height = min(window.winfo_reqheight(), window.winfo_screenheight() - 140)
+                root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+                root_width = self.root.winfo_width()
+                x = root_x + max((root_width - width) // 2, 0)
+                window.geometry(f"{width}x{height}+{max(x, 0)}+{max(root_y + 40, 0)}")
+            if settled:
+                state["settled"] = state.get("settled", 0) + 1
+                if state["settled"] >= 3:
+                    state["autosize"] = False
+
+        def refresh():
+            self._render_tunnel_body(body, state, subtitle_var, refresh, resize_to_content)
+
+        def refresh_everything():
+            # Реальний сценарій (2026-08-20): людина бачить "бракує прав",
+            # іде в Cloudflare, дописує дозволи тому САМОМУ токену - і
+            # тисне тут. Без повторної перевірки токена вікно показувало б
+            # стару відмову, хоч права вже на місці.
+            domain_info.clear_cache()
+            if current_token():
+                verify_token_now()
+            else:
+                refresh()
+
+        tk.Button(
+            bottom, text=self._t("Обновить"), command=refresh_everything,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
+        ).pack(side="left")
+        tk.Button(
+            bottom, text=self._t("Закрити"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, padx=14, pady=6,
+        ).pack(side="right")
+
+        window.bind("<Escape>", lambda event: window.destroy())
+        resize_to_content()
+        if state["token"]:
+            verify_token_now()
+        else:
+            show_placeholder()
+            refresh()
+
+    # Тіло вікна перемальовується цілком на кожне "Обновить" і після кожної
+    # зміни токена. Кожна секція має ВЛАСНИЙ фоновий потік і власний
+    # напис "завантажую" - інакше найповільніше (опитування адреси 12 раз)
+    # тримало б порожнім усе вікно.
+    def _render_tunnel_body(self, body, state, subtitle_var, refresh, resize_to_content):
+        self._clear_frame(body)
+        generation = state["render"] = state.get("render", 0) + 1
+        hostname = remote_control_client.active_hostname()
+        token = state.get("token") or ""
+        token_ok = bool(token) and state.get("token_ok")
+
+        def alive(frame):
+            return generation == state.get("render") and frame.winfo_exists()
+
+        def muted(parent, text, pady=(4, 0)):
+            return tk.Label(
+                parent, text=text, bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8),
+                anchor="w", justify="left", wraplength=self._TUNNEL_WIDTH - 60,
+            )
+
+        # ---------- Хто відповідає на адресу ----------
+        responders_box = tk.Frame(body, bg=self._SRV_BG)
+        responders_box.pack(fill="x")
+        self._tunnel_section_title(
+            responders_box, self._t("Хто відповідає на {host}").format(host=hostname)
+        )
+        responders_hint = muted(responders_box, self._t("Опитую адресу {count} разів...").format(
+            count=self._TUNNEL_PROBE_ATTEMPTS))
+        responders_hint.pack(fill="x")
+
+        def paint_responders(result):
+            if not alive(responders_box):
+                return
+            responders_hint.destroy()
+            if not result["responders"]:
+                # Голі заголовки над порожнечею читаються як зламане вікно.
+                # Коли відповідати нема кому - показуємо лише пояснення.
+                muted(responders_box, self._t("Адреса не відповіла жодного разу ({count} спроб).").format(
+                    count=result["attempts"])).pack(fill="x", pady=(2, 0))
+                resize_to_content(settled=True)
+                return
+            table = self._tunnel_table(responders_box, [
+                (self._t("Машина"), 3, 140), (self._t("Канал"), 0, 92),
+                (self._t("Версія"), 0, 74), (self._t("Влучань"), 0, 84),
+            ])
+            if len(result["responders"]) > 1:
+                # Головний сенс усього блоку: кілька РІЗНИХ відповідачів за
+                # однією адресою і є та сама підміна, через яку персонал і
+                # журнал показувались із чужої машини.
+                self._tunnel_warning(
+                    responders_box,
+                    self._t("На одну адресу відповіли {count} різні машини — дані приходять то з однієї, "
+                            "то з іншої").format(count=len(result["responders"])),
+                    before=table,
+                )
+            for item in result["responders"]:
+                channel = item["channel"]
+                badge_fill, badge_fg = self._SRV_BADGE.get(
+                    "test" if channel == "test" else "main", self._SRV_BADGE["main"])
+                channel_text = self._t("тестовий") if channel == "test" else (
+                    self._t("основний") if channel else self._t("невідомо"))
+                self._tunnel_table_row(table, [
+                    (item["node"] or self._t("не назвалась"),
+                     self._SRV_TEXT if item["node"] else self._SRV_MUTED),
+                    (lambda parent, bg, text=channel_text, fill=badge_fill, fg=badge_fg:
+                        self._rounded_badge(parent, text, fill, fg, bg)),
+                    (item["version"] or self._t("старая"), self._SRV_MUTED),
+                    (self._t("{hits} із {total}").format(hits=item["hits"], total=result["attempts"]),
+                     self._SRV_MUTED),
+                ])
+            if result["failures"]:
+                muted(responders_box, self._t("Без відповіді: {count} із {total}").format(
+                    count=result["failures"], total=result["attempts"])).pack(fill="x", pady=(4, 0))
+            resize_to_content(settled=True)
+
+        def probe_worker():
+            result = remote_control_client.probe_responders(hostname, attempts=self._TUNNEL_PROBE_ATTEMPTS)
+            self._run_on_main_thread(lambda: paint_responders(result))
+
+        threading.Thread(target=probe_worker, daemon=True).start()
+
+        # ---------- Конектори / Адреси ----------
+        cloud_box = tk.Frame(body, bg=self._SRV_BG)
+        cloud_box.pack(fill="x")
+
+        # ---------- Домени ----------
+        domains_box = tk.Frame(body, bg=self._SRV_BG)
+        domains_box.pack(fill="x")
+
+        # Замок малюється в самому низу, тому й контейнер під нього
+        # створюємо тут - після доменів.
+        locked_box = tk.Frame(body, bg=self._SRV_BG)
+        locked_box.pack(fill="x")
+        self._tunnel_section_title(domains_box, self._t("Домени"))
+        domains_hint = muted(domains_box, self._t("Питаю RDAP..."))
+        domains_hint.pack(fill="x")
+
+        def paint_domains(rows, registrar_map=None):
+            if not alive(domains_box):
+                return
+            registrar_map = registrar_map or {}
+            domains_hint.destroy()
+            table = self._tunnel_table(domains_box, [
+                (self._t("Домен"), 3, 170), (self._t("Реєстратор"), 0, 110),
+                (self._t("Спливає"), 0, 84), (self._t("Продовження"), 0, 104),
+                (self._t("Лишилось"), 0, 80),
+            ])
+            for domain, info, error in rows:
+                if error:
+                    self._tunnel_table_row(table, [
+                        (domain, self._SRV_TEXT), (error, self._SRV_MUTED), ("", self._SRV_MUTED),
+                        ("", self._SRV_MUTED), ("", self._SRV_MUTED),
+                    ])
+                    continue
+                days = info.get("days_left")
+                # Червоне тільки тоді, коли справді час діяти - інакше
+                # кольори перестають щось означати.
+                days_color = self._SRV_ONLINE if (days or 0) > 30 else "#E06A4A"
+                expires = info.get("expires")
+                # Реальна знахідка користувача (2026-08-20): на сайті
+                # Cloudflare стояло "Auto-renewal scheduled for July 16,
+                # 2027", а тут - 15.08.2027, і це виглядало як розбіжність
+                # у даних. Насправді це ДВІ різні дати: RDAP віддає день,
+                # коли домен СПЛИВАЄ, а Cloudflare показує день, коли він
+                # його ПРОДОВЖИТЬ - рівно за 30 днів до спливання (для
+                # цього домену різниця перевірена: 16.07 -> 15.08).
+                registrar_info = registrar_map.get(domain)
+                if expires is None:
+                    renewal_text, renewal_color = "-", self._SRV_MUTED
+                elif registrar_info is not None and not registrar_info.get("auto_renew"):
+                    renewal_text, renewal_color = self._t("вимкнено"), "#E06A4A"
+                else:
+                    renewal_text = (expires - timedelta(days=30)).strftime("%d.%m.%Y")
+                    renewal_color = self._SRV_MUTED
+                self._tunnel_table_row(table, [
+                    (domain, self._SRV_TEXT),
+                    (info.get("registrar") or "-", self._SRV_MUTED),
+                    (expires.strftime("%d.%m.%Y") if expires else "-", self._SRV_MUTED),
+                    (renewal_text, renewal_color),
+                    (self._t("{days} днів").format(days=days) if days is not None else "-", days_color),
+                ])
+            muted(domains_box, self._t(
+                "«Продовження» — за 30 днів до спливання: саме цю, ранішу дату показує сайт Cloudflare."
+            )).pack(fill="x", pady=(4, 0))
+            resize_to_content(settled=True)
+
+        def domains_worker(domain_names, registrar_map=None):
+            rows = []
+            for name in domain_names:
+                info, error = domain_info.fetch_domain_info(name)
+                rows.append((name, info or {}, error))
+            self._run_on_main_thread(lambda: paint_domains(rows, registrar_map))
+
+        if not token_ok:
+            # Без токена показуємо термін дії хоча б для того домену, під
+            # яким живе поточна адреса - його видно й без Cloudflare.
+            threading.Thread(
+                target=domains_worker, args=([domain_info.registrable_domain(hostname)],), daemon=True,
+            ).start()
+            # Замок іде ПІСЛЯ "Доменів" (як у макеті): спершу все, що
+            # реально працює, і аж потім те, чого бракує - інакше вікно
+            # починається з відмови.
+            self._tunnel_locked_block(
+                locked_box, self._t("Конектори тунелю та керування адресами — вкажіть токен вище"),
+            )
+            resize_to_content(settled=True)
+            return
+
+        cloud_hint = muted(cloud_box, self._t("Питаю Cloudflare..."), pady=(14, 0))
+        cloud_hint.pack(fill="x", pady=(14, 0))
+
+        def paint_cloud(data, error):
+            if not alive(cloud_box):
+                return
+            cloud_hint.destroy()
+            if error:
+                self._tunnel_warning(cloud_box, error)
+                resize_to_content(settled=True)
+                return
+            state["cf"] = data
+            if data.get("tunnel_name"):
+                subtitle_var.set("%s · %s" % (data["tunnel_name"], data.get("tunnel_id") or ""))
+
+            # --- Конектори ---
+            self._tunnel_section_title(cloud_box, self._t("Конектори"))
+            connectors = data.get("connectors") or []
+            if len(connectors) > 1:
+                self._tunnel_warning(
+                    cloud_box,
+                    self._t("{count} конектори на одній адресі — запити діляться між машинами випадково")
+                    .format(count=len(connectors)),
+                )
+            table = self._tunnel_table(cloud_box, [
+                (self._t("Конектор"), 0, 110), (self._t("IP джерела"), 0, 130),
+                (self._t("Точки входу"), 3, 180), (self._t("З"), 0, 60),
+            ])
+            for connector in connectors:
+                opened = (connector.get("opened_at") or "")[11:16]
+                self._tunnel_table_row(table, [
+                    ((connector["id"][:8] + "…") if connector.get("id") else "-", self._SRV_MUTED),
+                    (connector.get("origin_ip") or "-", self._SRV_TEXT),
+                    (", ".join(connector.get("edges") or []) or "-", self._SRV_MUTED),
+                    (opened or "-", self._SRV_MUTED),
+                ])
+            if not connectors:
+                muted(cloud_box, self._t("Жодного активного конектора — тунель зараз ніхто не тримає.")).pack(
+                    fill="x", pady=(4, 0))
+
+            # Таблиця вище показує лише тунель АКТИВНОЇ адреси, тож питання
+            # "а чи слухає тестовий" лишалось без відповіді - доводилось
+            # перевіряти браузером. Кількість конекторів по всіх тунелях
+            # приходить тією ж відповіддю, що й список тунелів.
+            self._tunnel_section_title(cloud_box, self._t("Тунелі акаунта"))
+            tunnels_table = self._tunnel_table(cloud_box, [
+                (self._t("Тунель"), 3, 200), (self._t("Машин на ньому"), 0, 130),
+            ])
+            for tunnel in data.get("tunnels") or []:
+                live = tunnel.get("connectors") or 0
+                connections = tunnel.get("connections") or 0
+                # У дужках - скільки каналів тримають ці машини. Число саме
+                # по собі нічого не означає (одна машина = близько чотирьох),
+                # але допомагає зрозуміти, звідки воно взялось.
+                count_text = self._t("{machines}  ({channels} каналів)").format(
+                    machines=live, channels=connections) if live else "0"
+                self._tunnel_table_row(tunnels_table, [
+                    (tunnel["name"] + (self._t("  (цей)") if tunnel["id"] == data.get("tunnel_id") else ""),
+                     self._SRV_TEXT),
+                    (count_text, self._SRV_ONLINE if live else self._SRV_MUTED),
+                ])
+
+            # --- Адреси ---
+            head = tk.Frame(cloud_box, bg=self._SRV_BG)
+            head.pack(fill="x", pady=(14, 4))
+            tk.Label(
+                head, text=self._t("Адреси"), bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 9),
+                anchor="w",
+            ).pack(side="left")
+            tk.Button(
+                head, text=self._t("Приєднати адресу"),
+                command=lambda: self._open_attach_address_dialog(state, refresh),
+                bg=self._SRV_ROW_BG, fg="#9EC5F2", activebackground=self._SRV_ROW_ACTIVE_BG,
+                activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+                highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, bd=0,
+                padx=12, pady=3, font=("Segoe UI", 8),
+            ).pack(side="right")
+            addresses_table = self._tunnel_table(cloud_box, [
+                (self._t("Посилання"), 3, 240), (self._t("Прив'язано до"), 0, 190), ("", 0, 96),
+            ])
+            tunnel_names = {item["id"]: item["name"] for item in data.get("tunnels") or []}
+            for address in data.get("addresses") or []:
+                self._tunnel_table_row(addresses_table, [
+                    (address["hostname"], self._SRV_TEXT),
+                    (tunnel_names.get(address["tunnel_id"], address["tunnel_id"][:8] + "…"), self._SRV_MUTED),
+                    (lambda parent, bg, item=address: tk.Button(
+                        parent, text=self._t("Від'єднати"),
+                        command=lambda item=item: self._confirm_detach_address(state, item, refresh),
+                        bg=bg, fg="#E39C88", activebackground=self._SRV_ROW_ACTIVE_BG,
+                        activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+                        highlightbackground=self._SRV_WARN_BORDER, highlightcolor=self._SRV_WARN_BORDER,
+                        bd=0, padx=8, pady=0, font=("Segoe UI", 8),
+                    )),
+                ])
+            if not data.get("addresses"):
+                muted(cloud_box, self._t("До тунелів цього акаунта не прив'язано жодної адреси.")).pack(
+                    fill="x", pady=(4, 0))
+            # Мовчазне ковтання цієї помилки видавало брак прав за
+            # відсутність даних: вікно писало "жодної адреси" там, де
+            # насправді просто не змогло прочитати зону.
+            unreadable = data.get("unreadable_zones") or []
+            if unreadable:
+                muted(cloud_box, self._t(
+                    "Не вдалось прочитати DNS цих зон (токен не має на них прав): {zones}"
+                ).format(zones=", ".join(unreadable))).pack(fill="x", pady=(4, 0))
+            resize_to_content(settled=True)
+
+        def cloud_worker():
+            data, error = self._load_cloudflare_overview(token, hostname)
+            if data:
+                names = sorted({zone["name"] for zone in data.get("zones") or []})
+                threading.Thread(target=domains_worker, args=(names or [
+                    domain_info.registrable_domain(hostname)], data.get("registrar") or {}),
+                    daemon=True).start()
+            else:
+                threading.Thread(
+                    target=domains_worker, args=([domain_info.registrable_domain(hostname)],), daemon=True,
+                ).start()
+            self._run_on_main_thread(lambda: paint_cloud(data, error))
+
+        threading.Thread(target=cloud_worker, daemon=True).start()
+
+    # Пунктирна рамка (як у макеті) - її не має жоден віджет Tk, тому блок
+    # малюється на Canvas: dash=(4,3) там рідна можливість, без картинок і
+    # без PIL. Перемальовується на <Configure>, бо ширина відома лише після
+    # того, як менеджер геометрії розклав вікно.
+    def _tunnel_locked_block(self, parent, text):
+        canvas = tk.Canvas(parent, bg=self._SRV_BG, highlightthickness=0, height=48, bd=0)
+        canvas.pack(fill="x", pady=(14, 0))
+
+        def redraw(event=None):
+            canvas.delete("all")
+            width = canvas.winfo_width()
+            if width <= 1:
+                return
+            canvas.create_rectangle(1, 1, width - 2, 46, dash=(4, 3), outline=self._SRV_BORDER)
+            canvas.create_text(width / 2, 24, text=text, fill="#5E656E", font=("Segoe UI", 9))
+
+        canvas.bind("<Configure>", redraw)
+        redraw()
+        return canvas
+
+    def _tunnel_warning(self, parent, text, before=None):
+        strip = tk.Frame(
+            parent, bg=self._SRV_WARN_BG, highlightthickness=1, highlightbackground=self._SRV_WARN_BORDER,
+            highlightcolor=self._SRV_WARN_BORDER, padx=8, pady=5,
+        )
+        tk.Label(
+            strip, text=text, bg=self._SRV_WARN_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=self._TUNNEL_WIDTH - 70,
+        ).pack(fill="x")
+        if before is not None:
+            strip.pack(fill="x", pady=(0, 4), before=before)
+        else:
+            strip.pack(fill="x", pady=(0, 4))
+        return strip
+
+    # Один фоновий прохід по Cloudflare: акаунт -> зони -> адреси тунелів ->
+    # тунелі -> конектори ТОГО тунелю, що обслуговує поточну адресу. Зібрано
+    # в одному місці, щоб UI-код не тримав ланцюжок із п'яти залежних
+    # запитів і не малював кожен проміжний стан.
+    def _load_cloudflare_overview(self, token, hostname):
+        accounts, error = cloudflare_api.list_accounts(token)
+        if error:
+            return None, error
+        if not accounts:
+            return None, self._t("Токен не бачить жодного акаунта Cloudflare.")
+        account_id = accounts[0]["id"]
+
+        zones, error = cloudflare_api.list_zones(token)
+        if error:
+            return None, error
+
+        addresses = []
+        unreadable_zones = []
+        for zone in zones:
+            zone_addresses, zone_error = cloudflare_api.list_tunnel_addresses(token, zone["id"])
+            if zone_error:
+                unreadable_zones.append(zone["name"])
+                continue
+            for address in zone_addresses:
+                address["zone_id"] = zone["id"]
+                address["zone_name"] = zone["name"]
+                addresses.append(address)
+        addresses.sort(key=lambda item: item["hostname"])
+
+        tunnels, error = cloudflare_api.list_tunnels(token, account_id)
+        if error:
+            return None, error
+
+        current = next((item for item in addresses if item["hostname"] == hostname), None)
+        tunnel_id = current["tunnel_id"] if current else ""
+        tunnel_name = next((item["name"] for item in tunnels if item["id"] == tunnel_id), "")
+        connectors = []
+        if tunnel_id:
+            connectors, connectors_error = cloudflare_api.list_connectors(token, account_id, tunnel_id)
+            if connectors_error:
+                connectors = []
+        # Реєстратор - НЕ обов'язкова частина: домен може бути куплений не
+        # в Cloudflare, і тоді список просто порожній. Помилку тут навмисно
+        # ковтаємо: через неї не має падати все вікно.
+        registrar, _registrar_error = cloudflare_api.list_registrar_domains(token, account_id)
+        return {
+            "account_id": account_id, "zones": zones, "addresses": addresses, "tunnels": tunnels,
+            "tunnel_id": tunnel_id, "tunnel_name": tunnel_name, "connectors": connectors,
+            "registrar": registrar, "unreadable_zones": unreadable_zones,
+        }, None
+
+    # Ті самі кольори попередження, що вже в макеті й у client_app.py -
+    # окремими константами, бо вживаються і у вікні "Тунель", і в обох
+    # його діалогах.
+    _SRV_WARN_BG = "#3A2520"
+    _SRV_WARN_BORDER = "#7A2410"
+    _SRV_WARN_TEXT = "#F3C2B4"
+
+    def _tunnel_dialog_shell(self, title, width=460):
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=self._SRV_BG)
+        window.transient(self.root)
+        window.grab_set()
+        card = tk.Frame(window, bg=self._SRV_BG, padx=14, pady=12)
+        card.pack(fill="both", expand=True)
+        tk.Label(
+            card, text=title, bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 11, "bold"), anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+        window.bind("<Escape>", lambda event: window.destroy())
+        return window, card
+
+    def _tunnel_dropdown(self, parent, variable, values):
+        menu = tk.OptionMenu(parent, variable, *(values or [""]))
+        menu.configure(
+            bg="#15181B", fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0,
+            font=("Segoe UI", 9), anchor="w",
+        )
+        menu["menu"].configure(
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ACCENT,
+            activeforeground=self._SRV_TEXT, font=("Segoe UI", 9),
+        )
+        return menu
+
+    def _open_attach_address_dialog(self, state, on_done):
+        data = state.get("cf") or {}
+        zones = data.get("zones") or []
+        tunnels = data.get("tunnels") or []
+        if not zones or not tunnels:
+            messagebox.showinfo(
+                self._t("Тунель"),
+                self._t("Cloudflare ще не відповів списком доменів і тунелів — спробуйте «Обновить»."),
+            )
+            return
+
+        window, card = self._tunnel_dialog_shell(self._t("Приєднати адресу"))
+
+        # Два поля - два підписи, кожен рівно над своїм. Grid, а не pack:
+        # інакше підписи "пливуть" відносно колонок.
+        name_block = tk.Frame(card, bg=self._SRV_BG)
+        name_block.pack(fill="x", pady=(0, 10))
+        name_block.grid_columnconfigure(0, weight=2)
+        name_block.grid_columnconfigure(2, weight=3)
+        tk.Label(
+            name_block, text=self._t("Піддомен (наприклад bot)"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+        tk.Label(
+            name_block, text=self._t("Домен"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).grid(row=0, column=2, sticky="w", pady=(0, 3))
+        subdomain_var = tk.StringVar()
+        subdomain_entry = tk.Entry(
+            name_block, textvariable=subdomain_var, bg="#15181B", fg=self._SRV_TEXT,
+            insertbackground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_ACCENT, highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9),
+        )
+        subdomain_entry.grid(row=1, column=0, sticky="ew", ipady=4)
+        tk.Label(name_block, text=".", bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 9)).grid(
+            row=1, column=1, padx=5)
+        zone_var = tk.StringVar(value=zones[0]["name"])
+        self._tunnel_dropdown(name_block, zone_var, [zone["name"] for zone in zones]).grid(
+            row=1, column=2, sticky="ew")
+
+        tk.Label(
+            card, text=self._t("До якого тунелю"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).pack(fill="x")
+        tunnel_var = tk.StringVar(value=tunnels[0]["name"])
+        self._tunnel_dropdown(card, tunnel_var, [item["name"] for item in tunnels]).pack(
+            fill="x", pady=(4, 10))
+
+        preview_var = tk.StringVar()
+        tk.Label(
+            card, textvariable=preview_var, bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, font=("Segoe UI", 9),
+            anchor="w", padx=8, pady=6, highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_BORDER,
+        ).pack(fill="x", pady=(0, 10))
+
+        def clean_subdomain():
+            """Домен, вписаний у поле піддомену, відкидаємо: людина природно
+            вписує туди повну адресу, а склеювання давало aibotapp.uk.aibotapp.uk."""
+            value = subdomain_var.get().strip().strip(".").lower()
+            zone = zone_var.get().strip().lower()
+            if not value or not zone:
+                return value
+            if value == zone:
+                return ""
+            if value.endswith("." + zone):
+                return value[: -(len(zone) + 1)]
+            return value
+
+        def update_preview(*_args):
+            subdomain = clean_subdomain()
+            full = f"{subdomain}.{zone_var.get()}" if subdomain else zone_var.get()
+            preview_var.set(f"{full} → {tunnel_var.get()}")
+
+        for variable in (subdomain_var, zone_var, tunnel_var):
+            variable.trace_add("write", update_preview)
+        update_preview()
+
+        tk.Label(
+            card,
+            text=self._t("У списку лише домени, вже додані у ваш Cloudflare. Новий куплений домен спершу "
+                         "треба додати туди й перевести на його сервери імен — кнопкою це не робиться."),
+            bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8), anchor="w", justify="left",
+            wraplength=420,
+        ).pack(fill="x", pady=(0, 12))
+
+        buttons = tk.Frame(card, bg=self._SRV_BG)
+        buttons.pack(fill="x")
+        result_var = tk.StringVar()
+        result_label = tk.Label(
+            card, textvariable=result_var, bg=self._SRV_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=420,
+        )
+        result_label.pack(fill="x", pady=(8, 0))
+
+        def do_attach():
+            subdomain = clean_subdomain()
+            zone = next((item for item in zones if item["name"] == zone_var.get()), None)
+            tunnel = next((item for item in tunnels if item["name"] == tunnel_var.get()), None)
+            if zone is None or tunnel is None:
+                return
+            hostname = f"{subdomain}.{zone['name']}" if subdomain else zone["name"]
+            attach_button.config(state="disabled", text=self._t("Приєдную..."))
+            result_var.set("")
+
+            def worker():
+                _result, error = cloudflare_api.attach_address(
+                    state.get("token") or "", zone["id"], hostname, tunnel["id"])
+
+                def apply():
+                    if not window.winfo_exists():
+                        return
+                    if error:
+                        # Право ЗАПИСУ в DNS неможливо перевірити наперед -
+                        # воно спливає саме тут, тож помилка показується
+                        # прямим текстом, а не мовчазним нічого-не-сталося.
+                        attach_button.config(state="normal", text=self._t("Приєднати"))
+                        result_var.set(error)
+                        return
+                    window.destroy()
+                    on_done()
+
+                self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        attach_button = tk.Button(
+            buttons, text=self._t("Приєднати"), command=do_attach,
+            bg="#1B3559", fg="#CFE3FA", activebackground=self._SRV_ACCENT, activeforeground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground=self._SRV_ACCENT,
+            highlightcolor=self._SRV_ACCENT, bd=0, padx=14, pady=5, font=("Segoe UI", 9),
+        )
+        attach_button.pack(side="left")
+        tk.Button(
+            buttons, text=self._t("Скасувати"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=14, pady=5,
+            font=("Segoe UI", 9),
+        ).pack(side="right")
+        subdomain_entry.focus_set()
+        self._size_dialog_to_content(window, 460)
+
+    # Від'єднання - єдина справді незворотна дія в цьому вікні: DNS-запис
+    # зникає, і бот із формою за цією адресою перестають відповідати
+    # ОДРАЗУ. Тому не messagebox.askyesno (одне випадкове натискання
+    # Enter - і продакшн лежить), а ввід повного імені хоста: доки текст
+    # не збігається СИМВОЛ У СИМВОЛ, кнопка лишається неактивною.
+    def _confirm_detach_address(self, state, address, on_done):
+        window, card = self._tunnel_dialog_shell(self._t("Від'єднати адресу"), width=440)
+
+        warning = tk.Frame(
+            card, bg=self._SRV_WARN_BG, highlightthickness=1, highlightbackground=self._SRV_WARN_BORDER,
+            highlightcolor=self._SRV_WARN_BORDER, padx=8, pady=6,
+        )
+        warning.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            warning,
+            text=self._t("Бот і форма за цією адресою перестануть відповідати одразу. Повернути можна лише "
+                         "повторним приєднанням."),
+            bg=self._SRV_WARN_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8), anchor="w",
+            justify="left", wraplength=400,
+        ).pack(fill="x")
+
+        prompt = tk.Frame(card, bg=self._SRV_BG)
+        prompt.pack(fill="x")
+        tk.Label(
+            prompt, text=self._t("Введіть"), bg=self._SRV_BG, fg=self._SRV_MUTED, font=("Segoe UI", 8),
+        ).pack(side="left")
+        tk.Label(
+            prompt, text=address["hostname"], bg=self._SRV_BG, fg=self._SRV_TEXT, font=("Segoe UI", 8, "bold"),
+        ).pack(side="left", padx=4)
+        tk.Label(
+            prompt, text=self._t("для підтвердження:"), bg=self._SRV_BG, fg=self._SRV_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+
+        typed_var = tk.StringVar()
+        entry = tk.Entry(
+            card, textvariable=typed_var, bg="#15181B", fg=self._SRV_TEXT, insertbackground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground=self._SRV_BORDER,
+            highlightcolor=self._SRV_ACCENT, font=("Segoe UI", 9),
+        )
+        entry.pack(fill="x", pady=(4, 12), ipady=4)
+
+        result_var = tk.StringVar()
+        tk.Label(
+            card, textvariable=result_var, bg=self._SRV_BG, fg=self._SRV_WARN_TEXT, font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=400,
+        ).pack(fill="x", pady=(0, 8))
+
+        buttons = tk.Frame(card, bg=self._SRV_BG)
+        buttons.pack(fill="x")
+
+        def do_detach():
+            detach_button.config(state="disabled", text=self._t("Від'єдную..."))
+            result_var.set("")
+
+            def worker():
+                ok, error = cloudflare_api.detach_address(
+                    state.get("token") or "", address["zone_id"], address["record_id"])
+
+                def apply():
+                    if not window.winfo_exists():
+                        return
+                    if not ok:
+                        detach_button.config(state="normal", text=self._t("Від'єднати"))
+                        result_var.set(error or self._t("Не вдалось від'єднати."))
+                        return
+                    window.destroy()
+                    on_done()
+
+                self._run_on_main_thread(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        detach_button = tk.Button(
+            buttons, text=self._t("Від'єднати"), command=do_detach, state="disabled",
+            bg="#2A1D1A", fg="#6E4B42", activebackground=self._SRV_WARN_BG, activeforeground=self._SRV_TEXT,
+            relief="flat", highlightthickness=1, highlightbackground="#4A2A20", highlightcolor="#4A2A20",
+            bd=0, padx=14, pady=5, font=("Segoe UI", 9), disabledforeground="#6E4B42",
+        )
+        detach_button.pack(side="left")
+        tk.Button(
+            buttons, text=self._t("Скасувати"), command=window.destroy,
+            bg=self._SRV_ROW_BG, fg=self._SRV_TEXT, activebackground=self._SRV_ROW_ACTIVE_BG,
+            activeforeground=self._SRV_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=self._SRV_BORDER, highlightcolor=self._SRV_BORDER, bd=0, padx=14, pady=5,
+            font=("Segoe UI", 9),
+        ).pack(side="right")
+
+        def on_typed(*_args):
+            matches = typed_var.get().strip() == address["hostname"]
+            detach_button.config(
+                state="normal" if matches else "disabled",
+                bg="#3A2520" if matches else "#2A1D1A",
+                fg="#E39C88" if matches else "#6E4B42",
+                highlightbackground=self._SRV_WARN_BORDER if matches else "#4A2A20",
+            )
+
+        typed_var.trace_add("write", on_typed)
+        entry.focus_set()
+        self._size_dialog_to_content(window, 440)
+
+    def _size_dialog_to_content(self, window, width):
+        window.update_idletasks()
+        height = min(window.winfo_reqheight(), window.winfo_screenheight() - 160)
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        root_width = self.root.winfo_width()
+        x = root_x + max((root_width - width) // 2, 0)
+        window.geometry(f"{width}x{height}+{max(x, 0)}+{max(root_y + 80, 0)}")
 
     def open_publish_updates_dialog(self):
         window = tk.Toplevel(self.root)
@@ -6180,8 +7337,18 @@ class ExcelViewerApp:
                     # чужим settings.json чи тестовою app_data.sqlite3 не
                     # публікується (друге додано того ж дня - client_app.py
                     # постраждав саме від тестової бази даних, не settings.json).
-                    stray_settings = list(gui_release_dir.rglob("settings.json")) + list(
-                        gui_release_dir.rglob("app_data.sqlite3")
+                    # Токени (2026-08-20) додані сюди разом із вікном
+                    # "Тунель": cloudflare_token.txt має право ЗМІНЮВАТИ
+                    # DNS, github_token.txt - публікувати релізи. Жоден із
+                    # них не має шансу поїхати в чужі руки разом із пакетом.
+                    self._assert_build_is_fresh(
+                        gui_release_dir / "AI_Automation_Home.exe", BASE_DIR / "gui.py",
+                    )
+                    stray_settings = (
+                        list(gui_release_dir.rglob("settings.json"))
+                        + list(gui_release_dir.rglob("app_data.sqlite3"))
+                        + list(gui_release_dir.rglob("github_token.txt"))
+                        + list(gui_release_dir.rglob("cloudflare_token.txt"))
                     )
                     if stray_settings:
                         raise RuntimeError(
@@ -6333,6 +7500,79 @@ class ExcelViewerApp:
                 )
                 return
             self._write_github_publish_token(token)
+
+            # Реальний глухий кут (2026-08-21, живе тестування): версію
+            # опублікували в тестовий канал, вона пройшла перевірку - і
+            # віддати ТОЙ САМИЙ пакет у стабільний виявилось нічим.
+            # Повторна публікація впиралась у 422 "Увеличьте номер версии",
+            # а це порада гірша за проблему: у продакшн поїхала б щойно
+            # зібрана, ще не перевірена збірка замість відтестованої.
+            # Канал - це рідний прапорець prerelease того самого релізу,
+            # тож тут його просто перемикаємо, лишаючи файл недоторканим.
+            existing_tag = github_releases.CLIENT_TAG_PREFIX + client_version
+            try:
+                existing_release = github_releases.find_release_by_tag(
+                    paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO,
+                    existing_tag, token=token,
+                )
+            except Exception as exc:
+                messagebox.showerror(self._t("Публікація оновлень"), self._t(str(exc)))
+                return
+            if existing_release is not None:
+                already_test = bool(existing_release.get("prerelease"))
+                if already_test == bool(is_test_release):
+                    messagebox.showerror(
+                        self._t("Публікація оновлень"),
+                        self._t(
+                            "Версія {version} вже опублікована в {channel} каналі. Щоб випустити НОВУ "
+                            "збірку, підніміть номер версії в client_app.py і перезберіть."
+                        ).format(
+                            version=client_version,
+                            channel=self._t("тестовому") if already_test else self._t("стабільному"),
+                        ),
+                    )
+                    return
+                assets = existing_release.get("assets") or []
+                uploaded = (assets[0].get("updated_at") or "")[:16].replace("T", " ") if assets else "—"
+                if is_test_release:
+                    question = self._t(
+                        "Версія {version} зараз у СТАБІЛЬНОМУ каналі.\n\n"
+                        "Повернути її в тестовий? Файл лишиться той самий (завантажений {uploaded} UTC), "
+                        "але стабільні клієнти перестануть його бачити."
+                    )
+                else:
+                    question = self._t(
+                        "Версія {version} вже опублікована в тестовому каналі.\n\n"
+                        "Просунути її в стабільний? У клієнтів піде РІВНО той файл, що вже завантажений "
+                        "({uploaded} UTC) — той самий, який ви щойно перевірили на тесті, а не поточна "
+                        "локальна збірка."
+                    )
+                if not messagebox.askyesno(
+                    self._t("Публікація оновлень"),
+                    question.format(version=client_version, uploaded=uploaded),
+                ):
+                    return
+                try:
+                    github_releases.set_release_channel(
+                        token, paths.GITHUB_RELEASES_OWNER, paths.GITHUB_RELEASES_REPO,
+                        existing_tag, is_test_release,
+                    )
+                except Exception as exc:
+                    messagebox.showerror(self._t("Публікація оновлень"), self._t(str(exc)))
+                    return
+                moved_to = self._t("тестовий") if is_test_release else self._t("стабільний")
+                publish_result_text.set(
+                    self._t("{tag} переведено в {channel} канал.").format(tag=existing_tag, channel=moved_to)
+                )
+                messagebox.showinfo(
+                    self._t("Публікація оновлень"),
+                    self._t(
+                        "{tag} тепер у {channel} каналі. Файл не перезавантажувався — клієнти отримають "
+                        "той самий пакет."
+                    ).format(tag=existing_tag, channel=moved_to),
+                )
+                return
+
             # Реальна знахідка (2026-08-15, живий продакшн): "не удалось
             # создать снимок кода перед публикацией" - той самий клас багу,
             # що вже виправлений у client_app.py - у зібраній версії
@@ -6375,8 +7615,14 @@ class ExcelViewerApp:
                     # журнали) робочого ПК при оновленні. Публікація
                     # client-v0.2.57 з цим файлом уже сталась ДО того, як
                     # цю перевірку додано - виправлено republish'ом v0.2.58.
-                    stray_settings = list(client_dist_dir.rglob("settings.json")) + list(
-                        client_dist_dir.rglob("app_data.sqlite3")
+                    self._assert_build_is_fresh(
+                        client_dist_dir / "AI_Automation_Client.exe", BASE_DIR / "client_app.py",
+                    )
+                    stray_settings = (
+                        list(client_dist_dir.rglob("settings.json"))
+                        + list(client_dist_dir.rglob("app_data.sqlite3"))
+                        + list(client_dist_dir.rglob("github_token.txt"))
+                        + list(client_dist_dir.rglob("cloudflare_token.txt"))
                     )
                     if stray_settings:
                         raise RuntimeError(
@@ -6436,7 +7682,7 @@ class ExcelViewerApp:
     # Задача користувача (2026-08-14): "вирівняти таблицю... де має бути
     # попередження, що нічого видалено не буде, будуть просто зняті всі
     # фільтри, та вирівняні всі стовпці та рядки під стандарт" - синхронно
-    # (як і save_source/sync_excel_manually поруч - локальний файл, це
+    # (локальний файл, це
     # швидко), із чітким текстом попередження ПЕРЕД дією, як і скрізь
     # інде в цьому застосунку для дій, що торкаються реального Excel-файлу.
     def align_excel_table(self):
@@ -6456,7 +7702,8 @@ class ExcelViewerApp:
         # роботи - той самий фон-потік + _run_on_main_thread паттерн, що вже
         # використовується для решти файлового I/O в цьому класі (коментар
         # вище про "локальный файл, це швидко" не враховував великі таблиці).
-        self.align_table_button.config(state="disabled")
+        if self.align_table_button is not None:
+            self.align_table_button.config(state="disabled")
 
         def worker():
             error = None
@@ -6466,7 +7713,8 @@ class ExcelViewerApp:
                 error = str(exc)
 
             def finish():
-                self.align_table_button.config(state="normal")
+                if self.align_table_button is not None:
+                    self.align_table_button.config(state="normal")
                 if error:
                     messagebox.showerror(self._t("Вирівняти таблицю"), error)
                 else:
@@ -6918,6 +8166,25 @@ class ExcelViewerApp:
             return f"{value:%d.%m.%y %H:%M}"
         return f"{value:%Y.%m.%d} {weekday} {value:%H:%M}"
 
+    def _action_log_short_time(self, created_at):
+        """Час для вузького переліку: сьогоднішнє - самим часом, учорашнє -
+        словом, старше - датою без року. Рахується з самої позначки, а не з
+        відформатованого рядка: формат дати налаштовуваний (date_format), і
+        в частині варіантів час стоїть попереду дати. Повна позначка
+        лишається праворуч у подробицях."""
+        try:
+            value = datetime.fromisoformat(str(created_at))
+        except (TypeError, ValueError):
+            return str(created_at or "")
+        days_ago = (datetime.now().date() - value.date()).days
+        if days_ago == 0:
+            return f"{value:%H:%M}"
+        if days_ago == 1:
+            return self._t("вчора")
+        if value.year == datetime.now().year:
+            return f"{value:%d.%m}"
+        return f"{value:%d.%m.%y}"
+
     def _format_action_log_time(self, created_at):
         try:
             value = datetime.fromisoformat(str(created_at))
@@ -6967,10 +8234,13 @@ class ExcelViewerApp:
     # результат повертається через _run_on_main_thread.
     def _refresh_action_log(self):
         self._clear_frame(self.action_log_list_frame)
+        self._action_log_row_widgets = {}
+        self._action_log_selected_id = None
         tk.Label(
             self.action_log_list_frame, text=self._t("Завантаження..."), anchor="w",
         ).pack(anchor="w", fill="x", pady=4)
         self._apply_theme(self.action_log_list_frame)
+        self._action_log_detail_placeholder("Завантаження...")
 
         # Реальний баг (аудит коду, 2026-08-15): без лічильника поколінь
         # запізніла відповідь РАНІШЕ розпочатого (але повільнішого через
@@ -6995,11 +8265,16 @@ class ExcelViewerApp:
         if rows is None:
             tk.Label(
                 self.action_log_list_frame,
-                text=self._t("Не вдалось отримати журнал з client_app.py. Перевірте з'єднання."),
+                text=self._t("Немає зв'язку з client_app.py."),
                 fg="#d1242f",
                 anchor="w",
+                wraplength=self._ACTION_LOG_LIST_WIDTH - 30,
+                justify="left",
             ).pack(anchor="w", fill="x", pady=4)
             self._apply_theme(self.action_log_list_frame)
+            self._action_log_detail_placeholder(
+                "Не вдалось отримати журнал з client_app.py. Перевірте з'єднання."
+            )
             return
         self._remote_action_log_rows = {row[0]: row for row in rows}
         if not rows:
@@ -7009,144 +8284,74 @@ class ExcelViewerApp:
                 anchor="w",
             ).pack(anchor="w", fill="x", pady=4)
             self._apply_theme(self.action_log_list_frame)
+            self._action_log_detail_placeholder("Журнал действий пока пуст.")
             return
 
+        self._action_log_row_widgets = {}
         for log_id, action_type, details_json, created_at in rows:
             details = self._parse_action_log_details(details_json)
             summary = self._action_log_summary(action_type, details)
+            _chip_bg, chip_fg = self._action_log_status_style(details.get("status"))
+
             row = tk.Frame(self.action_log_list_frame)
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x")
 
-            values = (
-                self._short_text(summary["user"], 20),
-                self._short_text(summary["action"], 18),
-                self._short_text(summary["status"], 16),
-                self._short_text(self._format_action_log_time(created_at), 22),
-                self._short_text(summary["text"], 46),
-            )
-            widths = (20, 18, 16, 22, 46)
-            for value, width in zip(values, widths):
-                tk.Label(row, text=value, width=width, anchor="w").pack(side="left")
+            mark = tk.Label(row, text=" ", fg="#0969da", font=("Segoe UI", 9))
+            mark.pack(side="left", fill="y")
 
-            detail_button = tk.Button(
-                row,
-                text=self._t("Детально"),
-                command=lambda item_id=log_id: self.open_action_log_details(item_id),
+            inner = tk.Frame(row)
+            inner.pack(side="left", fill="x", expand=True, padx=(2, 8), pady=5)
+
+            # Перший ярус - людина (рішення користувача 2026-09-07: «акцент
+            # має бути на користувачеві, а в ньому вже дія»), другий - сама
+            # дія. Раніше було навпаки.
+            person, _who_details = self._action_log_person(details.get("telegram"))
+            line1 = tk.Frame(inner)
+            line1.pack(fill="x")
+            who = tk.Label(
+                line1, text=self._short_text(person, 26), anchor="w", font=("Segoe UI", 10, "bold"),
             )
-            detail_button.pack(side="left", padx=(8, 0))
+            who.pack(side="left")
+            when = tk.Label(
+                line1, text=self._action_log_short_time(created_at), anchor="e", fg="#8c959f",
+                font=("Segoe UI", 8),
+            )
+            when.pack(side="right")
+
+            # Другий ярус: дія і що людина написала. Тут - і тільки тут -
+            # текст обрізається: перелік навмисно вузький, а повний текст
+            # видно праворуч у подробицях.
+            line2 = tk.Frame(inner)
+            line2.pack(fill="x")
+            dot = tk.Label(line2, text="●", fg=chip_fg, font=("Segoe UI", 8))
+            dot.pack(side="left", padx=(0, 6))
+            deed = "%s · %s" % (summary["action"], summary["text"]) if summary["text"] else summary["action"]
+            action = tk.Label(
+                line2, text=self._short_text(deed, 42), anchor="w", fg="#8c959f",
+                font=("Segoe UI", 8),
+            )
+            action.pack(side="left")
+
+            self._action_log_row_widgets[log_id] = {
+                "row": row,
+                "mark": mark,
+                "action": action,
+                "who": who,
+                "painted": [inner, line1, line2, dot, action, when, who, mark],
+            }
+            for widget in (row, inner, line1, line2, dot, action, when, who, mark):
+                widget.bind("<Button-1>", lambda event, item_id=log_id: self._select_action_log_row(item_id))
         self._apply_theme(self.action_log_list_frame)
+        # Перший запис обраний одразу: порожня панель праворуч на старті
+        # нічого б не пояснювала.
+        first_id = rows[0][0]
+        self._action_log_selected_id = None
+        self._select_action_log_row(first_id)
 
-    def _refresh_work_log(self):
-        self._clear_frame(self.work_log_list_frame)
-        rows = self.store.list_work_log(200)
-        if not rows:
-            tk.Label(
-                self.work_log_list_frame,
-                text=self._t("Журнал виконаних робіт поки порожній."),
-                anchor="w",
-            ).pack(anchor="w", fill="x", pady=4)
-            return
 
-        for log_id, title, summary, benefit, future_impact, created_at in rows:
-            row = tk.Frame(self.work_log_list_frame)
-            row.pack(fill="x", pady=2)
 
-            values = (
-                self._short_text(self._format_action_log_time(created_at), 20),
-                self._short_text(title, 30),
-                self._short_text(summary.replace("\n", " "), 50),
-            )
-            widths = (20, 30, 50)
-            for value, width in zip(values, widths):
-                tk.Label(row, text=value, width=width, anchor="w").pack(side="left")
 
-            detail_button = tk.Button(
-                row,
-                text=self._t("Детально"),
-                command=lambda item_id=log_id: self.open_work_log_details(item_id),
-            )
-            detail_button.pack(side="left", padx=(8, 0))
 
-            delete_button = tk.Button(
-                row,
-                text=self._t("Видалити"),
-                command=lambda item_id=log_id: self.delete_work_log_record(item_id),
-            )
-            delete_button.pack(side="left", padx=(4, 0))
-
-    def delete_work_log_record(self, log_id):
-        if not messagebox.askyesno(
-            self._t("Журнал виконаних робіт"),
-            self._t("Видалити запис #{value}?").format(value=log_id),
-            parent=self.root,
-        ):
-            return
-        self.store.delete_work_log_entry(log_id)
-        self._refresh_work_log()
-
-    def clear_work_log(self):
-        if not messagebox.askyesno(
-            self._t("Журнал виконаних робіт"),
-            self._t("Видалити всі записи журналу? Цю дію не можна скасувати."),
-            parent=self.root,
-        ):
-            return
-        self.store.clear_work_log()
-        self._refresh_work_log()
-
-    def open_work_log_details(self, log_id):
-        existing = self._work_log_detail_windows.get(log_id)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
-
-        row = self.store.get_work_log_entry(log_id)
-        if not row:
-            messagebox.showinfo(self._t("Журнал виконаних робіт"), self._t("Запис не знайдено."))
-            return
-
-        log_id, title, summary, benefit, future_impact, created_at = row
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Деталі запису #{value}").format(value=log_id))
-        window.geometry("760x560")
-        self._work_log_detail_windows[log_id] = window
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=12, pady=8)
-        tk.Label(
-            top,
-            text=f"{self._format_action_log_time(created_at)} | {title}",
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-        tk.Button(
-            top, text=self._t("Закрити"),
-            command=lambda: self._close_work_log_detail_window(log_id, window),
-        ).pack(side="right")
-        window.protocol("WM_DELETE_WINDOW", lambda: self._close_work_log_detail_window(log_id, window))
-        window.bind("<Escape>", lambda event: self._close_work_log_detail_window(log_id, window))
-
-        text_widget = tk.Text(window, wrap="word")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        text_widget.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=(0, 12))
-        scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=(0, 12))
-
-        lines = [self._t("Що зроблено:"), summary, ""]
-        if benefit:
-            lines.extend([self._t("Що це дає:"), benefit, ""])
-        if future_impact:
-            lines.extend([self._t("На що вплине в майбутньому:"), future_impact])
-        text_widget.insert("1.0", "\n".join(lines))
-        text_widget.configure(state="normal")
-        self._center_window(window, width=760, height=560)
-
-    def _close_work_log_detail_window(self, log_id, window):
-        if self._work_log_detail_windows.get(log_id) is window:
-            del self._work_log_detail_windows[log_id]
-        window.destroy()
 
     def _parse_action_log_details(self, details_json):
         try:
@@ -7169,6 +8374,30 @@ class ExcelViewerApp:
             "action": command,
             "text": str(text).replace("\n", " "),
         }
+
+    def _action_log_person(self, telegram):
+        """Людина двома частинами: чим її звати (заголовок) і чим уточнити
+        (@нік та id). Задача користувача (2026-09-07): «акцент має бути на
+        користувачеві» - тому імʼя окремо, а не злите з ніком одним рядком,
+        як у _action_log_user_label нижче."""
+        telegram = telegram or {}
+        full_name = str(telegram.get("full_name") or "").strip()
+        username = str(telegram.get("username") or "").strip()
+        user_id = str(telegram.get("user_id") or "").strip()
+        if full_name:
+            title = full_name
+        elif username:
+            title = "@%s" % username
+        elif user_id:
+            title = user_id
+        else:
+            title = self._t("Неизвестно")
+        parts = []
+        if full_name and username:
+            parts.append("@%s" % username)
+        if user_id:
+            parts.append("id %s" % user_id)
+        return title, " · ".join(parts)
 
     def _action_log_user_label(self, telegram):
         full_name = telegram.get("full_name") or ""
@@ -7207,6 +8436,7 @@ class ExcelViewerApp:
             "claude_key_help": "Инструкция Claude API",
             "claude_chat": "Разговор с Claude",
             "stock_income_history": "История прихода",
+            "operation_rolled_back": "Откат операции",
             "status": "Статус",
             "start": "Старт",
             "help": "Помощь",
@@ -7233,63 +8463,6 @@ class ExcelViewerApp:
             )
         return str(reply.get("text", ""))
 
-    def _format_action_log_details(self, log_id, action_type, created_at, details):
-        telegram = details.get("telegram") or {}
-        reply = details.get("reply") or {}
-        pending_before = details.get("pending_before")
-        pending_after = details.get("pending_after")
-        lines = [
-            f"Запись журнала: #{log_id}",
-            f"Время: {self._format_action_log_time(created_at)}",
-            f"Пользователь: {self._action_log_user_label(telegram)}",
-            f"Telegram user_id: {telegram.get('user_id', '')}",
-            f"Telegram chat_id: {telegram.get('chat_id', '')}",
-            "",
-            "Запрос пользователя:",
-            details.get("incoming_text") or "",
-            "",
-            f"Действие: {self._action_log_action_label(details.get('recognized_command') or action_type)}",
-            f"Статус: {self._action_log_status_label(details.get('status'))}",
-            f"Режим обработки: {self._request_processing_mode_title(details.get('mode'))}",
-            f"Версия pipeline: {details.get('pipeline_version', '')}",
-            f"Время обработки: {details.get('duration_ms', '')} мс",
-        ]
-        if pending_before:
-            lines.extend(
-                [
-                    "",
-                    "Операция до сообщения:",
-                    f"Тип: {pending_before.get('operation_type', '')}",
-                    f"Этап: {pending_before.get('status', '')}",
-                ]
-            )
-        if pending_after:
-            lines.extend(
-                [
-                    "",
-                    "Операция после сообщения:",
-                    f"Тип: {pending_after.get('operation_type', '')}",
-                    f"Этап: {pending_after.get('status', '')}",
-                ]
-            )
-        lines.extend(
-            [
-                "",
-                "Ответ пользователю:",
-                self._action_log_reply_label(reply),
-            ]
-        )
-        if details.get("error"):
-            lines.extend(["", "Ошибка:", str(details.get("error"))])
-
-        lines.extend(
-            [
-                "",
-                "Технические данные:",
-                json.dumps(details, ensure_ascii=False, indent=2),
-            ]
-        )
-        return "\n".join(lines)
 
     def _short_text(self, text, max_length):
         text = str(text or "")
@@ -7314,63 +8487,7 @@ class ExcelViewerApp:
         y = root_y + max((root_height - height) // 2, 0)
         window.geometry(f"{width}x{height}+{x}+{y}")
 
-    def open_action_log_details(self, log_id):
-        existing = self._action_log_detail_windows.get(log_id)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
 
-        # Задача користувача (2026-08-15): "синхронізація" - рядок уже
-        # прийшов через тунель у _refresh_action_log вище (закешований у
-        # _remote_action_log_rows) - повторний round-trip тут не потрібен.
-        row = self._remote_action_log_rows.get(log_id)
-        if not row:
-            messagebox.showinfo(self._t("Журнал действий"), self._t("Запись не найдена."))
-            return
-
-        log_id, action_type, details_json, created_at = row
-        details = self._parse_action_log_details(details_json)
-        window = tk.Toplevel(self.root)
-        window.title(self._t("Деталі журналу дій #{value}").format(value=log_id))
-        window.geometry("760x560")
-        self._action_log_detail_windows[log_id] = window
-
-        top = tk.Frame(window)
-        top.pack(side="top", fill="x", padx=12, pady=8)
-        tk.Label(
-            top,
-            text=(
-                f"{self._format_action_log_time(created_at)} | "
-                f"{self._action_log_action_label(details.get('recognized_command') or action_type)}"
-            ),
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-        tk.Button(
-            top, text=self._t("Закрыть"),
-            command=lambda: self._close_action_log_detail_window(log_id, window),
-        ).pack(side="right")
-        window.protocol("WM_DELETE_WINDOW", lambda: self._close_action_log_detail_window(log_id, window))
-        window.bind("<Escape>", lambda event: self._close_action_log_detail_window(log_id, window))
-
-        text_widget = tk.Text(window, wrap="word")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        text_widget.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=(0, 12))
-        scrollbar.pack(side="right", fill="y", padx=(0, 12), pady=(0, 12))
-        text_widget.insert(
-            "1.0",
-            self._format_action_log_details(log_id, action_type, created_at, details),
-        )
-        text_widget.configure(state="normal")
-        self._center_window(window, width=760, height=560)
-
-    def _close_action_log_detail_window(self, log_id, window):
-        if self._action_log_detail_windows.get(log_id) is window:
-            del self._action_log_detail_windows[log_id]
-        window.destroy()
 
     # --- Команди бота і персонал (список Telegram-користувачів) ---
     def _refresh_commands(self):
@@ -7634,16 +8751,20 @@ class ExcelViewerApp:
         generation = self._personnel_refresh_generation
 
         def worker():
-            users = remote_control_client.fetch_remote_personnel()
-            self._run_on_main_thread(lambda: self._apply_personnel_rows(users, generation))
+            payload = remote_control_client.fetch_remote_personnel_payload()
+            self._run_on_main_thread(lambda: self._apply_personnel_rows(payload, generation))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_personnel_rows(self, users, generation=None):
+    def _apply_personnel_rows(self, payload, generation=None):
         if getattr(self, "personnel_list_frame", None) is None:
             return
         if generation is not None and generation != self._personnel_refresh_generation:
             return
+        users = payload["users"] if payload else None
+        # Підписи й кольори ролей - з клієнта (там живуть свої ролі), не з
+        # permissions.py; без зв'язку - порожньо, бейджі малюються сірими.
+        self._personnel_roles_cache = list(payload.get("roles") or []) if payload else []
         # Задача користувача (2026-08-17): кешуємо СИРИЙ список - сортування/
         # фільтр/повторний рендер нижче більше НЕ тягнуть дані через тунель
         # заново, лише перемальовують з того, що вже маємо.
@@ -7701,17 +8822,50 @@ class ExcelViewerApp:
             display_name = full_name or username or str(telegram_id)
             username_text = f" @{username}" if username else ""
             normalized_role = perm.normalize_role(role)
-            role_label = perm.ROLE_LABELS.get(normalized_role, role)
-            role_bg, role_fg = self._ROLE_CHIP_COLORS.get(normalized_role, self._ROLE_CHIP_COLORS["guest"])
+            role_label, role_bg, role_fg = self._remote_role_look(normalized_role)
 
-            label = tk.Label(
-                self.personnel_list_frame,
-                text=f"{index}. {display_name}{username_text} — ID: {telegram_id}",
+            # Вимога користувача (2026-08-21): "додай змогу копіювати
+            # номера ІД як виділяючи, так і щоб поруч була певна кнопка".
+            # Раніше весь рядок був однією tk.Label - а текст у мітці Tk
+            # виділити мишею НЕМОЖЛИВО. Тому рядок розкладено: ім'я
+            # лишається міткою, номер живе в полі лише для читання (на
+            # вигляд той самий текст, але виділяється й копіюється
+            # звичним Ctrl+C), кнопка стоїть одразу за ним.
+            name_cell = tk.Frame(self.personnel_list_frame, bg=theme["panel_bg"])
+            name_cell.grid(row=index, column=0, sticky="ew", padx=(6, 0), pady=5)
+
+            tk.Label(
+                name_cell,
+                text=f"{index}. {display_name}{username_text} — ID:",
                 anchor="w",
                 justify="left",
                 bg=theme["panel_bg"],
+            ).pack(side="left")
+
+            id_text = str(telegram_id)
+            id_entry = tk.Entry(
+                name_cell, width=len(id_text) + 1, relief="flat", bd=0,
+                highlightthickness=0, justify="left",
+                bg=theme["entry_bg"], readonlybackground=theme["entry_bg"], fg=theme["fg"],
             )
-            label.grid(row=index, column=0, sticky="ew", padx=(6, 0), pady=5)
+            id_entry.insert(0, id_text)
+            id_entry.configure(state="readonly")
+            id_entry.pack(side="left", padx=(4, 0))
+
+            copied_var = tk.StringVar(value="")
+            tk.Button(
+                name_cell, text="⧉", font=("Segoe UI", 9), width=2, padx=0, pady=0,
+                cursor="hand2",
+                command=lambda value=id_text, var=copied_var: self._copy_to_clipboard(value, var),
+            ).pack(side="left", padx=(4, 0))
+
+            # Відгук обов'язковий: у буфері обміну зміни не видно, і без
+            # нього кнопка відчувається мертвою. Колір - із
+            # _SEMANTIC_FG_COLORS, такі переживають перемикання теми.
+            tk.Label(
+                name_cell, textvariable=copied_var, font=("Segoe UI", 8),
+                fg="#1D9E75", bg=theme["panel_bg"],
+            ).pack(side="left", padx=(6, 0))
 
             # Задача користувача (2026-08-16): "додай змогу редагувати ролі
             # тут теж... зміна ролі в мене - зміна ролі в клієнті" - бейдж
@@ -7725,7 +8879,7 @@ class ExcelViewerApp:
             chip = tk.Label(
                 self.personnel_list_frame, text=f"{role_label} ▾", font=("Segoe UI", 8, "bold"),
                 bg=role_bg, fg=role_fg, padx=8, pady=2, cursor="hand2",
-                width=self._ROLE_CHIP_WIDTH, anchor="center",
+                width=self._role_chip_width(), anchor="center",
             )
             chip.grid(row=index, column=1, padx=8)
             chip.bind(
@@ -7749,6 +8903,22 @@ class ExcelViewerApp:
             last_seen_label.grid(row=index, column=2, sticky="e", padx=(8, 6))
         self._apply_theme(self.personnel_list_frame)
 
+    # Спільний копіювальник: буфер обміну плюс короткий відгук, який
+    # сам згасає. Виділено окремо, бо кнопок копіювання в списку стільки
+    # ж, скільки людей, і кожна має поводитись однаково.
+    def _copy_to_clipboard(self, value, feedback_var=None):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(value)
+        except tk.TclError:
+            # Буфер обміну може бути тимчасово зайнятий іншою програмою -
+            # це не привід ламати вікно списку.
+            return False
+        if feedback_var is not None:
+            feedback_var.set(self._t("скопировано"))
+            self.root.after(1500, lambda: feedback_var.set(""))
+        return True
+
     def _personnel_sort_arrow(self, field):
         if self._personnel_sort_field != field:
             return ""
@@ -7766,7 +8936,7 @@ class ExcelViewerApp:
         name_header.bind("<Button-1>", lambda event: self._toggle_personnel_sort("name"))
 
         if self._personnel_role_filter:
-            role_header_text = f"{self._t('Роль')}: {perm.ROLE_LABELS.get(self._personnel_role_filter, self._personnel_role_filter)} ▾"
+            role_header_text = f"{self._t('Роль')}: {self._remote_role_look(self._personnel_role_filter)[0]} ▾"
         else:
             role_header_text = f"{self._t('Роль')} ▾"
         role_header = tk.Label(
@@ -7807,9 +8977,9 @@ class ExcelViewerApp:
             label=self._t("Всі"), variable=filter_var, value="",
             command=lambda: self._set_personnel_role_filter(None),
         )
-        for role in perm.ROLES:
+        for role in self._remote_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS[role], variable=filter_var, value=role,
+                label=role["label"], variable=filter_var, value=role["key"],
                 command=lambda r=role: self._set_personnel_role_filter(r),
             )
         x = header_widget.winfo_rootx()
@@ -7843,6 +9013,54 @@ class ExcelViewerApp:
     # ідеальний вигляд) розфарбований під поточну тему, спливає прямо під
     # бейджем. add_radiobutton - той самий "позначено поточне" ефект, що й
     # у мокапі, без ручної побудови галочки.
+    # Ролі з останньої відповіді клієнта (/control/personnel): свої ролі
+    # живуть там; коли кешу ще нема - вбудовані з permissions.py.
+    def _remote_roles(self):
+        cached = getattr(self, "_personnel_roles_cache", None)
+        if cached:
+            return cached
+        return [
+            {"key": role, "label": perm.ROLE_LABELS_RU[role], "color_bg": perm.ROLE_CHIP_COLORS[role][0],
+             "color_fg": perm.ROLE_CHIP_COLORS[role][1]}
+            for role in perm.ROLES
+        ]
+
+    def _remote_role_look(self, role_key):
+        for role in self._remote_roles():
+            if role["key"] == role_key:
+                return role["label"], role["color_bg"], role["color_fg"]
+        bg, fg = self._ROLE_CHIP_COLORS["guest"]
+        return str(role_key or ""), bg, fg
+
+    def _role_chip_width(self):
+        longest = max((len(role["label"]) + 2 for role in self._remote_roles()), default=0)
+        return max(self._ROLE_CHIP_WIDTH, longest)
+
+    def _open_operations_journal_window(self):
+        theme = self._theme()
+        colors = {
+            "bg": theme["bg"], "fg": theme["fg"], "muted": theme["muted_fg"], "row": theme["panel_bg"],
+            "line": theme["border"],
+        }
+        colors.update({"zebra": theme["bg"], "head": theme["bg"], "hover": theme["select_bg"], "dark": bool(self._dark_mode)})
+        open_journal_window(
+            self, "operations_journal_window", self.root,
+            RemoteJournalSource(remote_control_client, self._run_on_main_thread, actor="домашняя программа"),
+            colors=colors, title=self._t("Журнал операций"),
+        )
+
+    def _open_role_buttons_window(self):
+        theme = self._theme()
+        colors = {
+            "bg": theme["bg"], "fg": theme["fg"], "muted": theme["muted_fg"], "row": theme["panel_bg"],
+            "line": theme["border"],
+        }
+        open_role_buttons_window(
+            self, "role_buttons_window", self.root,
+            RemoteRoleSource(remote_control_client, self._run_on_main_thread),
+            colors=colors, on_change=self._refresh_personnel,
+        )
+
     def _open_role_menu(self, chip_widget, user_id, current_role):
         theme = self._theme()
         menu = tk.Menu(
@@ -7852,10 +9070,10 @@ class ExcelViewerApp:
             selectcolor=theme["fg"], bd=0,
         )
         role_var = tk.StringVar(value=current_role)
-        for role in perm.ROLES:
+        for role in self._remote_roles():
             menu.add_radiobutton(
-                label=perm.ROLE_LABELS[role], variable=role_var, value=role,
-                command=lambda r=role: self._on_role_menu_selected(user_id, current_role, r),
+                label=role["label"], variable=role_var, value=role["key"],
+                command=lambda r=role["key"]: self._on_role_menu_selected(user_id, current_role, r),
             )
         x = chip_widget.winfo_rootx()
         y = chip_widget.winfo_rooty() + chip_widget.winfo_height()
@@ -7975,6 +9193,7 @@ class ExcelViewerApp:
         self._remote_control_status = None
         self._remote_control_status_failures = 0
         self._remote_control_tick()
+        self.root.after(self._KNOWN_CLIENTS_POLL_INTERVAL_MS, self._known_clients_tick)
 
     _REMOTE_CONTROL_POLL_INTERVAL_MS = 15000
     # Задача користувача (2026-08-17): "чому форма не тримається стабільно
@@ -8003,6 +9222,210 @@ class ExcelViewerApp:
     # що вже виправлений для Персоналу/Журналів (див. коментар вище про
     # _run_on_main_thread), тут просто пропущений. При повільному/недоступному
     # тунелі це блокувало б усе вікно до ~20с щоразу.
+    # Оновлюється рідше за індикатор активного сервера (20с проти 15с) і
+    # ОКРЕМИМ потоком: рядків тут кілька, кожен - свій HTTP-запит, і робити
+    # їх у тіку головного індикатора означало б розтягнути його на секунди.
+    _KNOWN_CLIENTS_POLL_INTERVAL_MS = 20000
+
+    # Задача користувача (2026-09-05): "в домашці погано працює відображення
+    # коли клієнт останній раз був у мережі. тестовий показує завжди одну
+    # цифру, а про робочу - взагалі нічого". Причина (перевірено живим
+    # /control/status тестового): клієнти НЕ пишуть у реєстр servers_registry
+    # ("register_this_server вернул False" - без пошти OneDrive нікуди), а
+    # домашка читала 16-денну локальну копію; коли ж звʼязок був - показувала
+    # лише версію без часу взагалі. Тепер час останнього контакту домашка
+    # веде САМА - з власних опитувань (кожні _KNOWN_CLIENTS_POLL_INTERVAL_MS),
+    # у settings.json на кожен hostname; реєстр - лише запасне джерело, коли
+    # він раптом новіший. Обраний варіант 03 із пʼяти: таблиця
+    # Клиент | Версия | Бот | Форма | Последний сигнал; онлайн - просто
+    # "Онлайн" без часу, підказка "Клик по строке" прибрана (клік працює).
+    _KNOWN_CLIENTS_LAST_CONTACT_KEY = "known_clients_last_contact"
+    _KNOWN_CLIENTS_LAST_VERSION_KEY = "known_clients_last_version"
+    # Задача користувача (2026-09-05): "чому читає ім'я пристрою у тесті, а у
+    # основній - просто Рабочий... виправ щоб і в робочому показувало назву
+    # машини". Імʼя машини клієнт і так віддає в живому статусі (поле node,
+    # звичайний platform.node()) - домашка його запамʼятовує, і "Рабочий"
+    # лишається лише доти, доки контакту ще жодного разу не було.
+    _KNOWN_CLIENTS_LAST_NODE_KEY = "known_clients_last_node"
+
+    def _known_clients_rows_data(self):
+        """[(ім'я, адреса, тип, час із реєстру)] - спершу синтетичний
+        "Рабочий" за адресою за замовчуванням (стара збірка себе не реєструє
+        взагалі), далі всі зареєстровані машини."""
+        try:
+            servers = servers_registry.read_servers(self._onedrive_shared_email())
+        except OSError:
+            servers = {}
+        default_hostname = paths.cloudflared_tunnel_hostname()
+        default_seen = None
+        for server in servers.values():
+            if (server.get("hostname") or "").strip() == default_hostname:
+                default_seen = server.get("updated_at")
+                break
+        rows = [(self._t("Рабочий"), default_hostname, "main", default_seen)]
+        for name, server in sorted(servers.items()):
+            hostname = (server.get("hostname") or "").strip()
+            if hostname and hostname != default_hostname:
+                rows.append((name, hostname, server.get("kind") or "main", server.get("updated_at")))
+        return rows
+
+    def _known_clients_memory(self, key):
+        value = self.settings.get(key)
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _remember_client_contact(self, hostname, version, node=None):
+        """Вдалий контакт - у памʼять домашки. Пишеться не частіше, ніж раз
+        на хвилину на машину, щоб не переписувати settings.json щодвадцять
+        секунд."""
+        now = datetime.now().replace(microsecond=0).isoformat()
+        contacts = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_CONTACT_KEY)
+        versions = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_VERSION_KEY)
+        nodes = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_NODE_KEY)
+        changed = False
+        if str(contacts.get(hostname) or "")[:16] != now[:16]:
+            contacts[hostname] = now
+            changed = True
+        if version and versions.get(hostname) != version:
+            versions[hostname] = version
+            changed = True
+        if node and nodes.get(hostname) != node:
+            nodes[hostname] = node
+            changed = True
+        if changed:
+            self.settings.set(self._KNOWN_CLIENTS_LAST_CONTACT_KEY, contacts)
+            self.settings.set(self._KNOWN_CLIENTS_LAST_VERSION_KEY, versions)
+            self.settings.set(self._KNOWN_CLIENTS_LAST_NODE_KEY, nodes)
+
+    def _last_contact_for(self, hostname, registry_updated_at):
+        own = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_CONTACT_KEY).get(hostname)
+        moments = [
+            servers_registry.parse_updated_at(value) for value in (own, registry_updated_at) if value
+        ]
+        moments = [moment for moment in moments if moment != datetime.min]
+        return max(moments) if moments else None
+
+    def _format_last_signal(self, moment):
+        if moment is None:
+            return "—"
+        today = date.today()
+        if moment.date() == today:
+            return self._t("сегодня") + " " + moment.strftime("%H:%M")
+        if moment.date() == today - timedelta(days=1):
+            return self._t("вчера") + " " + moment.strftime("%H:%M")
+        return moment.strftime("%d.%m %H:%M")
+
+    def _switch_active_server(self, hostname):
+        remote_control_client.set_active_server(hostname)
+        self.settings.set("active_remote_server_hostname", hostname)
+        self.settings.set("active_remote_server_row", "")
+        self._refresh_known_clients()
+
+    def _refresh_known_clients(self):
+        frame = getattr(self, "known_clients_rows", None)
+        if frame is None or not frame.winfo_exists():
+            return
+        self._clear_frame(frame)
+        active = remote_control_client.active_hostname()
+        versions_memory = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_VERSION_KEY)
+        nodes_memory = self._known_clients_memory(self._KNOWN_CLIENTS_LAST_NODE_KEY)
+
+        for column, text in enumerate(("", "Клиент", "Версия", "Бот", "Форма", "Последний сигнал")):
+            tk.Label(
+                frame, text=self._t(text) if text else "", font=("Segoe UI", 8, "bold"),
+                fg="gray40", anchor="w",
+            ).grid(row=0, column=column, sticky="w", padx=(0, 10), pady=(0, 2))
+
+        states = []
+        for index, (name, hostname, kind, registry_seen) in enumerate(self._known_clients_rows_data(), start=1):
+            dot = tk.Label(frame, text="●", font=("Segoe UI", 9), fg="gray40")
+            dot.grid(row=index, column=0, sticky="w", padx=(0, 4))
+            name_cell = tk.Frame(frame)
+            name_cell.grid(row=index, column=1, sticky="w", padx=(0, 10))
+            # Імʼя машини, якщо домашка його вже чула; інакше імʼя з реєстру
+            # або синтетичне "Рабочий" - до першого контакту.
+            shown_name = nodes_memory.get(hostname) or name
+            name_label = tk.Label(
+                name_cell, text=("✓ " + shown_name) if hostname == active else shown_name,
+                font=("Segoe UI", 9), anchor="w",
+            )
+            name_label.pack(side="left")
+            badge = None
+            if kind == "test":
+                badge = tk.Label(
+                    name_cell, text=self._t("тест"), font=("Segoe UI", 8), bg="#fff3d6", fg="#8a5a00", padx=4,
+                )
+                badge.pack(side="left", padx=(6, 0))
+            version_var = tk.StringVar(value=versions_memory.get(hostname) or "—")
+            version_label = tk.Label(frame, textvariable=version_var, font=("Consolas", 9), anchor="w")
+            version_label.grid(row=index, column=2, sticky="w", padx=(0, 10))
+            bot_label = tk.Label(frame, text="—", font=("Segoe UI", 9), fg="gray40", anchor="w")
+            bot_label.grid(row=index, column=3, sticky="w", padx=(0, 10))
+            form_label = tk.Label(frame, text="—", font=("Segoe UI", 9), fg="gray40", anchor="w")
+            form_label.grid(row=index, column=4, sticky="w", padx=(0, 10))
+            signal_var = tk.StringVar(
+                value=self._format_last_signal(self._last_contact_for(hostname, registry_seen))
+            )
+            signal_label = tk.Label(frame, textvariable=signal_var, font=("Segoe UI", 9), fg="gray40", anchor="w")
+            signal_label.grid(row=index, column=5, sticky="w")
+            clickable = [dot, name_cell, name_label, version_label, bot_label, form_label, signal_label]
+            if badge is not None:
+                clickable.append(badge)
+            for widget in clickable:
+                widget.configure(cursor="hand2")
+                widget.bind("<Button-1>", lambda event, h=hostname: self._switch_active_server(h))
+            states.append({
+                "hostname": hostname, "registry_seen": registry_seen, "dot": dot,
+                "version": version_var, "bot": bot_label, "form": form_label, "signal": signal_var,
+                "name_label": name_label, "is_active": hostname == active,
+            })
+        self._apply_theme(frame)
+
+        generation = self._known_clients_generation = getattr(self, "_known_clients_generation", 0) + 1
+
+        def alive_mark(label, alive):
+            if alive is None:
+                label.configure(text="—", fg="gray40")
+            else:
+                label.configure(text="●", fg="#1D9E75" if alive else "#B23B3B")
+
+        def worker():
+            for item in states:
+                status = remote_control_client.fetch_remote_status_from(item["hostname"], timeout=6)
+
+                def apply(item=item, status=status):
+                    if generation != self._known_clients_generation:
+                        return
+                    if not item["dot"].winfo_exists():
+                        return
+                    if status is None:
+                        item["dot"].configure(fg="#B23B3B")
+                        alive_mark(item["bot"], None)
+                        alive_mark(item["form"], None)
+                        item["signal"].set(
+                            self._format_last_signal(self._last_contact_for(item["hostname"], item["registry_seen"]))
+                        )
+                        return
+                    version = (status.get("version") or "").strip() or self._t("старая")
+                    item["dot"].configure(fg="#1D9E75")
+                    item["version"].set(version)
+                    alive_mark(item["bot"], status.get("bot_alive") if "bot_alive" in status else None)
+                    alive_mark(item["form"], status.get("webapp_alive") if "webapp_alive" in status else None)
+                    item["signal"].set(self._t("Онлайн"))
+                    node = (status.get("node") or "").strip()
+                    if node:
+                        item["name_label"].configure(text=("✓ " + node) if item["is_active"] else node)
+                    self._remember_client_contact(item["hostname"], version, node)
+
+                self._run_on_main_thread(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _known_clients_tick(self):
+        if self.is_closing:
+            return
+        self._refresh_known_clients()
+        self.root.after(self._KNOWN_CLIENTS_POLL_INTERVAL_MS, self._known_clients_tick)
+
     def _remote_control_tick(self):
         if self.is_closing:
             return
@@ -8046,10 +9469,8 @@ class ExcelViewerApp:
             )
             self.telegram_heartbeat_text.set("")
             self.webapp_status_text.set("")
-            if self.telegram_status_label.winfo_exists():
+            if self.telegram_status_label is not None and self.telegram_status_label.winfo_exists():
                 self.telegram_status_label.configure(fg="gray40")
-            if self.main_menu_status_label.winfo_exists():
-                self.main_menu_status_label.configure(fg="gray40")
             return
 
         # Задача користувача (2026-08-15): "тепер змінюй це на автоматичне
@@ -8060,10 +9481,8 @@ class ExcelViewerApp:
         # вище (fetch_remote_status повертає None).
         self.telegram_status_text.set(self._t("Сервер онлайн") + f" — {server_name}")
         status_color = "#1D9E75"
-        if self.telegram_status_label.winfo_exists():
+        if self.telegram_status_label is not None and self.telegram_status_label.winfo_exists():
             self.telegram_status_label.configure(fg=status_color)
-        if self.main_menu_status_label.winfo_exists():
-            self.main_menu_status_label.configure(fg=status_color)
 
         bot_word = self._t("підключено") if status.get("bot_alive") else self._t("вимкнено")
         form_word = self._t("підключено") if status.get("webapp_alive") else self._t("вимкнено")
@@ -8589,7 +10008,7 @@ class ExcelViewerApp:
             self._webapp_last_probe_error = "нет активного адреса"
             return False
         try:
-            with urllib.request.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
+            with secure_http.urlopen(f"{url.rstrip('/')}/index.html", timeout=6) as response:
                 ok = 200 <= response.status < 400
                 if not ok:
                     self._webapp_last_probe_error = f"HTTP {response.status}"
@@ -8717,158 +10136,14 @@ class ExcelViewerApp:
     def _set_telegram_status_threadsafe(self, text):
         self._run_on_main_thread(lambda: self.telegram_status_text.set(text))
 
-    # --- Таблиця даних: перегляд, редагування, збереження в Excel ---
-    def _build_sheet_buttons(self):
-        for sheet_name in self.store.sheet_names():
-            btn = tk.Button(
-                self.buttons_frame,
-                text=sheet_name,
-                width=18,
-                command=lambda name=sheet_name: self.switch_sheet(name),
-            )
-            btn.pack(pady=4, padx=4)
 
-    def switch_sheet(self, sheet_name):
-        if self.edit_mode and self.has_unsaved_changes:
-            if not messagebox.askyesno(
-                self._t("Незбережені зміни"),
-                self._t("У вас є незбережені зміни в поточній вкладці. Перейти без збереження?"),
-            ):
-                return
-            if not self._discard_current_sheet_changes():
-                return
-        if self.edit_mode:
-            self._exit_edit_mode()
-        self.show_sheet(sheet_name)
 
-    def show_sheet(self, sheet_name):
-        self.current_sheet = sheet_name
-        self.current_page = 0
-        self.current_headers = self.store.get_headers(sheet_name)
-        self.total_rows = self.store.count_rows(sheet_name)
 
-        saved_widths = (self.settings.get("table_column_widths") or {}).get(sheet_name, {})
-        self.column_filters[sheet_name] = dict((self.settings.get("table_column_filters") or {}).get(sheet_name, {}))
-        columns = [f"col{i}" for i in range(len(self.current_headers))]
-        self.tree["columns"] = columns
-        for col_id, header in zip(columns, self.current_headers):
-            title = str(header) if header is not None else ""
-            self.tree.heading(col_id, text=self._column_heading_text(sheet_name, title))
-            width = saved_widths.get(title) or self._default_column_width(title)
-            self.tree.column(col_id, width=width, anchor="w")
 
-        if self.store.is_read_only(sheet_name):
-            self.edit_button.config(state="disabled")
-        else:
-            self.edit_button.config(state="normal")
 
-        self._update_refresh_button_state()
-        self._refresh_page()
 
-    def _default_column_width(self, title):
-        return max(80, min(280, len(title) * 8 + 30))
 
-    def _save_current_column_widths(self, _event=None):
-        if not self.current_sheet or not self.current_headers:
-            return
-        columns = self.tree["columns"]
-        widths = {
-            (str(header) if header is not None else ""): self.tree.column(col_id, "width")
-            for col_id, header in zip(columns, self.current_headers)
-        }
-        all_widths = self.settings.get("table_column_widths") or {}
-        if all_widths.get(self.current_sheet) == widths:
-            return
-        all_widths[self.current_sheet] = widths
-        self.settings.set("table_column_widths", all_widths)
 
-    def _column_heading_text(self, sheet_name, title):
-        value = self.column_filters.get(sheet_name, {}).get(title)
-        return f"{title}  [{value}]" if value else title
-
-    # Клік у ЗАГОЛОВОК стовпця (не в саму клітинку - identify_region
-    # відрізняє, "heading" саме той рядок з назвами стовпців, який
-    # користувач мав на увазі скріншотом обрізаних заголовків) відкриває
-    # маленьке поле вводу для текстового фільтра по цьому стовпцю.
-    def _on_tree_header_click(self, event):
-        if not self.current_sheet or self.tree.identify_region(event.x, event.y) != "heading":
-            return
-        col_ref = self.tree.identify_column(event.x)
-        if not col_ref.startswith("#"):
-            return
-        col_index = int(col_ref[1:]) - 1
-        if col_index < 0 or col_index >= len(self.current_headers):
-            return
-        header = self.current_headers[col_index]
-        title = str(header) if header is not None else ""
-        self._open_column_filter_popup(event, title)
-
-    # Простий tk.Toplevel БЕЗ .transient() - той самий, уже закритий
-    # висновок про немодальні вікна в цьому застосунку (журнали/персонал/
-    # таймери): .transient() на немодальному вікні спричиняв реальний
-    # z-order баг.
-    def _open_column_filter_popup(self, event, title):
-        if self.filter_popup_window is not None and self.filter_popup_window.winfo_exists():
-            self.filter_popup_window.destroy()
-        popup = tk.Toplevel(self.root)
-        popup.title(self._t("Фільтр"))
-        popup.geometry(f"220x104+{event.x_root}+{event.y_root}")
-        popup.resizable(False, False)
-        self.filter_popup_window = popup
-
-        tk.Label(popup, text=title, anchor="w", wraplength=200, font=("Segoe UI", 9, "bold")).pack(
-            fill="x", padx=8, pady=(8, 4)
-        )
-        entry = tk.Entry(popup)
-        entry.insert(0, self.column_filters.get(self.current_sheet, {}).get(title, ""))
-        entry.pack(fill="x", padx=8)
-        entry.focus_set()
-        entry.select_range(0, "end")
-
-        def apply_filter(_event=None):
-            self._set_column_filter(title, entry.get().strip())
-            popup.destroy()
-
-        def clear_filter():
-            self._set_column_filter(title, "")
-            popup.destroy()
-
-        entry.bind("<Return>", apply_filter)
-        popup.bind("<Escape>", lambda _event: popup.destroy())
-
-        buttons = tk.Frame(popup)
-        buttons.pack(fill="x", padx=8, pady=8)
-        tk.Button(buttons, text=self._t("Очистити"), command=clear_filter).pack(side="left")
-        tk.Button(buttons, text=self._t("Застосувати"), command=apply_filter).pack(side="right")
-
-        # Реальний баг (аудит коду, 2026-08-15): цей попап - один з небагатьох
-        # у програмі, що НЕ йде через _center_window (позиція прив'язана до
-        # кліку на заголовку колонки, не до центру вікна) - без прямого
-        # виклику лишався б незатемізованим у темному режимі.
-        self._apply_theme(popup)
-
-    def _set_column_filter(self, title, value):
-        if not self.current_sheet:
-            return
-        sheet_filters = self.column_filters.setdefault(self.current_sheet, {})
-        if value:
-            sheet_filters[title] = value
-        else:
-            sheet_filters.pop(title, None)
-
-        all_filters = self.settings.get("table_column_filters") or {}
-        if sheet_filters:
-            all_filters[self.current_sheet] = sheet_filters
-        else:
-            all_filters.pop(self.current_sheet, None)
-        self.settings.set("table_column_filters", all_filters)
-
-        for col_id, header in zip(self.tree["columns"], self.current_headers):
-            header_title = str(header) if header is not None else ""
-            self.tree.heading(col_id, text=self._column_heading_text(self.current_sheet, header_title))
-
-        self.current_page = 0
-        self._refresh_page()
 
     # Фільтр - підрядок, регістронезалежно, ПО ВСІХ активних стовпцях
     # одночасно (AND, не OR) - той самий принцип, що вже усталений у
@@ -8888,96 +10163,9 @@ class ExcelViewerApp:
                 result.append((row_id, row_values))
         return result
 
-    def _update_refresh_button_state(self):
-        if not hasattr(self, "refresh_table_button"):
-            return
-        if not self.current_sheet or self._is_statistics_sheet(self.current_sheet):
-            self.refresh_table_button.pack_forget()
-            return
-        if not self.refresh_table_button.winfo_manager():
-            self.refresh_table_button.pack(side="left", padx=(0, 8))
-        self.refresh_table_button.config(state="normal")
 
-    def refresh_current_sheet(self):
-        if not self.current_sheet or self._is_statistics_sheet(self.current_sheet):
-            return
 
-        if self.edit_mode and self.has_unsaved_changes:
-            action = self._ask_refresh_unsaved_action()
-            if action == "cancel":
-                return
-            if action == "save":
-                if not self._save_current_sheet_to_excel(show_success=False):
-                    return
-                self._exit_edit_mode()
-            elif action == "discard":
-                if not self._discard_current_sheet_changes():
-                    return
-                self._exit_edit_mode()
 
-        self.total_rows = self.store.count_rows(self.current_sheet)
-        self._refresh_page()
-
-    def _is_statistics_sheet(self, sheet_name):
-        name = str(sheet_name or "").upper()
-        return sheet_name in READ_ONLY_SHEETS or "АНАЛИТИКА" in name or "СТАТИСТ" in name
-
-    def _ask_refresh_unsaved_action(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title(self._t("Незбережені зміни"))
-        dialog.geometry("520x210")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        result = {"action": "cancel"}
-
-        content = tk.Frame(dialog, padx=18, pady=16)
-        content.pack(fill="both", expand=True)
-
-        tk.Label(
-            content,
-            text=self._t("У поточній вкладці є незбережені зміни."),
-            font=("Segoe UI", 10, "bold"),
-            anchor="w",
-        ).pack(anchor="w", fill="x")
-        tk.Label(
-            content,
-            text=self._t("Що зробити перед оновленням таблиці?"),
-            anchor="w",
-            justify="left",
-        ).pack(anchor="w", fill="x", pady=(6, 16))
-
-        buttons = tk.Frame(content)
-        buttons.pack(side="bottom", fill="x")
-
-        def choose(action):
-            result["action"] = action
-            dialog.destroy()
-
-        tk.Button(
-            buttons,
-            text=self._t("Зберегти та оновити"),
-            width=20,
-            command=lambda: choose("save"),
-        ).pack(side="left", padx=(0, 8))
-        tk.Button(
-            buttons,
-            text=self._t("Оновити без збереження"),
-            width=22,
-            command=lambda: choose("discard"),
-        ).pack(side="left", padx=(0, 8))
-        tk.Button(
-            buttons,
-            text=self._t("Скасувати"),
-            width=12,
-            command=lambda: choose("cancel"),
-        ).pack(side="right")
-
-        dialog.bind("<Escape>", lambda event: choose("cancel"))
-        self._center_window(dialog, width=520, height=210)
-        dialog.wait_window()
-        return result["action"]
 
     def _page_count(self):
         if not self.total_rows:
@@ -9037,165 +10225,16 @@ class ExcelViewerApp:
             state="normal" if self.current_page < page_count - 1 else "disabled"
         )
 
-    def _matching_filtered_page_cache(self):
-        if self._filtered_page_cache is None:
-            return None
-        cached_sheet, cached_signature, cached_rows = self._filtered_page_cache
-        active_filters = self.column_filters.get(self.current_sheet) if self.current_sheet else None
-        if not active_filters or cached_sheet != self.current_sheet:
-            return None
-        if cached_signature != tuple(sorted(active_filters.items())):
-            return None
-        return cached_rows
 
-    def previous_page(self):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._refresh_page(cached_filtered_rows=self._matching_filtered_page_cache())
 
-    def next_page(self):
-        if self.current_page < self._page_count() - 1:
-            self.current_page += 1
-            self._refresh_page(cached_filtered_rows=self._matching_filtered_page_cache())
 
     # ---- режим редагування ----
 
-    def toggle_edit_mode(self):
-        if self.edit_mode:
-            if self.has_unsaved_changes and not messagebox.askyesno(
-                self._t("Скасувати редагування"),
-                self._t("Скасувати незбережені зміни в поточній вкладці?"),
-            ):
-                return
-            if not self._discard_current_sheet_changes():
-                return
-            self._exit_edit_mode()
-            self.show_sheet(self.current_sheet)
-        else:
-            if not self.current_sheet or self.store.is_read_only(self.current_sheet):
-                messagebox.showinfo(
-                    self._t("Лише перегляд"),
-                    self._t("Цей лист поки доступний тільки для перегляду."),
-                )
-                return
-            self.edit_mode = True
-            self.has_unsaved_changes = False
-            self.edit_button.config(text=self._t("Скасувати редагування"))
-            self.add_row_button.pack(side="left", padx=4)
-            self.delete_row_button.pack(side="left", padx=4)
-            self.save_button.pack(side="left", padx=4)
-            # add="+" - без цього другий .bind на ту саму подію ПОВНІСТЮ
-            # заміняв би перший (Задача користувача 2026-08-14, ширина
-            # стовпців вище) замість того, щоб обидва спрацьовували разом.
-            self.tree.bind("<ButtonRelease-1>", self._on_double_click, add="+")
 
-    def _exit_edit_mode(self):
-        self.edit_mode = False
-        self.has_unsaved_changes = False
-        self.edit_button.config(text=self._t("Редагувати"))
-        self.add_row_button.pack_forget()
-        self.delete_row_button.pack_forget()
-        self.save_button.pack_forget()
-        self.tree.unbind("<ButtonRelease-1>")
 
-    def _discard_current_sheet_changes(self):
-        if not self.current_sheet:
-            return True
-        try:
-            workbook = excel_source.open_workbook(data_only=True)
-        except RuntimeError as exc:
-            # Аудит коду: раніше тут не було жодного перехоплення — виняток
-            # летів непійманим у Tkinter callback (тихий провал, користувач
-            # не бачив нічого), якщо джерело Excel не налаштоване.
-            messagebox.showerror(self._t("Таблиця Excel"), self._t(str(exc)))
-            return False
-        try:
-            worksheet = workbook[self.current_sheet]
-            self.store.import_sheet(
-                worksheet,
-                self.current_sheet in READ_ONLY_SHEETS,
-            )
-        finally:
-            workbook.close()
-        self.has_unsaved_changes = False
-        return True
 
     @staticmethod
-    def _looks_like_number(text):
-        text = str(text or "").strip()
-        if not text:
-            return False
-        try:
-            float(text.replace(",", "."))
-            return True
-        except ValueError:
-            return False
 
-    def _on_double_click(self, event):
-        if not self.edit_mode or not self.current_sheet:
-            return
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "cell":
-            return
-        column = self.tree.identify_column(event.x)
-        row_id = self.tree.identify_row(event.y)
-        if not row_id:
-            return
-
-        x, y, width, height = self.tree.bbox(row_id, column)
-        current_value = self.tree.set(row_id, column)
-        column_index = int(column.replace("#", "")) - 1
-
-        entry = tk.Entry(self.tree)
-        entry.place(x=x, y=y, width=width, height=height)
-        entry.insert(0, current_value)
-        entry.focus()
-        committed = {"done": False}
-
-        def commit(event=None):
-            if committed["done"]:
-                return
-            committed["done"] = True
-            new_value = entry.get()
-            entry.destroy()
-            # Аудит коду: раніше текст замість числа в раніше числовій
-            # клітинці мовчки обнулявся (utils._number_value("текст") == 0)
-            # — одна випадкова літера в залишку/ціні губила реальне значення
-            # без жодного попередження. Перевіряємо лише коли стара клітинка
-            # ВЖЕ була числом (текстові колонки на кшталт "Порода"/"Клиент"
-            # це не зачіпає) і нове значення непорожнє й нечислове —
-            # порожнє значення й далі приймається як 0, як і раніше.
-            if (
-                self._looks_like_number(current_value)
-                and new_value.strip()
-                and not self._looks_like_number(new_value)
-            ):
-                messagebox.showerror(
-                    self._t("Некоректне значення"),
-                    self._t('Очікується число, введено «{value}» — зміну скасовано.').format(value=new_value),
-                )
-                return
-            # Реальна гонка з аудиту: читання всього рядка й запис усього
-            # рядка назад раніше не мали жодного блокування між ними — якщо
-            # бот саме тоді комітив продаж/прихід у ЦЕЙ САМИЙ рядок (Telegram
-            # і GUI тримають ОКРЕМІ з'єднання до одного файлу), запис тут міг
-            # тихо відкотити щойно оновлений ботом залишок застарілою копією
-            # (той самий клас багу, що й виправлений TOCTOU в
-            # apply_sale_operation, warehouse_data.py). BEGIN IMMEDIATE
-            # одразу набуває блокування — читання й запис тепер один
-            # нероздільний крок.
-            with self.store.conn:
-                self.store.conn.execute("BEGIN IMMEDIATE")
-                row_values = self.store.get_row(int(row_id))
-                while len(row_values) < len(self.current_headers):
-                    row_values.append("")
-                row_values[column_index] = new_value
-                self.store.update_row(int(row_id), row_values)
-            self.tree.set(row_id, column, new_value)
-            self.has_unsaved_changes = True
-
-        entry.bind("<Return>", commit)
-        entry.bind("<FocusOut>", commit)
 
     def add_row(self):
         if not self.current_sheet or self.store.is_read_only(self.current_sheet):
@@ -9207,88 +10246,10 @@ class ExcelViewerApp:
         self.current_page = self._page_count() - 1
         self._refresh_page()
 
-    def delete_row(self):
-        if not self.current_sheet or self.store.is_read_only(self.current_sheet):
-            return
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showinfo(self._t("Видалення рядка"), self._t("Оберіть рядок для видалення."))
-            return
-        # Аудит коду: усі ІНШІ видалення в програмі (кнопка, спосіб оплати,
-        # поле-запит, користувач) мають підтвердження — тут його чомусь не було.
-        if len(selected) == 1:
-            confirmed = messagebox.askyesno(self._t("Видалення рядка"), self._t("Видалити обраний рядок?"))
-        else:
-            confirmed = messagebox.askyesno(
-                self._t("Видалення рядка"),
-                self._t("Видалити обрані рядки ({count})?").format(count=len(selected)),
-            )
-        if not confirmed:
-            return
-        self.store.delete_rows([int(item) for item in selected])
-        self.has_unsaved_changes = True
-        self._refresh_page()
 
-    def save_changes(self):
-        if not self._save_current_sheet_to_excel(show_success=True):
-            return
-        self._exit_edit_mode()
-        self.show_sheet(self.current_sheet)
 
-    def _save_current_sheet_to_excel(self, show_success=True):
-        if not self.current_sheet:
-            return False
-        if self.store.is_read_only(self.current_sheet):
-            messagebox.showinfo(self._t("Лише перегляд"), self._t("Цей лист не синхронізується назад в Excel."))
-            return False
 
-        try:
-            self._sync_current_sheet_to_excel()
-        except PermissionError:
-            messagebox.showerror(
-                self._t("Excel-файл відкритий"),
-                self._t("Не удалось сохранить файл. Закройте Excel-файл и попробуйте еще раз."),
-            )
-            return False
-        except OSError as exc:
-            messagebox.showerror(self._t("Ошибка сохранения"), f"Не удалось сохранить файл:\n{exc}")
-            return False
-        except RuntimeError as exc:
-            messagebox.showerror(self._t("Таблиця Excel"), self._t(str(exc)))
-            return False
 
-        self.has_unsaved_changes = False
-        if show_success:
-            messagebox.showinfo(self._t("Збережено"), self._t("Зміни збережено у файл."))
-        return True
-
-    def _sync_current_sheet_to_excel(self):
-        sync_sheet_to_excel(self.store, self.current_sheet)
-
-    def sync_excel_manually(self):
-        try:
-            sync_sheets_to_excel(self.store, ["СКЛАД", SALES_SHEET_NAME])
-        except PermissionError:
-            messagebox.showerror(
-                self._t("Excel-файл відкритий"),
-                self._t("Не удалось обновить файл. Закройте Excel-файл и попробуйте еще раз."),
-            )
-            return
-        except OSError as exc:
-            messagebox.showerror(self._t("Ошибка обновления"), f"Не удалось обновить файл:\n{exc}")
-            return
-        except RuntimeError as exc:
-            messagebox.showerror(self._t("Таблиця Excel"), self._t(str(exc)))
-            return
-
-        # Задача користувача: "якщо користувач оновив вручну - тоді таймер
-        # відліку скидається на початок" - ці два листи щойно вручну
-        # синхронізовані, тож фоновий відкладений запис (TelegramBotWorker.
-        # _excel_sync_tick) не повинен зайво повторювати те саме одразу.
-        if self.telegram_worker is not None:
-            self.telegram_worker.clear_excel_dirty(["СКЛАД", SALES_SHEET_NAME])
-
-        messagebox.showinfo(self._t("Excel оновлено"), self._t("Дані з SQLite записано в Excel."))
 
     def on_close(self):
         if self.edit_mode and self.has_unsaved_changes:

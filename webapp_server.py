@@ -37,7 +37,8 @@ import permissions as perm
 import standard_menu_cloud
 from settings import SettingsStore
 from utils import measure_classification_data
-from warehouse_data import ExcelSqliteStore, low_stock_report_rows, operation_template_entries
+from warehouse_data import journal_page
+from warehouse_data import ExcelSqliteStore, low_stock_report_rows
 
 # Задача користувача: "чи є якийсь інший шлях?" (замість роздутого web_app
 # URL з усіма даними форми одразу) - кнопка тепер несе лише короткий
@@ -184,10 +185,18 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
     def __init__(
         self, *args, db_path=None, get_token=None, get_fresh_context=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
-        handle_home_heartbeat=None, handle_set_role=None,
-        get_form_content_enabled=None, **kwargs
+        handle_home_heartbeat=None, handle_set_role=None, handle_roles_changed=None,
+        get_form_content_enabled=None, get_onedrive_email=None, get_journal_page=None, get_journal_colors=None, **kwargs
     ):
         self.db_path = db_path
+        self.get_journal_page = get_journal_page
+        self.get_journal_colors = get_journal_colors
+        # Пошта OneDrive приходить КАЛБЕКОМ, не значенням: її можна змінити
+        # в налаштуваннях на ходу, а сервер живе весь час роботи програми.
+        # Без неї хмара не використовується взагалі (див. servers_registry.
+        # _resolve_onedrive_root) - тож ці два маршрути мовчки писали б у
+        # нікуди навіть у того, хто пошту вказав.
+        self.get_onedrive_email = get_onedrive_email
         self.get_token = get_token
         self.get_fresh_context = get_fresh_context
         # Задача користувача (2026-08-16): "прибери ту кнопку... і пофіксь
@@ -223,6 +232,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         # оновлення вікна "Персонал" - прикладна логіка client_app.py, не
         # цього HTTP-протоколу).
         self.handle_set_role = handle_set_role
+        self.handle_roles_changed = handle_roles_changed
         super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):
@@ -251,6 +261,12 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if url_path == "/control/custom_buttons":
             self._handle_remote_custom_buttons(dict(parse_qsl(parsed.query)))
+            return
+        if url_path == "/control/roles":
+            self._handle_remote_roles(dict(parse_qsl(parsed.query)))
+            return
+        if url_path == "/control/journal":
+            self._handle_remote_journal(dict(parse_qsl(parsed.query)))
             return
         if url_path == "/control/action_log":
             self._handle_remote_action_log(dict(parse_qsl(parsed.query)))
@@ -331,7 +347,8 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path not in (
             "/api/template", "/control/command", "/control/heartbeat", "/control/set_role",
-            "/control/custom_button_action", "/control/save_standard_menu_to_cloud",
+            "/control/custom_button_action", "/control/roles_action", "/control/journal_delete",
+            "/control/save_standard_menu_to_cloud",
             "/control/payment_method_action", "/control/system_commands_save",
         ):
             self._send_json(404, {"ok": False, "error": "Не найдено."})
@@ -370,6 +387,12 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/control/custom_button_action":
             self._handle_custom_button_action_request(payload)
+            return
+        if self.path == "/control/roles_action":
+            self._handle_roles_action_request(payload)
+            return
+        if self.path == "/control/journal_delete":
+            self._handle_journal_delete_request(payload)
             return
         if self.path == "/control/save_standard_menu_to_cloud":
             self._handle_save_standard_menu_to_cloud_request(payload)
@@ -422,11 +445,19 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
     # UAB", не особистий акаунт gui.py). Read-only, той самий принцип, що й
     # /control/status - лише повертає РЕАЛЬНИЙ шлях з боку client_app.py,
     # нічого не пише.
+    def _onedrive_email(self):
+        if not self.get_onedrive_email:
+            return None
+        try:
+            return self.get_onedrive_email()
+        except Exception:
+            return None
+
     def _handle_standard_menu_cloud_path(self, query):
         if not self._remote_control_token_valid(self._remote_control_query_token(query)):
             self._send_json(401, {"ok": False, "error": "Недействительный токен."})
             return
-        folder = standard_menu_cloud.cloud_folder_path()
+        folder = standard_menu_cloud.cloud_folder_path(self._onedrive_email())
         cloud_path = str(folder / "standard_menu.json") if folder is not None else None
         self._send_json(200, {"ok": True, "cloud_path": cloud_path})
 
@@ -448,9 +479,10 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         store = ExcelSqliteStore(self.db_path)
         try:
             users = store.list_users()
+            roles = store.list_roles()
         finally:
             store.close()
-        self._send_json(200, {"ok": True, "users": users})
+        self._send_json(200, {"ok": True, "users": users, "roles": roles})
 
     # Задача користувача (2026-08-17): "редактор кнопок зроби синхронним" -
     # той самий read-only принцип, що вже й _handle_remote_personnel вище
@@ -487,11 +519,29 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(503, {"ok": False, "error": "База данных недоступна."})
             return
         op = payload.get("op")
-        if op not in ("add", "update", "delete"):
+        if op not in ("add", "update", "delete", "set_enabled"):
             self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
             return
         store = ExcelSqliteStore(self.db_path)
         try:
+            if op == "set_enabled":
+                # Задача користувача (2026-09-05): 👁 у редакторі домашки
+                # міняє видимість кнопки в живому дереві клієнта.
+                node_id = payload.get("node_id")
+                enabled = payload.get("enabled")
+                if not isinstance(node_id, int) or isinstance(node_id, bool) or not isinstance(enabled, bool):
+                    self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+                    return
+                if not store.get_custom_button(node_id):
+                    self._send_json(404, {"ok": False, "error": "Кнопка не найдена."})
+                    return
+                store.set_custom_button_enabled(node_id, enabled)
+                state = store.standard_menu_state_if_root_builtin(node_id)
+                if state is not None:
+                    standard_menu_cloud.write_local_cache(state)
+                    standard_menu_cloud.write_cloud_state(state, self._onedrive_email())
+                self._send_json(200, {"ok": True})
+                return
             if op == "delete":
                 node_id = payload.get("node_id")
                 if not isinstance(node_id, int) or isinstance(node_id, bool):
@@ -571,9 +621,12 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             state = store.get_standard_menu_state()
         finally:
             store.close()
-        saved = standard_menu_cloud.write_cloud_state(state)
+        saved = standard_menu_cloud.write_cloud_state(state, self._onedrive_email())
         if not saved:
-            self._send_json(503, {"ok": False, "error": "OneDrive не найден на этом компьютере."})
+            self._send_json(503, {"ok": False, "error": (
+                "Облако не используется: не указана «Учётная запись OneDrive». "
+                "Без неё всё хранится только на этом компьютере."
+            )})
             return
         # Задача користувача (2026-08-18): "не зберігає нічого на хмару" -
         # діагностика РЕАЛЬНОГО шляху й факту існування файлу ОДРАЗУ ПІСЛЯ
@@ -754,7 +807,7 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
         # bool - підклас int у Python (isinstance(True, int) - True), тож
         # {"user_id": true} пройшов би перевірку нижче як user_id=1 без
         # цього виключення (нитпік з аудиту коду, 2026-08-16).
-        if not isinstance(user_id, int) or isinstance(user_id, bool) or role not in perm.ROLES:
+        if not isinstance(user_id, int) or isinstance(user_id, bool) or not isinstance(role, str) or not role:
             self._send_json(400, {"ok": False, "error": "Некорректные данные."})
             return
         if self.db_path is None:
@@ -762,6 +815,9 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             return
         store = ExcelSqliteStore(self.db_path)
         try:
+            if store.get_role(role) is None:
+                self._send_json(400, {"ok": False, "error": "Такой роли нет."})
+                return
             row = store.get_user(user_id)
             if not row:
                 self._send_json(404, {"ok": False, "error": "Пользователь не найден."})
@@ -778,6 +834,111 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
                 # дія - сам запис ролі в БД уже успішний і не відкочується.
                 pass
         self._send_json(200, {"ok": True})
+
+    # «Кнопки ролей» з домашки (Задача користувача, 2026-09-06: однаково в
+    # клієнті й у домашці) - той самий принцип, що й редактор кнопок: домашка
+    # тягне живий стан клієнта й шле кожну дію одразу.
+    def _handle_remote_roles(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            payload = store.roles_payload()
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, **payload})
+
+    def _handle_roles_action_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        op = payload.get("op")
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            result = {"ok": True}
+            if op == "set_buttons":
+                ids = payload.get("button_ids")
+                if not isinstance(ids, list) or not all(isinstance(v, int) and not isinstance(v, bool) for v in ids):
+                    raise ValueError("Некорректные данные.")
+                result["count"] = store.set_role_buttons(payload.get("role_key"), ids)
+            elif op == "add":
+                result["key"] = store.add_role(payload.get("label"), payload.get("color_bg"))
+            elif op == "update":
+                store.update_role(payload.get("role_key"), label=payload.get("label"), color_bg=payload.get("color_bg"))
+            elif op == "delete":
+                store.delete_role(payload.get("role_key"), payload.get("move_users_to"))
+            else:
+                raise ValueError("Неизвестная операция.")
+            result.update(store.roles_payload())
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        finally:
+            store.close()
+        handler = getattr(self, "handle_roles_changed", None)
+        if handler is not None:
+            try:
+                handler()
+            except Exception:
+                pass
+        self._send_json(200, result)
+
+    # Журнал операцій для домашки (2026-09-06): та сама сторінка, що й у
+    # формі адміністратора/клієнті (warehouse_data.journal_page), фільтри
+    # їдуть JSON-рядком у query.
+    def _handle_remote_journal(self, query):
+        if not self._remote_control_token_valid(self._remote_control_query_token(query)):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        try:
+            filters = json.loads(query.get("filters") or "{}")
+        except ValueError:
+            filters = {}
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            page = journal_page(store, filters if isinstance(filters, dict) else {})
+            # Кольори операцій клієнта - домашка малює журнал тими самими.
+            if self.get_journal_colors is not None:
+                try:
+                    page["colors"] = self.get_journal_colors()
+                except Exception:
+                    pass
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, **page})
+
+    # Видалення запису журналу - лише з домашки (рішення користувача);
+    # залишок не чіпає, слід лишається в технічному журналі клієнта.
+    def _handle_journal_delete_request(self, payload):
+        if not self._remote_control_token_valid(payload.get("token")):
+            self._send_json(401, {"ok": False, "error": "Недействительный токен."})
+            return
+        if self.db_path is None:
+            self._send_json(503, {"ok": False, "error": "База данных недоступна."})
+            return
+        movement_id = payload.get("id")
+        if not isinstance(movement_id, int) or isinstance(movement_id, bool):
+            self._send_json(400, {"ok": False, "error": "Некорректные данные."})
+            return
+        store = ExcelSqliteStore(self.db_path)
+        try:
+            details = store.delete_journal_movement(movement_id, actor=payload.get("actor") or "домашняя программа")
+        except ValueError as exc:
+            self._send_json(404, {"ok": False, "error": str(exc)})
+            return
+        finally:
+            store.close()
+        self._send_json(200, {"ok": True, "deleted": details})
 
     def _handle_remote_action_log(self, query):
         if not self._remote_control_token_valid(self._remote_control_query_token(query)):
@@ -895,7 +1056,10 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             store = ExcelSqliteStore(self.db_path)
             try:
                 role = perm.normalize_role(store.get_user_role(telegram_id))
-                fresh_ctx = self.get_fresh_context(store, role == perm.ADMIN)
+                # telegram_id передається далі НАВМИСНО: без нього
+                # контекст повертав can_refresh=False, і форма ховала кнопку
+                # "Обновить" одразу після першого ж оновлення.
+                fresh_ctx = self.get_fresh_context(store, role == perm.ADMIN, telegram_id)
             finally:
                 store.close()
             if fresh_ctx is None:
@@ -949,100 +1113,29 @@ class _QuietRequestHandler(SimpleHTTPRequestHandler):
             finally:
                 store.close()
             return
-        if action not in ("save", "delete_template", "delete_recent", "list"):
-            self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
-            return
-        token = self.get_token() if self.get_token else None
-        telegram_id, reason = _validate_init_data(payload.get("init_data"), token)
-        if telegram_id is None:
-            self._send_json(403, {"ok": False, "error": reason or "Не удалось подтвердить пользователя Telegram."})
-            return
-        if self.db_path is None:
-            self._send_json(500, {"ok": False, "error": "База данных недоступна."})
-            return
-        store = ExcelSqliteStore(self.db_path)
-        try:
-            role = perm.normalize_role(store.get_user_role(telegram_id))
-
-            if action == "save":
-                kind = payload.get("kind")
-                required_permission = _PERMISSION_BY_KIND.get(kind)
-                operation_id = payload.get("category_operation_id")
-                operation = store.get_operation(operation_id) if operation_id is not None else None
-                # antiseptic (окрема форма антисептирования) переиспользує
-                # РЕАЛЬНІ sale-категорії (Доска AD/KD) - шаблон лише позначає
-                # їх ІНШИМ "кошиком" (kind="antiseptic"), сама категорія в
-                # bot_operations так і лишається kind="sale". Тому тут окремо
-                # приймаємо operation[2]=="sale" за kind=="antiseptic".
-                operation_kind_matches = operation is not None and (
-                    operation[2] == kind or (kind == "antiseptic" and operation[2] == "sale")
-                )
-                if not operation_kind_matches or required_permission is None:
-                    # Реальна категорія (bot_operations.kind) вирішує право
-                    # доступу, а не те, що клієнт заявив у payload - інакше
-                    # хтось із лише income-правом міг би позначити payload
-                    # як kind="income" і зберегти шаблон для sale-категорії.
-                    self._send_json(400, {"ok": False, "error": "Не выбрана категория."})
-                    return
-                if not perm.has_permission(role, required_permission):
-                    self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                    return
-                store.add_operation_template(
-                    kind, operation_id,
-                    breed=payload.get("breed"), thickness=payload.get("thickness"),
-                    width=payload.get("width"), length=payload.get("length"),
-                    client=payload.get("client"), address=payload.get("address"),
-                    payment_method=payload.get("payment_method"),
-                )
-                kind_for_response = kind
-            elif action == "list":
-                # Задача користувача (шаблони): панель раніше вбудовувалась
-                # у сам web_app-URL - реальний баг, який зламав УСІ
-                # sale/income/writeoff-відповіді (URL переріс ліміт розміру
-                # Telegram reply_markup, той самий клас бага, що й Крок
-                # "мега-форма занадто довга кнопка"). Тепер webapp/app.js
-                # підвантажує шаблони окремим запитом ПІСЛЯ відкриття форми,
-                # а не отримує їх одразу в тілі кнопки.
-                kind = payload.get("kind")
-                required_permission = _PERMISSION_BY_KIND.get(kind)
-                if required_permission is None:
-                    self._send_json(400, {"ok": False, "error": "Неизвестный тип операции."})
-                    return
-                if not perm.has_permission(role, required_permission):
-                    self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                    return
-                kind_for_response = kind
-            elif action == "delete_template":
-                template_id = payload.get("template_id")
-                row = store.get_operation_template(template_id) if template_id is not None else None
-                if row is not None:
-                    _row_id, row_kind, _category_operation_id = row
-                    required_permission = _PERMISSION_BY_KIND.get(row_kind)
-                    if required_permission is not None and not perm.has_permission(role, required_permission):
-                        self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                        return
-                    store.delete_operation_template(template_id)
-                kind_for_response = row[1] if row is not None else payload.get("kind")
-            else:
-                recent_id = payload.get("recent_id")
-                row = store.get_operation_recent_use(recent_id) if recent_id is not None else None
-                if row is not None:
-                    _row_id, row_kind, _category_operation_id = row
-                    required_permission = _PERMISSION_BY_KIND.get(row_kind)
-                    if required_permission is not None and not perm.has_permission(role, required_permission):
-                        self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
-                        return
-                    store.delete_operation_recent_use(recent_id)
-                kind_for_response = row[1] if row is not None else payload.get("kind")
-
-            if kind_for_response not in _PERMISSION_BY_KIND:
-                self._send_json(400, {"ok": False, "error": "Неизвестный тип операции."})
+        if action == "journal":
+            # Адмін-форма (2026-09-06): сторінка журналу з фільтрами; лише
+            # адміністратор, по токену форми (як і поріг низького залишку).
+            ctx = _get_context(payload.get("token"))
+            telegram_id = ctx.get("telegram_id") if ctx else None
+            if telegram_id is None:
+                self._send_json(404, {"ok": False, "error": "Ссылка на форму устарела. Откройте её заново из чата."})
                 return
-            templates = operation_template_entries(store, store.list_operation_templates(kind_for_response), "template")
-            recent = operation_template_entries(store, store.recent_operation_uses(kind_for_response), "recent")
-            self._send_json(200, {"ok": True, "templates": templates, "recent": recent})
-        finally:
-            store.close()
+            if self.db_path is None or self.get_journal_page is None:
+                self._send_json(503, {"ok": False, "error": "Бот сейчас не запущен - журнал недоступен."})
+                return
+            store = ExcelSqliteStore(self.db_path)
+            try:
+                role = perm.normalize_role(store.get_user_role(telegram_id))
+                if role != perm.ADMIN:
+                    self._send_json(403, {"ok": False, "error": "Нет доступа к этому действию."})
+                    return
+                page = self.get_journal_page(store, payload.get("filters") or {})
+            finally:
+                store.close()
+            self._send_json(200, {"ok": True, "entries": page.get("entries", []), "has_more": bool(page.get("has_more"))})
+            return
+        self._send_json(400, {"ok": False, "error": "Неизвестное действие."})
 
     def _send_json(self, status, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -1075,22 +1168,27 @@ class WebappServer:
     # просто викликаний повторно на живому TelegramBotWorker (None, якщо
     # бот зараз не запущений).
     def __init__(
-        self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None,
+        self, port=None, directory=None, db_path=None, get_token=None, get_fresh_context=None, get_journal_page=None,
+        get_journal_colors=None,
         get_remote_control_token=None, get_remote_status=None, handle_remote_command=None,
-        handle_home_heartbeat=None, handle_set_role=None,
-        get_form_content_enabled=None,
+        handle_home_heartbeat=None, handle_set_role=None, handle_roles_changed=None,
+        get_form_content_enabled=None, get_onedrive_email=None,
     ):
         self.port = port or paths.WEBAPP_LOCAL_PORT
         self.directory = str(directory or paths.WEBAPP_DIR)
         self.db_path = db_path
         self.get_token = get_token
         self.get_fresh_context = get_fresh_context
+        self.get_journal_page = get_journal_page
+        self.get_journal_colors = get_journal_colors
         self.get_remote_control_token = get_remote_control_token
         self.get_remote_status = get_remote_status
         self.handle_remote_command = handle_remote_command
         self.handle_home_heartbeat = handle_home_heartbeat
         self.handle_set_role = handle_set_role
+        self.handle_roles_changed = handle_roles_changed
         self.get_form_content_enabled = get_form_content_enabled
+        self.get_onedrive_email = get_onedrive_email
         self._httpd = None
         self._thread = None
 
@@ -1099,10 +1197,14 @@ class WebappServer:
             return
         handler = partial(
             _QuietRequestHandler, directory=self.directory, db_path=self.db_path, get_token=self.get_token,
-            get_fresh_context=self.get_fresh_context, get_remote_control_token=self.get_remote_control_token,
+            get_fresh_context=self.get_fresh_context, get_journal_page=self.get_journal_page,
+            get_journal_colors=self.get_journal_colors,
+            get_remote_control_token=self.get_remote_control_token,
             get_remote_status=self.get_remote_status, handle_remote_command=self.handle_remote_command,
             handle_home_heartbeat=self.handle_home_heartbeat,
-            handle_set_role=self.handle_set_role, get_form_content_enabled=self.get_form_content_enabled,
+            handle_set_role=self.handle_set_role, handle_roles_changed=self.handle_roles_changed,
+            get_form_content_enabled=self.get_form_content_enabled,
+            get_onedrive_email=self.get_onedrive_email,
         )
         self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)

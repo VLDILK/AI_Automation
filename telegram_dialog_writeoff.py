@@ -18,6 +18,7 @@ telegram_dialog_antiseptic.py: власний, повністю ізольова
 import permissions as perm
 from utils import _display_bot_number, _normalize_phrase
 from warehouse_data import (
+    shortage_line,
     BOT_MESSAGE_DEFAULTS,
     apply_writeoff_operation,
     display_product_name,
@@ -52,11 +53,7 @@ class WriteoffDialogMixin:
             return denied
         web_app = self._writeoff_all_in_one_webapp_button(store, resume_payload=resume_payload)
         if web_app is None:
-            return self._with_main_menu(
-                "Списание одной формой сейчас недоступно (форма не подключена). "
-                "Используйте обычное «СПИСАНИЕ».",
-                store,
-            )
+            return self._form_not_ready_reply(store, "СПИСАНИЕ (форма)")
         store.save_pending_operation(
             context["chat_id"], context["user_id"], "stock_writeoff", "writeoff_all_in_one", {},
         )
@@ -135,6 +132,15 @@ class WriteoffDialogMixin:
         if issue["kind"] != "quantity" or issue.get("balance_measure") not in (None, 0):
             available_parts.append(f"{_display_bot_number(issue['balance_measure'])} {issue['measure_unit']}")
         lines.append(f"Доступно: {' / '.join(available_parts)}")
+        # ТЗ п.10: показати не лише скільки треба й скільки є, а й скільки
+        # саме не вистачає.
+        shortage = shortage_line(
+            issue["requested"],
+            issue["balance_qty"] if issue["kind"] == "quantity" else issue["balance_measure"],
+            issue["requested_unit"],
+        )
+        if shortage:
+            lines.append(shortage)
         return "\n".join(lines)
 
     def _writeoff_stock_issue_reply(self, store, context, payload, issue):
@@ -154,25 +160,49 @@ class WriteoffDialogMixin:
     # Мірне повторення _income_preview (кожен рядок за своїм виміром) -
     # _recognized_data_lines НЕ підходить тут: вона будує ПРОМІЖНИЙ
     # чек-лист-текст (без кількості/виміру за рядком), не фінальне прев'ю.
-    def _writeoff_preview(self, payload):
-        lines = [
-            "Списание:",
-            f"Товар: {display_product_name(payload)}",
-            f"Порода: {payload.get('breed')}",
-            "",
-        ]
-        for index, item in enumerate(payload["rows"], start=1):
-            measure_key = self._row_measure_kind(payload, item)
+    def _writeoff_row_lines(self, position, indent="", numbered=True):
+        lines = []
+        for index, item in enumerate(position.get("rows") or [], start=1):
+            measure_key = self._row_measure_kind(position, item)
             if measure_key is None:
-                lines.append(f"{index}. {income_item_size(item)} — {_display_bot_number(item['quantity'])} шт")
+                lines.append(f"{indent}{(str(index) + '. ') if numbered else ''}{income_item_size(item)} — {_display_bot_number(item['quantity'])} шт")
                 continue
             measure_value = item.get(measure_key)
             measure_unit = self._MEASURE_KIND_UNIT[measure_key]
             lines.append(
-                f"{index}. {income_item_size(item)} — "
+                f"{indent}{(str(index) + '. ') if numbered else ''}{income_item_size(item)} — "
                 f"{_display_bot_number(item['quantity'])} шт — "
                 f"{_display_bot_number(measure_value)} {measure_unit}"
             )
+        return lines
+
+    def _writeoff_preview(self, payload):
+        completed = payload.get("completed_positions") or []
+        if completed:
+            # Кілька позицій з форми (2026-09-06): нумеровані позиції, як у
+            # підтвердженні продажу/приходу.
+            positions = list(completed) + [{
+                "product": payload.get("product"), "condition": payload.get("condition"),
+                "breed": payload.get("breed"), "rows": payload.get("rows") or [],
+            }]
+            lines = ["Списание:", ""]
+            for number, position in enumerate(positions, start=1):
+                lines.append(f"{number}. {self._position_title(position)}")
+                lines.extend(self._writeoff_row_lines(position, indent="   ", numbered=False))
+                lines.append("")
+            lines.pop()
+        else:
+            lines = [
+                "Списание:",
+                f"Товар: {display_product_name(payload)}",
+                f"Порода: {payload.get('breed')}",
+            ]
+            # Одна позиція - заголовка «Товар / Порода / Тип» немає, тож тип
+            # пишеться окремим рядком (рішення користувача 2026-09-09).
+            if str(payload.get("condition") or "").strip():
+                lines.append(f"Тип: {payload['condition']}")
+            lines.append("")
+            lines.extend(self._writeoff_row_lines(payload))
         if payload.get("comment"):
             lines.append("")
             lines.append(f"Причина: {payload['comment']}")

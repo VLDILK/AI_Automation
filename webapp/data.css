@@ -212,6 +212,98 @@ html, body {
   overflow-x: auto;
 }
 
+/* Вимога користувача (2026-08-21): спершу "вкладка склад без скролу...
+   додай скрол(колесиком\затисканням лінії)", далі - "ось це меню має
+   також бути закріпленим зверху у всіх вкладках. тобто рухатись має лише
+   таблиця з даними".
+
+   Тому прокрутка дістається не сторінці, а САМЕ таблиці: сторінка займає
+   рівно висоту вікна й не гортається взагалі, а всередині колонкою стоять
+   заголовок, вкладки, фільтри й таблиця. Розтягується лише таблиця - у неї
+   й з'являється смуга. Усе, що вище, лишається на місці на будь-якій
+   вкладці.
+
+   min-height: 0 у кожної ланки обов'язковий: без нього flex-елемент не
+   дозволяє собі бути НИЖЧИМ за власний вміст, і замість прокрутки таблиці
+   виростає вся сторінка - та сама пастка, через яку "overflow не працює". */
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.data-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tab-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tab-panel {
+  /* display теж ТУТ, а не лише в switchTab: найперша вкладка показується
+     без жодного перемикання, тож без цього рядка вона лишалась block - і
+     таблиця всередині не розтягувалась, а просто вилазила за межі. */
+  display: flex;
+  flex-direction: column;
+  /* flex: 1 обов'язковий, а не лише min-height: без нього панель тягнеться
+     тільки тоді, коли вміст ПЕРЕРІС контейнер (спрацьовує стиснення), а на
+     вкладці з кількома рядками зіщулюється по вмісту - і таблиця отримує
+     30 точок висоти замість усієї вільної області. */
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0;
+}
+
+/* Усе, крім таблиці, має зберігати свою висоту. За замовчуванням
+   flex-shrink дорівнює 1, тож рядок чипів періоду ("Сегодня/Вчера/...")
+   зіщулювався й обрізався навпіл, щойно таблиця не вміщалась - саме це
+   й сталось на "Продажах" після переходу на висоту вікна. */
+.tab-panel > .data-chips,
+.tab-panel > .size-filter-badge,
+.tab-panel > .data-empty-hint,
+.tab-panel > .data-empty,
+.tab-panel > .data-totals,
+.tab-panel > .threshold-edit {
+  flex: 0 0 auto;
+}
+
+/* Гортається рівно один елемент на вкладці - область таблиці. */
+.tab-panel > .table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Заголовок колонок - частина таблиці, але не даних, тож він лишається
+   на місці. Непрозорий фон обов'язковий: без нього рядки просвічували б
+   крізь нього під час гортання. */
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--custom-page-bg, var(--tg-bg));
+  z-index: 2;
+}
+
+/* Рядок підсумку тримається низу області, скільки б рядків не було. */
+.data-table tfoot td {
+  position: sticky;
+  bottom: 0;
+  background: var(--tg-secondary-bg);
+  border-top: 2px solid var(--field-border);
+  font-weight: 600;
+  z-index: 2;
+}
+
 .data-totals {
   margin-top: 10px;
   font-size: 13px;
@@ -494,6 +586,58 @@ html, body {
   margin: 4px 0 0;
 }
 
+/* Вибір кількох значень (2026-09-06): список → «Добавить» → рядки з ✕ */
+.choice-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-size: 14px;
+}
+
+.choice-add {
+  margin-top: 8px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--field-border);
+  background: transparent;
+  color: var(--tg-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.choice-rows {
+  margin-top: 8px;
+}
+
+.choice-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid var(--field-border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.choice-remove {
+  color: var(--error);
+  font-weight: 700;
+  cursor: pointer;
+  padding-left: 12px;
+}
+
+.choice-hint {
+  color: var(--tg-hint);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
 .value-bulk-row {
   display: flex;
   gap: 16px;
@@ -542,4 +686,53 @@ html, body {
   background: var(--field-border);
   color: var(--tg-hint);
   cursor: default;
+}
+
+
+/* Вкладка «Движение» (ТЗ п.8.4/8.5): по картці на категорію - залишок на
+   початок, рухи за період і залишок на кінець. */
+.movement-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.movement-card {
+  border: 1px solid var(--field-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--tg-bg);
+}
+
+.movement-card-head {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.movement-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--field-border);
+  font-size: 13px;
+}
+
+.movement-line:last-child {
+  border-bottom: none;
+}
+
+.movement-line.strong {
+  font-weight: 600;
+}
+
+.movement-plus {
+  color: #2e9e5b;
+}
+
+.movement-minus {
+  color: #d9534f;
 }

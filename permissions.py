@@ -18,13 +18,14 @@ ACCOUNTING = "accounting"
 # поки адміністратор сам не призначить реальну роль у GUI "Персонал".
 GUEST = "guest"
 
-ROLES = (ADMIN, WAREHOUSE, SALES, ACCOUNTING, GUEST)
+# Рішення користувача (2026-09-06): «Продажи» злилась зі «Склад»; свої
+# ролі живуть у warehouse_data.bot_roles, тут - лише вбудовані ключі.
+ROLES = (ADMIN, WAREHOUSE, ACCOUNTING, GUEST)
 
 # Назви ролей для показу користувачу (кнопки вибору ролі в GUI, повідомлення).
 ROLE_LABELS = {
     ADMIN: "Адміністратор",
     WAREHOUSE: "Склад",
-    SALES: "Продажі",
     ACCOUNTING: "Бухгалтерія",
     GUEST: "Гість",
 }
@@ -34,7 +35,6 @@ ROLE_LABELS = {
 ROLE_LABELS_RU = {
     ADMIN: "Администратор",
     WAREHOUSE: "Склад",
-    SALES: "Продажи",
     ACCOUNTING: "Бухгалтерия",
     GUEST: "Гость",
 }
@@ -124,8 +124,7 @@ CAPABILITY_LABELS = {
 # до всього автоматично, щоб "повний доступ" не могло розійтися зі списком
 # нижче, якщо пізніше додасться нова дія.
 ROLE_PERMISSIONS = {
-    WAREHOUSE: {INCOME, SHIPMENT, WRITEOFF, WAREHOUSE_VIEW},
-    SALES: {SALE_CREATE, SALE_VIEW, WAREHOUSE_VIEW, CLIENTS},
+    WAREHOUSE: {INCOME, SHIPMENT, WRITEOFF, WAREHOUSE_VIEW, SALE_CREATE, SALE_VIEW, CLIENTS},
     ACCOUNTING: {SALE_VIEW, PAYMENTS, DOCUMENTS, REPORTS},
     # Явно порожній набір (не покладаємось на .get(..., frozenset()) нижче) —
     # новачок не має жодних прав, поки адмін не призначить реальну роль.
@@ -143,9 +142,9 @@ _LEGACY_ROLE_ALIASES = {
     "склад": WAREHOUSE,
     "складской": WAREHOUSE,
     "складський": WAREHOUSE,
-    "sales": SALES,
-    "продажи": SALES,
-    "продажі": SALES,
+    "sales": WAREHOUSE,
+    "продажи": WAREHOUSE,
+    "продажі": WAREHOUSE,
     "accounting": ACCOUNTING,
     "бухгалтерия": ACCOUNTING,
     "бухгалтерія": ACCOUNTING,
@@ -156,16 +155,50 @@ _LEGACY_ROLE_ALIASES = {
 }
 
 
+# Які права дає кнопка бота (за її action_code). Права ролі = права всіх її
+# дозволених кнопок (warehouse_data.role_allowed_action_codes); ROLE_PERMISSIONS
+# вище лишається запасним варіантом, коли сховища під рукою нема.
+ACTION_CAPABILITIES = {
+    "start_income": {INCOME},
+    "start_income_form": {INCOME},
+    "start_sale": {SALE_CREATE, CLIENTS},
+    "start_sale_form": {SALE_CREATE, CLIENTS},
+    "start_antiseptic_form": {SALE_CREATE},
+    "start_writeoff": {WRITEOFF},
+    "start_writeoff_form": {WRITEOFF},
+    "start_exchange_form": {WRITEOFF, INCOME},
+    "start_stock_report": {WAREHOUSE_VIEW},
+    "start_low_stock_report": {WAREHOUSE_VIEW},
+    "start_data_browser_form": {WAREHOUSE_VIEW, SALE_VIEW},
+    "start_sales_report": {SALE_VIEW, REPORTS},
+    "start_sales_by_client_report": {SALE_VIEW, CLIENTS, REPORTS},
+    "start_antiseptic_report": {SALE_VIEW, REPORTS},
+}
+
+
+def capabilities_for_actions(action_codes):
+    result = set()
+    for code in action_codes or ():
+        result |= ACTION_CAPABILITIES.get(code, set())
+    return result
+
+
 def normalize_role(role):
+    """Старі написання → вбудований ключ; свій ключ (role7) - як є; порожньо → None."""
     if not role:
         return None
-    return _LEGACY_ROLE_ALIASES.get(_normalize_phrase(role))
+    phrase = _normalize_phrase(role)
+    if not phrase:
+        return None
+    return _LEGACY_ROLE_ALIASES.get(phrase, phrase)
 
 
-def has_permission(role, capability):
+def has_permission(role, capability, allowed_actions=None):
     canonical = normalize_role(role)
     if canonical == ADMIN:
         return True
+    if allowed_actions is not None:
+        return capability in capabilities_for_actions(allowed_actions)
     return capability in ROLE_PERMISSIONS.get(canonical, frozenset())
 
 
